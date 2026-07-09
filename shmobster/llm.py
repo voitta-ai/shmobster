@@ -1,8 +1,8 @@
-"""Multi-vendor waterfall via LiteLLM Router.
+"""Multi-vendor waterfall via LiteLLM Router, built from config.WATERFALL.
 
-Iter 0 keeps it minimal: ordered fallback (primary -> fb0 -> fb1 -> ...) with a
-cooldown so a rate-limited/broken vendor is skipped for a window instead of being
-re-hit every call. Observability + dead-fallback surfacing is Iter 3 (#5)."""
+Iter 0: ordered failover (primary -> fb0 -> fb1 -> ...) with a cooldown so a
+rate-limited/broken vendor is skipped for a window instead of re-hit every call.
+Per-vendor observability + dead-fallback surfacing is Iter 3 (#5)."""
 from litellm import Router
 
 from . import config
@@ -10,12 +10,22 @@ from . import config
 _ROUTER = None
 
 
+def _deployment(model_name, vendor):
+    params = {"model": vendor["model"], "api_key": vendor.get("api_key")}
+    if vendor.get("api_base"):
+        params["api_base"] = vendor["api_base"]
+    retval = {"model_name": model_name, "litellm_params": params}
+    return retval
+
+
 def _build():
-    models = config.MODELS
-    model_list = [{"model_name": "primary", "litellm_params": {"model": models[0]}}]
-    rest = models[1:]
-    for i, m in enumerate(rest):
-        model_list.append({"model_name": f"fb{i}", "litellm_params": {"model": m}})
+    wf = config.WATERFALL
+    if not wf:
+        raise SystemExit("config waterfall is empty -- add at least one vendor")
+    model_list = [_deployment("primary", wf[0])]
+    rest = wf[1:]
+    for i, vendor in enumerate(rest):
+        model_list.append(_deployment(f"fb{i}", vendor))
     fallbacks = [{"primary": [f"fb{i}" for i in range(len(rest))]}] if rest else []
     retval = Router(
         model_list=model_list,

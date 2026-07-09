@@ -1,0 +1,29 @@
+{
+  "slack": {
+    "bot_token": "xoxb-REPLACE",
+    "app_token": "xapp-REPLACE",
+    "channels": ["C0ACJGUGB0A"]
+  },
+  "agent": {
+    "label": "shmobster",
+    "workspace": "./workspace"
+  },
+  "waterfall": [
+    {
+      "name": "anthropic",
+      "model": "anthropic/claude-sonnet-5",
+      "api_key": "sk-ant-REPLACE"
+    },
+    {
+      "name": "openrouter",
+      "model": "openrouter/openai/gpt-4o",
+      "api_key": "sk-or-REPLACE"
+    },
+    {
+      "name": "nvidia",
+      "model": "nvidia_nim/meta/llama-3.1-405b-instruct",
+      "api_key": "nvapi-REPLACE",
+      "api_base": "https://integrate.api.nvidia.com/v1"
+    }
+  ]
+}

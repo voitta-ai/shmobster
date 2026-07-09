@@ -1,21 +1,23 @@
 """Runnable Iter 0 check -- no Slack, no network, no API keys.
 
-Proves the spine loads and the handler returns a labeled reply, with the LLM
-stubbed. Run from repo root:  python selfcheck.py
+Loads the example config, proves the spine loads and the handler returns a
+labeled reply with the LLM stubbed. Run from repo root:  python selfcheck.py
 """
 import os
 
-os.environ.setdefault("SHMOBSTER_WORKSPACE", "./workspace")
-os.environ.setdefault("SHMOBSTER_AGENT_LABEL", "shmobster")
+os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import handler, llm, spine  # noqa: E402
+from shmobster import config, handler, llm, spine  # noqa: E402
 
-# 1) spine loads the bundled SOUL.md
+# 0) config parsed: 3-vendor waterfall, ordered
+assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
+
+# 1) spine loads the bundled SOUL.md (workspace path comes from config)
 system_prompt = spine.load_system_prompt()
 assert "Shmobster" in system_prompt, "spine should load SOUL.md content"
 
-# 2) handler labels the reply and passes text through to the LLM
-llm.reply = lambda messages: "pong"  # stub: no network/keys needed
+# 2) handler labels the reply and passes text through to the (stubbed) LLM
+llm.reply = lambda messages: "pong"
 out = handler.handle("ping")
 assert out.startswith(":robot_face: [agent: shmobster]"), out
 assert out.endswith("pong"), out

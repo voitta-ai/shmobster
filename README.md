@@ -38,3 +38,27 @@ Generalize only when someone else wants in. Not before.
 
 See issues. 0 skeleton -> 1 exec-gate (YOLT) -> 2 per-channel policy ->
 3 waterfall hardening -> 4 multi-user.
+
+## Config & run
+
+One JSON config, no `.env`. Copy the example and fill it in:
+
+    cp examples/shmobster-config-example.json shmobster-config.json
+    chmod 600 shmobster-config.json   # holds secrets; gitignored
+
+`shmobster-config.json` fields:
+
+- `slack.bot_token` / `slack.app_token` -- from a Slack app (see
+  `deploy/slack-app-manifest.yaml`) or the existing @Shmobster bot.
+- `slack.channels` -- channel IDs Shmobster responds in (Iter 0: just m-and-a).
+- `agent.workspace` -- path to the `.md` spine (point at an openclaw-workspace
+  clone, or use the bundled `./workspace`).
+- `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
+  `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
+  endpoints like openrouter / nvidia).
+
+Run:
+
+    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    .venv/bin/python selfcheck.py            # offline sanity check
+    .venv/bin/python -m shmobster.slack_app  # start the agent

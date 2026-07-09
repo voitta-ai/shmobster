@@ -27,7 +27,10 @@ _agent = _cfg.get("agent", {})
 
 SLACK_BOT_TOKEN = _slack.get("bot_token", "")
 SLACK_APP_TOKEN = _slack.get("app_token", "")
-CHANNELS = set(_slack.get("channels", []))
+# channels: list of {name, id}. name is for humans; id is what Slack matches.
+_channels = _slack.get("channels", [])
+CHANNELS = {c["id"] for c in _channels}
+CHANNEL_NAMES = {c["id"]: c.get("name", c["id"]) for c in _channels}
 
 AGENT_LABEL = _agent.get("label", "shmobster")
 WORKSPACE = _agent.get("workspace", "./workspace")

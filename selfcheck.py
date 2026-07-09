@@ -9,8 +9,10 @@ os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
 from shmobster import config, handler, llm, spine  # noqa: E402
 
-# 0) config parsed: 3-vendor waterfall, ordered
+# 0) config parsed: 3-vendor waterfall (ordered) + channels as {name, id}
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
+assert config.CHANNELS == {"C0ACJGUGB0A"}, config.CHANNELS
+assert config.CHANNEL_NAMES["C0ACJGUGB0A"] == "m-and-a", config.CHANNEL_NAMES
 
 # 1) spine loads the bundled SOUL.md (workspace path comes from config)
 system_prompt = spine.load_system_prompt()

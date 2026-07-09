@@ -50,7 +50,8 @@ One JSON config, no `.env`. Copy the example and fill it in:
 
 - `slack.bot_token` / `slack.app_token` -- from a Slack app (see
   `deploy/slack-app-manifest.yaml`) or the existing @Shmobster bot.
-- `slack.channels` -- channel IDs Shmobster responds in (Iter 0: just m-and-a).
+- `slack.channels` -- list of `{name, id}` channels Shmobster responds in
+  (Iter 0: just m-and-a). `name` is for humans; `id` is what Slack matches.
 - `agent.workspace` -- path to the `.md` spine (point at an openclaw-workspace
   clone, or use the bundled `./workspace`).
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,

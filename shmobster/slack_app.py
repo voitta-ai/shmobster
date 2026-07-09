@@ -28,6 +28,13 @@ def on_mention(event, say, logger):
     say(text=reply, thread_ts=thread_ts)
 
 
+@app.event("message")
+def _ignore_message(event):
+    # Iter 0 answers mentions only. Ack other message events so Bolt doesn't
+    # log a 404 "unhandled request" for every message in the channel.
+    return
+
+
 def main():
     SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
 

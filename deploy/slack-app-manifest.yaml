@@ -1,0 +1,31 @@
+# Create the Shmobster Slack app from this manifest:
+#   api.slack.com/apps -> Create New App -> From an app manifest
+#   -> pick the Method and apparatus workspace -> paste this.
+# Then:
+#   - Install to workspace, copy the Bot User OAuth Token (xoxb-) -> SLACK_BOT_TOKEN
+#   - Basic Information -> App-Level Tokens -> Generate, scope connections:write
+#       -> copy (xapp-) -> SLACK_APP_TOKEN
+#   - Invite the bot into the target channel: /invite @Shmobster
+display_information:
+  name: Shmobster
+  description: Standalone multi-vendor Slack agent (bottom-up).
+features:
+  bot_user:
+    display_name: Shmobster
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+settings:
+  socket_mode_enabled: true
+  event_subscriptions:
+    bot_events:
+      - app_mention
+  org_deploy_enabled: false
+  token_rotation_enabled: false

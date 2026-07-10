@@ -27,5 +27,10 @@
       "api_key": "nvapi-REPLACE",
       "api_base": "https://integrate.api.nvidia.com/v1"
     }
-  ]
+  ],
+  "exec": {
+    "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
+    "cwd": "./workspace",
+    "timeout_sec": 30
+  }
 }

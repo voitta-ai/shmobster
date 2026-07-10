@@ -1,33 +1,70 @@
-"""Runnable Iter 0 check -- no Slack, no network, no API keys.
+"""Runnable Iter 1 check -- no Slack, no network, no API keys.
 
-Loads the example config, proves the spine loads and the handler returns a
-labeled reply with the LLM stubbed. Run from repo root:  python selfcheck.py
+Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
+handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
 import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import config, handler, llm, spine  # noqa: E402
+from shmobster import config, handler, llm, spine, tools, yolt_gate  # noqa: E402
 
-# 0) config parsed: 3-vendor waterfall (ordered) + channels as {name, id}
+# 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
 assert config.CHANNELS == {"C0ACJGUGB0A"}, config.CHANNELS
-assert config.CHANNEL_NAMES["C0ACJGUGB0A"] == "m-and-a", config.CHANNEL_NAMES
+assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER
 
-# 1) spine loads the bundled SOUL.md (workspace path comes from config)
-system_prompt = spine.load_system_prompt()
-assert "Shmobster" in system_prompt, "spine should load SOUL.md content"
+# 1) spine loads bundled SOUL.md
+assert "Shmobster" in spine.load_system_prompt()
 
-# 2) handler labels the reply and passes text through to the (stubbed) LLM
-llm.reply = lambda messages: "pong"
-out = handler.handle("ping")
-assert out.startswith(":robot_face: [agent: shmobster]"), out
-assert out.endswith("pong"), out
+# 2) tools.run_shell honors the YOLT verdict (yolt stubbed -> no subprocess)
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+out = tools.run_shell("echo selfcheck_marker_123")
+assert "selfcheck_marker_123" in out, out
+yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+blocked = tools.run_shell("rm -rf /tmp/x")
+assert blocked.startswith("NOT RUN"), blocked
 
-# 3) the user's text actually reaches the model
-seen = {}
-llm.reply = lambda messages: seen.setdefault("text", messages[-1]["content"])
-handler.handle("hello there")
-assert seen["text"] == "hello there", seen
+
+# 3) handler tool-loop: model asks to run a command, then answers
+class _FakeFn:
+    def __init__(self, name, args):
+        self.name = name
+        self.arguments = args
+
+
+class _FakeCall:
+    def __init__(self, cid, name, args):
+        self.id = cid
+        self.function = _FakeFn(name, args)
+
+
+class _FakeMsg:
+    def __init__(self, content=None, tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls
+
+    def model_dump(self):
+        return {"role": "assistant", "content": self.content}
+
+
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+_script = [
+    _FakeMsg(tool_calls=[_FakeCall("c1", "run_shell", '{"command": "echo hi_from_tool"}')]),
+    _FakeMsg(content="ran it: hi_from_tool"),
+]
+_step = {"i": 0}
+
+
+def _fake_complete(messages, tools=None):
+    m = _script[_step["i"]]
+    _step["i"] += 1
+    return m
+
+
+llm.complete = _fake_complete
+reply = handler.handle("run echo")
+assert reply.startswith(":robot_face: [agent: shmobster]"), reply
+assert "ran it: hi_from_tool" in reply, reply
 
 print("selfcheck OK")

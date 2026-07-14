@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  SAMPLE launchd plist. Copy to deploy/ai.shmobster.plist (gitignored) and
+  replace every /Users/CHANGE_ME/path/to/shmobster with the absolute path to
+  your checkout. Then: deploy/service.sh install
+
+  ThrottleInterval=10 is the anti-crash-loop guard (the OpenClaw gateway
+  respawned every ~1.7s with no throttle and bloated its log to 1.8GB).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.shmobster.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/CHANGE_ME/path/to/shmobster/.venv/bin/python</string>
+    <string>-m</string>
+    <string>shmobster.slack_app</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/CHANGE_ME/path/to/shmobster</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGE_ME/path/to/shmobster/logs/shmobster.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGE_ME/path/to/shmobster/logs/shmobster.err.log</string>
+</dict>
+</plist>

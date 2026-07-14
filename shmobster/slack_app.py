@@ -14,14 +14,45 @@ logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
 
 
+_MAX_THREAD_MSGS = 25  # ponytail: cap history; raise if threads need deeper recall
+
+
+def _thread_context(client, channel, thread_ts, cur_ts):
+    """Flatten prior thread messages into a labeled transcript (Iter 11 / #11).
+
+    Flattened (not native assistant turns) so multi-user threads with consecutive
+    same-role messages don't trip vendor role-alternation rules. Long-term memory
+    (workspace MEMORY.md) is a separate, later concern.
+    """
+    if not thread_ts:
+        return None
+    try:
+        resp = client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=_MAX_THREAD_MSGS
+        )
+    except Exception:
+        return None
+    lines = []
+    for m in resp.get("messages", []):
+        if m.get("ts") == cur_ts:
+            continue  # the current mention -- handler adds it as the user turn
+        who = config.AGENT_LABEL if m.get("bot_id") else "user"
+        text = (m.get("text") or "").strip()
+        if text:
+            lines.append(f"[{who}] {text}")
+    retval = "\n".join(lines) or None
+    return retval
+
+
 @app.event("app_mention")
-def on_mention(event, say, logger):
+def on_mention(event, say, client, logger):
     channel = event.get("channel")
     if config.CHANNELS and channel not in config.CHANNELS:
-        return  # Iter 0: only the configured channel(s).
+        return  # only the configured channel(s)
     thread_ts = event.get("thread_ts") or event.get("ts")
+    context = _thread_context(client, channel, thread_ts, event.get("ts"))
     try:
-        reply = handler.handle(event.get("text", ""))
+        reply = handler.handle(event.get("text", ""), thread_context=context)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
         logger.exception("handler failed")
         reply = f":warning: shmobster error: {exc}"

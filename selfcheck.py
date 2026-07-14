@@ -67,4 +67,18 @@ reply = handler.handle("run echo")
 assert reply.startswith(":robot_face: [agent: shmobster]"), reply
 assert "ran it: hi_from_tool" in reply, reply
 
+# 4) thread context (Iter 11) flows into the system prompt
+captured = {}
+
+
+def _capture(messages, tools=None):
+    captured["sys"] = messages[0]["content"]
+    return _FakeMsg(content="ok")
+
+
+llm.complete = _capture
+handler.handle("current", thread_context="[user] earlier q\n[shmobster] earlier a")
+assert "Conversation so far in this thread" in captured["sys"], captured["sys"]
+assert "earlier q" in captured["sys"], captured["sys"]
+
 print("selfcheck OK")

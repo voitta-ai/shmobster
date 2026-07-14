@@ -26,9 +26,12 @@ def _agent_marker():
     return retval
 
 
-def handle(text):
+def handle(text, thread_context=None):
+    system = _system_prompt()
+    if thread_context:
+        system += "\n\n## Conversation so far in this thread\n" + thread_context
     messages = [
-        {"role": "system", "content": _system_prompt()},
+        {"role": "system", "content": system},
         {"role": "user", "content": text},
     ]
     for _ in range(_MAX_STEPS):

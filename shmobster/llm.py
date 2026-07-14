@@ -36,10 +36,24 @@ def _build():
     return retval
 
 
-def reply(messages):
+def _ensure():
     global _ROUTER
     if _ROUTER is None:
         _ROUTER = _build()
-    resp = _ROUTER.completion(model="primary", messages=messages)
-    retval = resp.choices[0].message.content
+    return _ROUTER
+
+
+def complete(messages, tools=None):
+    """Return the raw assistant message (has .content and .tool_calls)."""
+    router = _ensure()
+    kwargs = {"model": "primary", "messages": messages}
+    if tools:
+        kwargs["tools"] = tools
+    resp = router.completion(**kwargs)
+    retval = resp.choices[0].message
+    return retval
+
+
+def reply(messages):
+    retval = complete(messages).content
     return retval

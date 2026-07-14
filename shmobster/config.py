@@ -37,3 +37,11 @@ WORKSPACE = _agent.get("workspace", "./workspace")
 
 # Ordered list of {name, model, api_key, [api_base]} -- first is primary.
 WATERFALL = _cfg.get("waterfall", [])
+
+# Exec (Iter 1): shell commands are gated by voitta-yolt. yolt_classifier is the
+# path to voitta-yolt's grammar_classifier.py. Read-only commands auto-run;
+# mutating ones are blocked pending approval.
+_exec = _cfg.get("exec", {})
+YOLT_CLASSIFIER = _exec.get("yolt_classifier", "")
+EXEC_CWD = _exec.get("cwd", ".")
+EXEC_TIMEOUT = _exec.get("timeout_sec", 30)

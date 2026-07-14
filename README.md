@@ -81,6 +81,11 @@ One JSON config, no `.env`. Copy the example and fill it in:
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
   `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
   endpoints like openrouter / nvidia).
+- `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
+  [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
+  `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones are
+  blocked pending approval. `cwd`: working dir for commands. `timeout_sec`: per
+  command. (Needs `tree-sitter` + `tree-sitter-bash`, in requirements.txt.)
 
 Run:
 

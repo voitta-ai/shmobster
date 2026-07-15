@@ -66,7 +66,30 @@ def _ignore_message(event):
     return
 
 
+def _resolve_label(client):
+    """Auto-derive the agent label from the Slack app's display name when
+    agent.label is unset (#8), so the marker matches whatever the app is named.
+    Falls back to the bot handle, then 'shmobster'."""
+    if config.AGENT_LABEL:
+        return config.AGENT_LABEL
+    try:
+        auth = client.auth_test()
+        try:
+            profile = client.users_info(user=auth["user_id"])["user"]["profile"]
+            name = profile.get("display_name") or profile.get("real_name")
+            if name:
+                return name
+        except Exception:
+            pass  # users:read not granted -> fall back to the bot handle
+        return auth.get("user") or "shmobster"
+    except Exception:
+        return "shmobster"
+
+
 def main():
+    if not config.AGENT_LABEL:
+        config.AGENT_LABEL = _resolve_label(app.client)
+        logging.info("agent label: %s", config.AGENT_LABEL)
     SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
 
 

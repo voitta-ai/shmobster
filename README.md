@@ -76,6 +76,9 @@ One JSON config, no `.env`. Copy the example and fill it in:
   **Create the Slack app** above).
 - `slack.channels` -- list of `{name, id}` channels Shmobster responds in
   (Iter 0: just m-and-a). `name` is for humans; `id` is what Slack matches.
+- `agent.label` -- name shown in the post marker `[agent: <label>]`. Leave empty
+  (or omit) to auto-derive from the Slack app's display name on boot (#8), so the
+  label matches whatever you named the app.
 - `agent.workspace` -- path to the `.md` spine (point at an openclaw-workspace
   clone, or use the bundled `./workspace`).
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
@@ -120,3 +123,16 @@ The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
 `deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
 `KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop
 guard). Logs go to `logs/shmobster.{out,err}.log`.
+
+## Running multiple instances
+
+Each instance is one config file + one process. `shmobster` is just the project
+name; name each instance via `agent.label` (or let it auto-derive from the app).
+
+- **Different machines** (e.g. Barrymore here, Cosima elsewhere): nothing
+  special -- each machine has its own gitignored `shmobster-config.json` and
+  plist, and the default launchd Label doesn't collide across machines.
+- **Ad-hoc / a second config:**
+  `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
+- **Two instances on the *same* machine** additionally need distinct launchd
+  Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.

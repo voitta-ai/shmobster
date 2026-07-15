@@ -39,6 +39,21 @@ Generalize only when someone else wants in. Not before.
 See issues. 0 skeleton -> 1 exec-gate (YOLT) -> 2 per-channel policy ->
 3 waterfall hardening -> 4 multi-user.
 
+## New instance setup
+
+One instance per machine (each its own Slack app + config):
+
+1. Clone this repo and [voitta-ai/voitta-yolt](https://github.com/voitta-ai/voitta-yolt)
+   (the exec classifier).
+2. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+3. Create the Slack app (below) -> bot + app tokens.
+4. `cp examples/shmobster-config-example.json shmobster-config.json` and fill:
+   Slack tokens, `agent.label`, `channels`, `waterfall` keys, `exec.yolt_classifier`
+   (path to voitta-yolt's `hooks/grammar_classifier.py`), and `channel_policies`.
+   Then `chmod 600 shmobster-config.json`.
+5. `.venv/bin/python selfcheck.py` (offline sanity).
+6. Run under launchd (see below).
+
 ## Create the Slack app
 
 Shmobster connects over Socket Mode, so it needs its own Slack app (a bot token
@@ -88,7 +103,8 @@ One JSON config, no `.env`. Copy the example and fill it in:
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones are
   blocked pending approval. `cwd`: working dir for commands. `timeout_sec`: per
-  command. (Needs `tree-sitter` + `tree-sitter-bash`, in requirements.txt.)
+  command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
+  are in requirements.txt.)
 - `channel_policies` / `default_policy` -- per-channel capability envelope
   (Iter #4). Each policy: `cwd` (commands run here), `aws_profile` (sets
   `AWS_PROFILE`; a command overriding to another profile is blocked),

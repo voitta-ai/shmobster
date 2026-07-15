@@ -91,4 +91,27 @@ Run:
 
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     .venv/bin/python selfcheck.py            # offline sanity check
-    .venv/bin/python -m shmobster.slack_app  # start the agent
+    .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
+
+## Running as a service (launchd, macOS)
+
+For anything but a quick foreground test, run it under launchd so it stays up
+across restarts/sleep, independent of any shell. First time, make your own
+(gitignored) plist from the sample and set the paths:
+
+    cp deploy/ai.shmobster.plist.sample deploy/ai.shmobster.plist
+    # edit deploy/ai.shmobster.plist: replace /Users/CHANGE_ME/path/to/shmobster
+    deploy/service.sh install
+
+Then:
+
+    deploy/service.sh restart       # after `git pull`, to load new code
+    deploy/service.sh update        # after editing the plist, re-copy + restart
+    deploy/service.sh status        # pid / state
+    deploy/service.sh logs          # tail logs/shmobster.err.log
+    deploy/service.sh uninstall     # stop + remove
+
+The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
+`deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
+`KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop
+guard). Logs go to `logs/shmobster.{out,err}.log`.

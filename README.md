@@ -57,7 +57,7 @@ One instance per machine (each its own Slack app + config):
 ## Create the Slack app
 
 Shmobster connects over Socket Mode, so it needs its own Slack app (a bot token
-+ an app-level token). A workspace can host more than one -- e.g. a
+and an app-level token). A workspace can host more than one -- e.g. a
 `Shmobster Dev` app for testing next to a live one -- so give each a distinct
 name and, ideally, a dedicated test channel to avoid cross-talk.
 

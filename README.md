@@ -61,10 +61,10 @@ Shmobster connects over Socket Mode, so it needs its own Slack app (a bot token
 `Shmobster Dev` app for testing next to a live one -- so give each a distinct
 name and, ideally, a dedicated test channel to avoid cross-talk.
 
-1. Edit `deploy/slack-app-manifest.yaml`: set `display_information.name` and
+1. Edit [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml): set `display_information.name` and
    `features.bot_user.display_name` to the name you want (e.g. `Shmobster Dev`).
 2. https://api.slack.com/apps -> **Create New App** -> **From a manifest** ->
-   pick the workspace -> paste the manifest -> **Create**.
+   pick the workspace -> paste [the manifest](deploy/slack-app-manifest.yaml) -> **Create**.
 3. **OAuth & Permissions** -> **Install to Workspace** -> Allow. Copy the
    **Bot User OAuth Token** (`xoxb-...`) into `slack.bot_token`.
 4. **Basic Information** -> **App-Level Tokens** -> **Generate Token and Scopes**

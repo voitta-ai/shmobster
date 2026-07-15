@@ -86,6 +86,11 @@ One JSON config, no `.env`. Copy the example and fill it in:
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones are
   blocked pending approval. `cwd`: working dir for commands. `timeout_sec`: per
   command. (Needs `tree-sitter` + `tree-sitter-bash`, in requirements.txt.)
+- `channel_policies` / `default_policy` -- per-channel capability envelope
+  (Iter #4). Each policy: `cwd` (commands run here), `aws_profile` (sets
+  `AWS_PROFILE`; a command overriding to another profile is blocked),
+  `github_repos` (git/gh limited to these `owner/repo` globs). Channels not
+  listed use `default_policy`.
 
 Run:
 

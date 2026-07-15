@@ -1,11 +1,13 @@
-"""Model-callable tools. Iter 1 ships one: run_shell, gated by YOLT.
+"""Model-callable tools. Iter 1 ships one: run_shell, gated by YOLT and, since
+Iter #4, by the per-channel policy (cwd / aws_profile / github_repos).
 
-Read-only commands run immediately. Mutating commands are NOT executed -- they
-return a single "needs approval" line (no dozen "did not run" cards). A real
-approval flow arrives with per-channel policy (Iter 2) + multi-user (Iter 4)."""
+Read-only commands run in the channel's cwd (with its AWS_PROFILE) if they pass
+the channel's github/aws scope. Mutating commands are NOT executed -- one "needs
+approval" line. A real approval flow is a later iteration."""
+import os
 import subprocess
 
-from . import config, yolt_gate
+from . import config, policy as policy_mod, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -13,8 +15,8 @@ RUN_SHELL = {
         "name": "run_shell",
         "description": (
             "Run a shell command and return its output. Read-only commands run "
-            "immediately; mutating commands are blocked pending approval, so "
-            "prefer read-only inspection."
+            "immediately; mutating commands are blocked pending approval; commands "
+            "outside this channel's scope are blocked. Prefer read-only inspection."
         ),
         "parameters": {
             "type": "object",
@@ -34,19 +36,28 @@ TOOLS = [RUN_SHELL]
 _MAX_OUTPUT = 4000
 
 
-def run_shell(command):
+def run_shell(command, policy):
     decision, reason = yolt_gate.classify(command)
     if decision != "safe":
         retval = f"NOT RUN (needs approval -- {reason}): {command}"
         return retval
+    ok, why = policy_mod.check(command, policy)
+    if not ok:
+        retval = f"BLOCKED by channel policy: {why}"
+        return retval
+    env = os.environ.copy()
+    prof = policy.get("aws_profile")
+    if prof:
+        env["AWS_PROFILE"] = prof
     try:
         proc = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            cwd=config.EXEC_CWD,
+            cwd=policy_mod.cwd_for(policy),
             timeout=config.EXEC_TIMEOUT,
+            env=env,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if len(out) > _MAX_OUTPUT:
@@ -57,9 +68,9 @@ def run_shell(command):
     return retval
 
 
-def dispatch(name, args):
+def dispatch(name, args, policy):
     if name == "run_shell":
-        retval = run_shell(args.get("command", ""))
+        retval = run_shell(args.get("command", ""), policy)
     else:
         retval = f"unknown tool: {name}"
     return retval

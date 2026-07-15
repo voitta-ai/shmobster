@@ -32,5 +32,15 @@
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",
     "timeout_sec": 30
+  },
+  "channel_policies": {
+    "C0ACXPCHQRM": {
+      "cwd": "/path/to/doubledoor",
+      "aws_profile": "doubledoor",
+      "github_repos": ["double-door/*"]
+    }
+  },
+  "default_policy": {
+    "cwd": "./workspace"
   }
 }

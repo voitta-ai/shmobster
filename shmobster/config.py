@@ -45,3 +45,9 @@ _exec = _cfg.get("exec", {})
 YOLT_CLASSIFIER = _exec.get("yolt_classifier", "")
 EXEC_CWD = _exec.get("cwd", ".")
 EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
+
+# Per-channel policy (Iter #4): channel_id -> {cwd, aws_profile, github_repos}.
+# Unlisted channels fall back to default_policy. This is the capability envelope
+# keyed by channel (where/what), distinct from who (multi-user, later).
+CHANNEL_POLICIES = _cfg.get("channel_policies", {})
+DEFAULT_POLICY = _cfg.get("default_policy", {})

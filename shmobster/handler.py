@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import config, llm, spine, tools
+from . import config, llm, policy as policy_mod, spine, tools
 
 _SYSTEM = None
 _MAX_STEPS = 6
@@ -26,7 +26,8 @@ def _agent_marker():
     return retval
 
 
-def handle(text, thread_context=None):
+def handle(text, thread_context=None, channel=None):
+    policy = policy_mod.resolve(channel)
     system = _system_prompt()
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
@@ -46,7 +47,7 @@ def handle(text, thread_context=None):
                 args = json.loads(call.function.arguments or "{}")
             except ValueError:
                 args = {}
-            result = tools.dispatch(call.function.name, args)
+            result = tools.dispatch(call.function.name, args, policy)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )

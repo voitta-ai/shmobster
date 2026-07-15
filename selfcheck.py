@@ -7,7 +7,7 @@ import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import config, handler, llm, spine, tools, yolt_gate  # noqa: E402
+from shmobster import config, handler, llm, policy, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -19,10 +19,10 @@ assert "Shmobster" in spine.load_system_prompt()
 
 # 2) tools.run_shell honors the YOLT verdict (yolt stubbed -> no subprocess)
 yolt_gate.classify = lambda cmd: ("safe", "read-only")
-out = tools.run_shell("echo selfcheck_marker_123")
+out = tools.run_shell("echo selfcheck_marker_123", {})
 assert "selfcheck_marker_123" in out, out
 yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
-blocked = tools.run_shell("rm -rf /tmp/x")
+blocked = tools.run_shell("rm -rf /tmp/x", {})
 assert blocked.startswith("NOT RUN"), blocked
 
 
@@ -80,5 +80,17 @@ llm.complete = _capture
 handler.handle("current", thread_context="[user] earlier q\n[shmobster] earlier a")
 assert "Conversation so far in this thread" in captured["sys"], captured["sys"]
 assert "earlier q" in captured["sys"], captured["sys"]
+
+# 5) per-channel policy (Iter #4): github repo scope + aws profile guard
+gh_pol = {"github_repos": ["voitta-ai/*"]}
+assert policy.check("gh repo view voitta-ai/shmobster", gh_pol)[0], "allowed repo passes"
+assert not policy.check("gh repo view other-org/thing", gh_pol)[0], "disallowed repo blocks"
+aws_pol = {"aws_profile": "doubledoor"}
+assert policy.check("aws s3 ls", aws_pol)[0], "aws without override passes"
+assert not policy.check("aws s3 ls --profile other", aws_pol)[0], "profile override blocks"
+# run_shell surfaces a policy block (yolt says safe, policy says no)
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+blocked_repo = tools.run_shell("gh repo view other-org/thing", gh_pol)
+assert blocked_repo.startswith("BLOCKED by channel policy"), blocked_repo
 
 print("selfcheck OK")

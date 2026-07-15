@@ -32,7 +32,7 @@ Generalize only when someone else wants in. Not before.
 
 - **YOLT** answers *is this command mutating?* (read-only -> run; mutating -> gate)
 - **Channel policy** answers *is this in scope?* -- a config map
-  `channel_id -> {cwd_allow, github_allow, aws_profile, extra_allowlist, owner_only}`
+  `channel_id -> {cwd_allow, github_allow, aws_profile, extra_whitelist, owner_only}`
 
 ## Iterations
 

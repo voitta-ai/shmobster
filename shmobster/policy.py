@@ -2,7 +2,7 @@
 
 resolve(channel) -> policy dict {cwd, aws_profile, github_repos}.
 check(command, policy) -> (ok, reason): enforces the parts that need command
-inspection -- github repo allowlist and aws-profile override guard. cwd and
+inspection -- github repo whitelist and aws-profile override guard. cwd and
 AWS_PROFILE themselves are applied at exec time (tools.run_shell)."""
 import fnmatch
 import re
@@ -76,7 +76,7 @@ def _check_github(command, policy):
         return (False, "target github repo undeterminable; blocked by channel policy")
     if any(fnmatch.fnmatch(repo, pat) for pat in allowed):
         return (True, "")
-    return (False, f"repo '{repo}' not in channel allowlist {allowed}")
+    return (False, f"repo '{repo}' not in channel whitelist {allowed}")
 
 
 def _check_aws(command, policy):

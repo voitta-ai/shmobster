@@ -1,0 +1,12 @@
+{
+  "channel_policies": {
+    "C0EXAMPLECHANNEL": {
+      "cwd": "/path/to/project",
+      "aws_profile": "your-aws-profile",
+      "github_repos": ["your-org/*"]
+    }
+  },
+  "default_policy": {
+    "cwd": "/path/to/default/working/dir"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "channel_policies": {
+    "C0FREEFORALL": {
+      "cwd": "/path/to/home"
+    },
+    "C0SCOPEDCHANNEL": {
+      "cwd": "/path/to/project",
+      "github_repos": ["your-org/your-repo"],
+      "aws_profile": "your-aws-profile",
+      "env": {
+        "VERCEL_TOKEN": "REPLACE-with-vercel-token",
+        "HEROKU_API_KEY": "REPLACE-with-heroku-key"
+      }
+    }
+  },
+  "default_policy": {
+    "cwd": "/path/to/home"
+  }
+}

@@ -48,9 +48,10 @@ One instance per machine (each its own Slack app + config):
 2. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
 3. Create the Slack app (below) -> bot + app tokens.
 4. `cp examples/shmobster-config-example.json shmobster-config.json` and fill:
-   Slack tokens, `agent.label`, `channels`, `waterfall` keys, `exec.yolt_classifier`
-   (path to voitta-yolt's `hooks/grammar_classifier.py`), and `channel_policies`.
-   Then `chmod 600 shmobster-config.json`.
+   Slack tokens, `agent.label`, `channels`, `waterfall` keys, and
+   `exec.yolt_classifier` (path to voitta-yolt's `hooks/grammar_classifier.py`).
+   Then `chmod 600 shmobster-config.json`. For per-channel policy,
+   `cp examples/shmobster-policies-example.json shmobster-policies.json` and fill.
 5. `.venv/bin/python selfcheck.py` (offline sanity).
 6. Run under launchd (see below).
 
@@ -105,11 +106,32 @@ One JSON config, no `.env`. Copy the example and fill it in:
   blocked pending approval. `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
+Per-channel policy lives in its own file, not in `shmobster-config.json` --
+policies are machine-specific but not secret, so they are versioned separately
+from the token/key config:
+
+    cp examples/shmobster-policies-example.json shmobster-policies.json
+
+`shmobster-policies.json` (gitignored; path overridable via `SHMOBSTER_POLICIES`):
+
 - `channel_policies` / `default_policy` -- per-channel capability envelope
-  (Iter #4). Each policy: `cwd` (commands run here), `aws_profile` (sets
-  `AWS_PROFILE`; a command overriding to another profile is blocked),
-  `github_repos` (git/gh limited to these `owner/repo` globs). Channels not
-  listed use `default_policy`.
+  (Iter #4). Channels not listed use `default_policy`. Each policy:
+  - `cwd` -- commands run here (a channel scoped to a project points at that
+    project's dir). A *free-for-all* channel is just `{ "cwd": ... }` with no
+    further keys -- nothing to restrict.
+  - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
+    `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
+  - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
+    overriding to another profile is blocked. Omit for no AWS.
+  - `env` -- extra environment variables injected only for this channel's
+    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. These are
+    **secrets**: they live only in the gitignored `shmobster-policies.json`
+    (keep it `chmod 600`); the example file carries placeholders only.
+
+Because `env` may hold secrets, treat `shmobster-policies.json` like the main
+config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
+`default_policy` in the main config are still honored when no
+`shmobster-policies.json` exists.
 
 Run:
 

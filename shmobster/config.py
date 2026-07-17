@@ -49,5 +49,27 @@ EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 # Per-channel policy (Iter #4): channel_id -> {cwd, aws_profile, github_repos}.
 # Unlisted channels fall back to default_policy. This is the capability envelope
 # keyed by channel (where/what), distinct from who (multi-user, later).
-CHANNEL_POLICIES = _cfg.get("channel_policies", {})
-DEFAULT_POLICY = _cfg.get("default_policy", {})
+#
+# Policies are machine-specific but NOT secret, so they live in their own
+# gitignored file (SHMOBSTER_POLICIES, default ./shmobster-policies.json), copied
+# from examples/shmobster-policies-example.json. For back-compat, inline
+# channel_policies/default_policy in the main config are used when no policy file
+# is present.
+_POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
+
+
+def _load_policies():
+    if os.path.exists(_POLICIES_PATH):
+        with open(_POLICIES_PATH, "r") as f:
+            retval = json.load(f)
+        return retval
+    retval = {
+        "channel_policies": _cfg.get("channel_policies", {}),
+        "default_policy": _cfg.get("default_policy", {}),
+    }
+    return retval
+
+
+_policies = _load_policies()
+CHANNEL_POLICIES = _policies.get("channel_policies", {})
+DEFAULT_POLICY = _policies.get("default_policy", {})

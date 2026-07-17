@@ -7,7 +7,7 @@ import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import config, handler, llm, policy, spine, tools, yolt_gate  # noqa: E402
+from shmobster import config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -119,5 +119,30 @@ for bad in (0, -1, True, 2.5, "3"):
     except SystemExit:
         pass
 config._positive_int("x", 5)  # valid -> no raise
+
+# 8) slack-read tools (#28): permalink ts parse + routing + no-client graceful
+class _FakeSlack:
+    def __init__(self):
+        self.last = None
+
+    def conversations_replies(self, channel, ts, limit=50):
+        self.last = ("replies", channel, ts)
+        return {"messages": [{"user": "U1", "text": "hi from thread"}]}
+
+    def conversations_history(self, channel, limit=20):
+        self.last = ("history", channel)
+        return {"messages": [{"user": "U2", "text": "chan msg"}]}
+
+
+_fs = _FakeSlack()
+perm = slack_tools.dispatch(
+    "slack_read_permalink",
+    {"url": "https://x.slack.com/archives/C0BGBAEAJ85/p1784242986232589"},
+    _fs,
+)
+assert "hi from thread" in perm, perm
+assert _fs.last == ("replies", "C0BGBAEAJ85", "1784242986.232589"), _fs.last
+assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "C1"}, _fs)
+assert "no slack client" in slack_tools.dispatch("slack_read_thread", {}, None)
 
 print("selfcheck OK")

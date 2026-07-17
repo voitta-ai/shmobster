@@ -8,7 +8,7 @@ import json
 from . import config, llm, policy as policy_mod, spine, tools
 
 _SYSTEM = None
-_MAX_STEPS = 6
+_MAX_STEPS = 10
 
 
 def _system_prompt():
@@ -51,5 +51,9 @@ def handle(text, thread_context=None, channel=None):
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )
-    retval = f"{_agent_marker()} (stopped after {_MAX_STEPS} tool steps)"
+    # Hit the step cap -> one final tools-less call so the user gets a real
+    # answer from what we gathered, instead of a dead-end "(stopped)" message.
+    final = llm.complete(messages)
+    answer = final.content or "(reached the tool-step limit without a definitive answer)"
+    retval = f"{_agent_marker()} {answer}"
     return retval

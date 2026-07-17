@@ -93,4 +93,18 @@ yolt_gate.classify = lambda cmd: ("safe", "read-only")
 blocked_repo = tools.run_shell("gh repo view other-org/thing", gh_pol)
 assert blocked_repo.startswith("BLOCKED by channel policy"), blocked_repo
 
+
+# 6) tool-loop step cap -> a real final answer, not "(stopped after N steps)"
+def _always_tool(messages, tools=None):
+    if tools is None:  # the final tools-less summarizing call
+        return _FakeMsg(content="best-effort summary")
+    return _FakeMsg(tool_calls=[_FakeCall("c", "run_shell", '{"command": "echo x"}')])
+
+
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+llm.complete = _always_tool
+capped = handler.handle("keep going")
+assert "best-effort summary" in capped, capped
+assert "stopped after" not in capped, capped
+
 print("selfcheck OK")

@@ -78,3 +78,17 @@ DEFAULT_POLICY = _policies.get("default_policy", {})
 # loop has used >= WARN_TOOL_STEPS, the reply carries a "nearing the limit" note.
 MAX_TOOL_STEPS = _cfg.get("max_tool_steps", 50)
 WARN_TOOL_STEPS = _cfg.get("warn_tool_steps", 40)
+
+
+def _positive_int(name, v):
+    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+        raise SystemExit(f"config {name} must be a positive integer (got {v!r})")
+
+
+_positive_int("max_tool_steps", MAX_TOOL_STEPS)
+_positive_int("warn_tool_steps", WARN_TOOL_STEPS)
+if WARN_TOOL_STEPS >= MAX_TOOL_STEPS:
+    raise SystemExit(
+        f"config warn_tool_steps ({WARN_TOOL_STEPS}) must be < "
+        f"max_tool_steps ({MAX_TOOL_STEPS})"
+    )

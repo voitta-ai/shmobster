@@ -111,4 +111,13 @@ assert "best-effort summary" in capped, capped
 assert "stopped after" not in capped, capped
 assert "3/3 tool steps" in capped, capped  # nearing-limit warning fired
 
+# 7) config validation: tool-step bounds must be positive ints
+for bad in (0, -1, True, 2.5, "3"):
+    try:
+        config._positive_int("x", bad)
+        raise AssertionError(f"{bad!r} should have been rejected")
+    except SystemExit:
+        pass
+config._positive_int("x", 5)  # valid -> no raise
+
 print("selfcheck OK")

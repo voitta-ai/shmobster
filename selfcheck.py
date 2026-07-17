@@ -15,7 +15,7 @@ assert config.CHANNELS == {"C0ACJGUGB0A"}, config.CHANNELS
 assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER
 
 # 1) spine loads bundled SOUL.md
-assert "Shmobster" in spine.load_system_prompt()
+assert "engineering agent" in spine.load_system_prompt()
 
 # 2) tools.run_shell honors the YOLT verdict (yolt stubbed -> no subprocess)
 yolt_gate.classify = lambda cmd: ("safe", "read-only")
@@ -80,6 +80,7 @@ llm.complete = _capture
 handler.handle("current", thread_context="[user] earlier q\n[shmobster] earlier a")
 assert "Conversation so far in this thread" in captured["sys"], captured["sys"]
 assert "earlier q" in captured["sys"], captured["sys"]
+assert "Your name is shmobster" in captured["sys"], captured["sys"]  # identity from config (#8/PR2)
 
 # 5) per-channel policy (Iter #4): github repo scope + aws profile guard
 gh_pol = {"github_repos": ["voitta-ai/*"]}

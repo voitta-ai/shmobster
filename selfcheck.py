@@ -103,9 +103,12 @@ def _always_tool(messages, tools=None):
 
 
 yolt_gate.classify = lambda cmd: ("safe", "read-only")
+config.MAX_TOOL_STEPS = 3  # keep the test fast + trip the near-limit warning
+config.WARN_TOOL_STEPS = 2
 llm.complete = _always_tool
 capped = handler.handle("keep going")
 assert "best-effort summary" in capped, capped
 assert "stopped after" not in capped, capped
+assert "3/3 tool steps" in capped, capped  # nearing-limit warning fired
 
 print("selfcheck OK")

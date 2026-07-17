@@ -73,3 +73,8 @@ def _load_policies():
 _policies = _load_policies()
 CHANNEL_POLICIES = _policies.get("channel_policies", {})
 DEFAULT_POLICY = _policies.get("default_policy", {})
+
+# Tool-call loop bounds (configurable). Hard stop at MAX_TOOL_STEPS; once the
+# loop has used >= WARN_TOOL_STEPS, the reply carries a "nearing the limit" note.
+MAX_TOOL_STEPS = _cfg.get("max_tool_steps", 50)
+WARN_TOOL_STEPS = _cfg.get("warn_tool_steps", 40)

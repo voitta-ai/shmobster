@@ -52,7 +52,7 @@ def on_mention(event, say, client, logger):
     thread_ts = event.get("thread_ts") or event.get("ts")
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
     try:
-        reply = handler.handle(event.get("text", ""), thread_context=context, channel=channel)
+        reply = handler.handle(event.get("text", ""), thread_context=context, channel=channel, slack_client=client)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
         logger.exception("handler failed")
         reply = f":warning: shmobster error: {exc}"

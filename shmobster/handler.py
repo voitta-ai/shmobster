@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import config, llm, policy as policy_mod, spine, tools
+from . import config, llm, policy as policy_mod, slack_tools, spine, tools
 
 _SYSTEM = None
 
@@ -37,8 +37,11 @@ def _finalize(answer, steps):
     return retval
 
 
-def handle(text, thread_context=None, channel=None):
+def handle(text, thread_context=None, channel=None, slack_client=None):
     policy = policy_mod.resolve(channel)
+    tool_schemas = list(tools.TOOLS)
+    if slack_client is not None:
+        tool_schemas += slack_tools.TOOLS
     system = _system_prompt()
     if config.AGENT_LABEL:
         system = f"Your name is {config.AGENT_LABEL}.\n\n" + system
@@ -51,7 +54,7 @@ def handle(text, thread_context=None, channel=None):
     steps = 0
     while steps < config.MAX_TOOL_STEPS:
         steps += 1
-        msg = llm.complete(messages, tools=tools.TOOLS)
+        msg = llm.complete(messages, tools=tool_schemas)
         calls = getattr(msg, "tool_calls", None)
         if not calls:
             retval = _finalize(msg.content, steps)
@@ -62,7 +65,11 @@ def handle(text, thread_context=None, channel=None):
                 args = json.loads(call.function.arguments or "{}")
             except ValueError:
                 args = {}
-            result = tools.dispatch(call.function.name, args, policy)
+            name = call.function.name
+            if name in slack_tools.NAMES:
+                result = slack_tools.dispatch(name, args, slack_client)
+            else:
+                result = tools.dispatch(name, args, policy)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )

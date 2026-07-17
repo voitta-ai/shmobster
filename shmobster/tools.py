@@ -49,6 +49,11 @@ def run_shell(command, policy):
     prof = policy.get("aws_profile")
     if prof:
         env["AWS_PROFILE"] = prof
+    # Per-channel extra credentials (e.g. VERCEL_TOKEN, HEROKU_API_KEY). Values
+    # live in the gitignored shmobster-policies.json; injected only for this
+    # channel's commands.
+    for _k, _v in (policy.get("env") or {}).items():
+        env[_k] = _v
     try:
         proc = subprocess.run(
             command,

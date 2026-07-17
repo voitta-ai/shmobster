@@ -115,13 +115,23 @@ from the token/key config:
 `shmobster-policies.json` (gitignored; path overridable via `SHMOBSTER_POLICIES`):
 
 - `channel_policies` / `default_policy` -- per-channel capability envelope
-  (Iter #4). Each policy: `cwd` (commands run here), `aws_profile` (sets
-  `AWS_PROFILE`; a command overriding to another profile is blocked),
-  `github_repos` (git/gh limited to these `owner/repo` globs). Channels not
-  listed use `default_policy`.
+  (Iter #4). Channels not listed use `default_policy`. Each policy:
+  - `cwd` -- commands run here (a channel scoped to a project points at that
+    project's dir). A *free-for-all* channel is just `{ "cwd": ... }` with no
+    further keys -- nothing to restrict.
+  - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
+    `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
+  - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
+    overriding to another profile is blocked. Omit for no AWS.
+  - `env` -- extra environment variables injected only for this channel's
+    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. These are
+    **secrets**: they live only in the gitignored `shmobster-policies.json`
+    (keep it `chmod 600`); the example file carries placeholders only.
 
-For back-compat, inline `channel_policies` / `default_policy` in the main config
-are still honored when no `shmobster-policies.json` exists.
+Because `env` may hold secrets, treat `shmobster-policies.json` like the main
+config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
+`default_policy` in the main config are still honored when no
+`shmobster-policies.json` exists.
 
 Run:
 

@@ -8,7 +8,6 @@ import json
 from . import config, llm, policy as policy_mod, spine, tools
 
 _SYSTEM = None
-_MAX_STEPS = 10
 
 
 def _system_prompt():
@@ -26,6 +25,18 @@ def _agent_marker():
     return retval
 
 
+def _finalize(answer, steps):
+    """Prefix the agent marker; warn on the reply once the loop neared the cap."""
+    out = f"{_agent_marker()} {answer}"
+    if steps >= config.WARN_TOOL_STEPS:
+        out += (
+            f"\n\n:warning: used {steps}/{config.MAX_TOOL_STEPS} tool steps "
+            "(nearing the limit -- consider narrowing the request)."
+        )
+    retval = out
+    return retval
+
+
 def handle(text, thread_context=None, channel=None):
     policy = policy_mod.resolve(channel)
     system = _system_prompt()
@@ -37,11 +48,13 @@ def handle(text, thread_context=None, channel=None):
         {"role": "system", "content": system},
         {"role": "user", "content": text},
     ]
-    for _ in range(_MAX_STEPS):
+    steps = 0
+    while steps < config.MAX_TOOL_STEPS:
+        steps += 1
         msg = llm.complete(messages, tools=tools.TOOLS)
         calls = getattr(msg, "tool_calls", None)
         if not calls:
-            retval = f"{_agent_marker()} {msg.content}"
+            retval = _finalize(msg.content, steps)
             return retval
         messages.append(msg.model_dump())
         for call in calls:
@@ -57,5 +70,5 @@ def handle(text, thread_context=None, channel=None):
     # answer from what we gathered, instead of a dead-end "(stopped)" message.
     final = llm.complete(messages)
     answer = final.content or "(reached the tool-step limit without a definitive answer)"
-    retval = f"{_agent_marker()} {answer}"
+    retval = _finalize(answer, steps)
     return retval

@@ -32,5 +32,7 @@
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",
     "timeout_sec": 30
-  }
+  },
+  "max_tool_steps": 50,
+  "warn_tool_steps": 40
 }

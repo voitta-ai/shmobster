@@ -29,6 +29,8 @@ def _agent_marker():
 def handle(text, thread_context=None, channel=None):
     policy = policy_mod.resolve(channel)
     system = _system_prompt()
+    if config.AGENT_LABEL:
+        system = f"Your name is {config.AGENT_LABEL}.\n\n" + system
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
     messages = [

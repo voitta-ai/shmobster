@@ -37,7 +37,7 @@ def _finalize(answer, steps):
     return retval
 
 
-def handle(text, thread_context=None, channel=None, slack_client=None):
+def handle(text, thread_context=None, channel=None, thread_ts=None, slack_client=None):
     policy = policy_mod.resolve(channel)
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
@@ -45,6 +45,16 @@ def handle(text, thread_context=None, channel=None, slack_client=None):
     system = _system_prompt()
     if config.AGENT_LABEL:
         system = f"Your name is {config.AGENT_LABEL}.\n\n" + system
+    if channel:
+        loc = f"You are in Slack channel {channel}"
+        _cname = config.CHANNEL_NAMES.get(channel)
+        if _cname:
+            loc += f" ({_cname})"
+        loc += "."
+        if thread_ts:
+            loc += f" This thread's ts is {thread_ts}."
+        loc += " Use the slack tools with this channel_id to read history or post here."
+        system += "\n\n" + loc
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
     messages = [

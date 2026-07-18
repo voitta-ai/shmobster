@@ -11,7 +11,8 @@ from shmobster import config, handler, llm, policy, slack_tools, spine, tools, y
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
-assert config.CHANNELS == {"C0ACJGUGB0A"}, config.CHANNELS
+assert len(config.CHANNELS) == 1, config.CHANNELS
+_ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
 assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER
 
 # 1) spine loads bundled SOUL.md
@@ -141,11 +142,11 @@ class _FakeSlack:
 _fs = _FakeSlack()
 perm = slack_tools.dispatch(
     "slack_read_permalink",
-    {"url": "https://x.slack.com/archives/C0BGBAEAJ85/p1784242986232589"},
+    {"url": f"https://example.slack.com/archives/{_ex_ch}/p1234567890123456"},
     _fs,
 )
 assert "hi from thread" in perm, perm
-assert _fs.last == ("replies", "C0BGBAEAJ85", "1784242986.232589"), _fs.last
+assert _fs.last == ("replies", _ex_ch, "1234567890.123456"), _fs.last
 assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "C1"}, _fs)
 assert "no slack client" in slack_tools.dispatch("slack_read_thread", {}, None)
 assert "posted to C9" in slack_tools.dispatch("slack_post", {"channel_id": "C9", "text": "hi"}, _fs)
@@ -162,8 +163,8 @@ def _cap_ch(messages, tools=None):
 
 
 llm.complete = _cap_ch
-handler.handle("hey", channel="C0ACJGUGB0A", thread_ts="123.456", slack_client=_fs)
-assert "Slack channel C0ACJGUGB0A" in _capch["sys"], _capch["sys"]
+handler.handle("hey", channel=_ex_ch, thread_ts="123.456", slack_client=_fs)
+assert f"Slack channel {_ex_ch}" in _capch["sys"], _capch["sys"]
 assert "123.456" in _capch["sys"], _capch["sys"]
 
 print("selfcheck OK")

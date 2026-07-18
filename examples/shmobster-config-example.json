@@ -3,7 +3,7 @@
     "bot_token": "xoxb-REPLACE",
     "app_token": "xapp-REPLACE",
     "channels": [
-      { "name": "m-and-a", "id": "C0ACJGUGB0A" }
+      { "name": "your-channel", "id": "C0000000000" }
     ]
   },
   "agent": {

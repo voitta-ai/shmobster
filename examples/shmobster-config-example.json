@@ -34,5 +34,6 @@
     "timeout_sec": 30
   },
   "max_tool_steps": 50,
-  "warn_tool_steps": 40
+  "warn_tool_steps": 40,
+  "trusted_users": []
 }

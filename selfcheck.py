@@ -7,7 +7,7 @@ import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import admin_tools, config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -166,5 +166,41 @@ llm.complete = _cap_ch
 handler.handle("hey", channel=_ex_ch, thread_ts="123.456", slack_client=_fs)
 assert f"Slack channel {_ex_ch}" in _capch["sys"], _capch["sys"]
 assert "123.456" in _capch["sys"], _capch["sys"]
+
+# 10) trusted-user self-config (#36): trust gate by Slack user id
+config.TRUSTED_USERS = {"U_TRUSTED"}
+_posted = {}
+
+
+class _FakePost:
+    def chat_postMessage(self, channel, text, thread_ts=None):
+        _posted["text"] = text
+        return {"ok": True, "ts": "1"}
+
+
+# non-trusted -> loud refusal + trusted users tagged, no write
+_res = admin_tools.dispatch(
+    "set_policy", {"channel_id": "C1", "cwd": "/x"},
+    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+)
+assert _res.startswith("REFUSED"), _res
+assert "<@U_TRUSTED>" in _posted["text"], _posted
+
+# trusted -> applies (set_channel_policy stubbed so no file is written)
+_applied = {}
+
+
+def _fake_set(ch, updates):
+    _applied["call"] = (ch, updates)
+    return {"cwd": updates.get("cwd")}
+
+
+config.set_channel_policy = _fake_set
+_res2 = admin_tools.dispatch(
+    "set_policy", {"channel_id": "C1", "cwd": "/x"},
+    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+)
+assert "updated" in _res2, _res2
+assert _applied["call"][0] == "C1", _applied
 
 print("selfcheck OK")

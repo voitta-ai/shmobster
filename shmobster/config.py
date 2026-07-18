@@ -74,6 +74,37 @@ _policies = _load_policies()
 CHANNEL_POLICIES = _policies.get("channel_policies", {})
 DEFAULT_POLICY = _policies.get("default_policy", {})
 
+# Trusted users (Slack user IDs) who may change my restrictions via chat (#36).
+TRUSTED_USERS = set(_cfg.get("trusted_users", []))
+
+
+def reload_policies():
+    """Re-read the policy source into the module globals so a set_channel_policy
+    write takes effect without a restart."""
+    global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
+    _cfg = _load()
+    _policies = _load_policies()
+    CHANNEL_POLICIES = _policies.get("channel_policies", {})
+    DEFAULT_POLICY = _policies.get("default_policy", {})
+
+
+def set_channel_policy(channel_id, updates):
+    """Merge `updates` (non-None values) into a channel's policy and persist to
+    the active policy source (the separate file if present, else the main
+    config), then reload. Returns the new policy. Never touches trusted_users."""
+    path = _POLICIES_PATH if os.path.exists(_POLICIES_PATH) else _PATH
+    with open(path, "r") as f:
+        data = json.load(f)
+    cps = data.setdefault("channel_policies", {})
+    pol = dict(cps.get(channel_id, {}))
+    pol.update({k: v for k, v in updates.items() if v is not None})
+    cps[channel_id] = pol
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    reload_policies()
+    return pol
+
+
 # Tool-call loop bounds (configurable). Hard stop at MAX_TOOL_STEPS; once the
 # loop has used >= WARN_TOOL_STEPS, the reply carries a "nearing the limit" note.
 MAX_TOOL_STEPS = _cfg.get("max_tool_steps", 50)

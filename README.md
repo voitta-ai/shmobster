@@ -79,6 +79,22 @@ name and, ideally, a dedicated test channel to avoid cross-talk.
 > One app = one running process. Two processes on the same app fight over Slack's
 > per-app socket connection cap, so use a *separate* app for dev vs. the live bot.
 
+## Trust model
+
+Assumes **private channels and trusted invitees -- no bad actors.** The agent
+responds to any @mention in any channel it's in (invite = permission to talk).
+Two tiers:
+
+- **Any invited user** -- the agent responds and acts, bounded by the channel's
+  policy (default restricted: cwd / github repos / aws profile / tools).
+- **Trusted users** (`trusted_users` in config: a list of Slack user IDs) -- may
+  ask the agent to change a channel's restrictions via chat (the `set_policy`
+  tool). Only they can widen scope; the `trusted_users` list itself is
+  **file-only** (the agent can't grant trust -- no escalation). A non-trusted
+  user who tries is refused loudly and all trusted users are tagged.
+
+The `trusted_users` gate protects **config changes**, not general use.
+
 ## Config & run
 
 One JSON config, no `.env`. Copy the example and fill it in:

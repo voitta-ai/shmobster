@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import config, llm, policy as policy_mod, slack_tools, spine, tools
+from . import admin_tools, config, llm, policy as policy_mod, slack_tools, spine, tools
 
 _SYSTEM = None
 
@@ -37,11 +37,11 @@ def _finalize(answer, steps):
     return retval
 
 
-def handle(text, thread_context=None, channel=None, thread_ts=None, slack_client=None):
+def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, slack_client=None):
     policy = policy_mod.resolve(channel)
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
-        tool_schemas += slack_tools.TOOLS
+        tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
     system = _system_prompt()
     if config.AGENT_LABEL:
         system = f"Your name is {config.AGENT_LABEL}.\n\n" + system
@@ -76,7 +76,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, slack_client
             except ValueError:
                 args = {}
             name = call.function.name
-            if name in slack_tools.NAMES:
+            if name in admin_tools.NAMES:
+                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
+                result = admin_tools.dispatch(name, args, ctx)
+            elif name in slack_tools.NAMES:
                 result = slack_tools.dispatch(name, args, slack_client)
             else:
                 result = tools.dispatch(name, args, policy)

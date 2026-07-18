@@ -6,6 +6,8 @@ These are only exposed when the ingress provides a Slack client (i.e. the Slack
 app). Other ingresses pass client=None and these tools aren't offered."""
 import re
 
+from . import config
+
 _MAX_OUTPUT = 4000
 _PERMALINK = re.compile(r"/archives/(C\w+)/p(\d+)")
 
@@ -54,6 +56,22 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "slack_post",
+            "description": "Post a message to a Slack channel (optionally as a thread reply). Use to proactively message a channel or ping another user -- mention them with <@USERID>.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "string", "description": "Channel ID (C...) to post to."},
+                    "text": {"type": "string", "description": "Message text. Mention users with <@USERID>."},
+                    "thread_ts": {"type": "string", "description": "Optional: post as a reply in this thread."},
+                },
+                "required": ["channel_id", "text"],
+            },
+        },
+    },
 ]
 
 NAMES = {t["function"]["name"] for t in TOOLS}
@@ -92,6 +110,21 @@ def _read_permalink(client, url):
     return _fmt(r.get("messages", []))
 
 
+def _marker():
+    if config.AGENT_LABEL:
+        return f":robot_face: [agent: {config.AGENT_LABEL}]"
+    return ":robot_face: [agent]"
+
+
+def _post(client, channel_id, text, thread_ts=None):
+    r = client.chat_postMessage(
+        channel=channel_id, text=f"{_marker()} {text}", thread_ts=thread_ts or None
+    )
+    if r.get("ok"):
+        return f"posted to {channel_id} (ts {r.get('ts')})"
+    return f"post failed: {r.get('error')}"
+
+
 def dispatch(name, args, client):
     if client is None:
         return "no slack client available in this context"
@@ -102,6 +135,8 @@ def dispatch(name, args, client):
             retval = _read_channel(client, args.get("channel_id", ""), args.get("limit", 20))
         elif name == "slack_read_permalink":
             retval = _read_permalink(client, args.get("url", ""))
+        elif name == "slack_post":
+            retval = _post(client, args.get("channel_id", ""), args.get("text", ""), args.get("thread_ts"))
         else:
             retval = f"unknown slack tool: {name}"
     except Exception as exc:

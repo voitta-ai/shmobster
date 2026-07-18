@@ -133,6 +133,10 @@ class _FakeSlack:
         self.last = ("history", channel)
         return {"messages": [{"user": "U2", "text": "chan msg"}]}
 
+    def chat_postMessage(self, channel, text, thread_ts=None):
+        self.last = ("post", channel, text, thread_ts)
+        return {"ok": True, "ts": "1.2"}
+
 
 _fs = _FakeSlack()
 perm = slack_tools.dispatch(
@@ -144,5 +148,22 @@ assert "hi from thread" in perm, perm
 assert _fs.last == ("replies", "C0BGBAEAJ85", "1784242986.232589"), _fs.last
 assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "C1"}, _fs)
 assert "no slack client" in slack_tools.dispatch("slack_read_thread", {}, None)
+assert "posted to C9" in slack_tools.dispatch("slack_post", {"channel_id": "C9", "text": "hi"}, _fs)
+assert _fs.last[0] == "post" and _fs.last[1] == "C9", _fs.last
+
+
+# 9) channel-context injection into the system prompt
+_capch = {}
+
+
+def _cap_ch(messages, tools=None):
+    _capch["sys"] = messages[0]["content"]
+    return _FakeMsg(content="ok")
+
+
+llm.complete = _cap_ch
+handler.handle("hey", channel="C0ACJGUGB0A", thread_ts="123.456", slack_client=_fs)
+assert "Slack channel C0ACJGUGB0A" in _capch["sys"], _capch["sys"]
+assert "123.456" in _capch["sys"], _capch["sys"]
 
 print("selfcheck OK")

@@ -47,8 +47,8 @@ def _thread_context(client, channel, thread_ts, cur_ts):
 @app.event("app_mention")
 def on_mention(event, say, client, logger):
     channel = event.get("channel")
-    if config.CHANNELS and channel not in config.CHANNELS:
-        return  # only the configured channel(s)
+    # Respond wherever invited (#36): no channel allowlist gate. Capability is
+    # scoped by per-channel policy, not by which channels we respond in.
     thread_ts = event.get("thread_ts") or event.get("ts")
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
     try:

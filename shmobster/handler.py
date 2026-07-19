@@ -43,8 +43,17 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     if slack_client is not None:
         tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
     system = _system_prompt()
+    _ident = []
     if config.AGENT_LABEL:
-        system = f"Your name is {config.AGENT_LABEL}.\n\n" + system
+        _ident.append(f"Your name is {config.AGENT_LABEL}.")
+    if config.BOT_USER_ID:
+        _ident.append(
+            f"Your Slack user id is {config.BOT_USER_ID}; a message mentioning "
+            f"<@{config.BOT_USER_ID}> is addressed to YOU -- that's you, not "
+            "another agent, so never wait on yourself."
+        )
+    if _ident:
+        system = " ".join(_ident) + "\n\n" + system
     if channel:
         loc = f"You are in Slack channel {channel}"
         _cname = config.CHANNEL_NAMES.get(channel)

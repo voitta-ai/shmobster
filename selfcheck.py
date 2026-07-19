@@ -163,9 +163,11 @@ def _cap_ch(messages, tools=None):
 
 
 llm.complete = _cap_ch
+config.BOT_USER_ID = "UBOTSELF"
 handler.handle("hey", channel=_ex_ch, thread_ts="123.456", slack_client=_fs)
 assert f"Slack channel {_ex_ch}" in _capch["sys"], _capch["sys"]
 assert "123.456" in _capch["sys"], _capch["sys"]
+assert "UBOTSELF" in _capch["sys"], _capch["sys"]  # self user-id injected
 
 # 10) trusted-user self-config (#36): trust gate by Slack user id
 config.TRUSTED_USERS = {"U_TRUSTED"}

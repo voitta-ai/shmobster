@@ -33,6 +33,7 @@ CHANNELS = {c["id"] for c in _channels}
 CHANNEL_NAMES = {c["id"]: c.get("name", c["id"]) for c in _channels}
 
 AGENT_LABEL = _agent.get("label", "")  # empty -> auto-derive from Slack (#8)
+BOT_USER_ID = ""  # resolved at startup (auth.test) so the agent recognizes itself
 WORKSPACE = _agent.get("workspace", "./workspace")
 
 # Ordered list of {name, model, api_key, [api_base]} -- first is primary.

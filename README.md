@@ -4,6 +4,20 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 **multi-vendor API waterfall** (rate limits) and **multi-user Slack authz**
 (collaborators). Everything else is borrowed or transplanted.
 
+## Contents
+
+- [Own / rent / delegate](#own--rent--delegate)
+- [Operating principle: 0, 1, 2, 3, many](#operating-principle-0-1-2-3-many)
+- [Authz = f(user, channel)](#authz--fuser-channel)
+- [Iterations](#iterations)
+- [New instance setup](#new-instance-setup)
+- [Create the Slack app](#create-the-slack-app)
+- [Trust model](#trust-model)
+- [Config & run](#config--run)
+- [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
+- [Running multiple instances](#running-multiple-instances)
+- [License](#license)
+
 ## Own / rent / delegate
 
 - **Own:** orchestration loop, Slack door + socket reliability, authz.
@@ -195,3 +209,7 @@ name; name each instance via `agent.label` (or let it auto-derive from the app).
   `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
 - **Two instances on the *same* machine** additionally need distinct launchd
   Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+## License
+
+MIT -- see [LICENSE](LICENSE).

@@ -79,6 +79,11 @@ name and, ideally, a dedicated test channel to avoid cross-talk.
 > One app = one running process. Two processes on the same app fight over Slack's
 > per-app socket connection cap, so use a *separate* app for dev vs. the live bot.
 
+> The manifest includes `reactions:write` (for the `:eyes:` "on it" ack). Apps
+> created from the manifest get it automatically; an app that predates the scope
+> must **reinstall** to grant it (OAuth & Permissions -> add the scope ->
+> Reinstall to Workspace) -- until then the reaction just no-ops.
+
 ## Trust model
 
 Assumes **private channels and trusted invitees -- no bad actors.** The agent

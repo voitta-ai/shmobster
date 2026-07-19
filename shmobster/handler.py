@@ -45,7 +45,11 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     system = _system_prompt()
     _ident = []
     if config.AGENT_LABEL:
-        _ident.append(f"Your name is {config.AGENT_LABEL}.")
+        _ident.append(
+            f"Your name is {config.AGENT_LABEL}. Introduce and refer to yourself "
+            f"only as {config.AGENT_LABEL}. \"Shmobster\" is the software platform "
+            "you run on, not your name -- never call yourself Shmobster."
+        )
     if config.BOT_USER_ID:
         _ident.append(
             f"Your Slack user id is {config.BOT_USER_ID}; a message mentioning "

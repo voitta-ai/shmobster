@@ -89,7 +89,11 @@ def _resolve_label(client):
 def main():
     if not config.AGENT_LABEL:
         config.AGENT_LABEL = _resolve_label(app.client)
-        logging.info("agent label: %s", config.AGENT_LABEL)
+    try:
+        config.BOT_USER_ID = app.client.auth_test().get("user_id", "")
+    except Exception:
+        logging.exception("could not resolve bot user id")
+    logging.info("agent: %s (%s)", config.AGENT_LABEL, config.BOT_USER_ID)
     SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
 
 

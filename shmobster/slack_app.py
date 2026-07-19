@@ -47,6 +47,12 @@ def _thread_context(client, channel, thread_ts, cur_ts):
 @app.event("app_mention")
 def on_mention(event, say, client, logger):
     channel = event.get("channel")
+    # Ack immediately with a reaction so we don't look silent while churning.
+    # Best-effort: needs reactions:write; if not granted, this no-ops.
+    try:
+        client.reactions_add(channel=channel, name="eyes", timestamp=event.get("ts"))
+    except Exception:
+        pass
     # Respond wherever invited (#36): no channel allowlist gate. Capability is
     # scoped by per-channel policy, not by which channels we respond in.
     thread_ts = event.get("thread_ts") or event.get("ts")

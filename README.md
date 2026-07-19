@@ -25,9 +25,11 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
   reused as a library).
 - **Delegate:** browser work to `claude -p` (has claude-in-chrome); do not
   waterfall browser tasks.
-- **Transplant:** the openclaw-workspace `.md` spine
-  (SOUL/USER/CALIBRATION/RUNBOOKS/TOOLS/memory) is runtime-agnostic; the loop
-  boots by reading it.
+- **Transplant:** the `.md` spine (SOUL/USER/CALIBRATION/RUNBOOKS/TOOLS/memory)
+  is adapted from [OpenClaw](https://github.com/openclaw/openclaw)'s
+  openclaw-workspace (MIT -- see
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)) and is runtime-agnostic; the
+  loop boots by reading it.
 
 ## Operating principle: 0, 1, 2, 3, many
 

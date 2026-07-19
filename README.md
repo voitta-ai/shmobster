@@ -195,3 +195,7 @@ name; name each instance via `agent.label` (or let it auto-derive from the app).
   `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
 - **Two instances on the *same* machine** additionally need distinct launchd
   Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+## License
+
+MIT -- see [LICENSE](LICENSE).

@@ -23,6 +23,7 @@ oauth_config:
       - groups:history
       - im:history
       - mpim:history
+      - reactions:write
 settings:
   socket_mode_enabled: true
   event_subscriptions:

@@ -44,8 +44,22 @@ def _thread_context(client, channel, thread_ts, cur_ts):
     return retval
 
 
+_SEEN = {}  # message ts -> None; dedup duplicate Slack deliveries / retries
+
+
+def _seen(ts):
+    if ts in _SEEN:
+        return True
+    _SEEN[ts] = None
+    if len(_SEEN) > 500:
+        del _SEEN[next(iter(_SEEN))]
+    return False
+
+
 @app.event("app_mention")
 def on_mention(event, say, client, logger):
+    if _seen(event.get("ts")):
+        return  # Slack can deliver an event more than once -- handle it once.
     channel = event.get("channel")
     # Ack immediately with a reaction so we don't look silent while churning.
     # Best-effort: needs reactions:write; if not granted, this no-ops.

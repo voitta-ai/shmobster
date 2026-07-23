@@ -7,7 +7,7 @@ import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import admin_tools, config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import admin_tools, approvals, config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -204,5 +204,36 @@ _res2 = admin_tools.dispatch(
 )
 assert "updated" in _res2, _res2
 assert _applied["call"][0] == "C1", _applied
+
+# 11) approval flow (#48): a mutating command parks; a trusted user releases it
+yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
+_parked = tools.run_shell("echo approved_marker_456", {}, "C1")
+assert "pending approval" in _parked, _parked
+_req = _parked.split("[", 1)[1].split("]", 1)[0]
+assert approvals.ids("C1") == [_req], approvals.ids("C1")
+
+# non-trusted approval is refused, and the request stays parked
+_ref = admin_tools.dispatch(
+    "approve_command", {"request_id": _req},
+    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+)
+assert _ref.startswith("REFUSED"), _ref
+assert approvals.ids("C1") == [_req], approvals.ids("C1")
+
+# wrong channel can't release another channel's request
+_other = admin_tools.dispatch(
+    "approve_command", {"request_id": _req},
+    {"user_id": "U_TRUSTED", "channel": "C_OTHER", "client": None},
+)
+assert "no pending request" in _other, _other
+
+# trusted, same channel -> runs, and the request is consumed
+_ran = admin_tools.dispatch(
+    "approve_command", {"request_id": _req},
+    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+)
+assert "approved_marker_456" in _ran, _ran
+assert approvals.ids("C1") == [], approvals.ids("C1")
 
 print("selfcheck OK")

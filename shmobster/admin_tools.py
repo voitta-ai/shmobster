@@ -1,10 +1,13 @@
-"""Privileged tool: change my own restrictions (#36 tier 2).
+"""Privileged tools: change my own restrictions (#36 tier 2) and approve a
+parked mutating command (#48).
 
 Only trusted users (config.trusted_users, matched by Slack user ID) may. A
-non-trusted attempt is refused loudly and all trusted users are tagged. This
-tool changes *restrictions* (cwd / github_repos / aws_profile) -- never the
-trusted_users list itself (that stays file-only, to prevent escalation)."""
-from . import config
+non-trusted attempt is refused loudly and all trusted users are tagged.
+set_policy changes *restrictions* (cwd / github_repos / aws_profile) -- never
+the trusted_users list itself (that stays file-only, to prevent escalation).
+approve_command grants *permission* for one already-parked command; the channel
+policy still bounds its scope when it runs."""
+from . import approvals, config, policy as policy_mod, tools
 
 TOOLS = [
     {
@@ -28,6 +31,24 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "approve_command",
+            "description": (
+                "Approve and run a mutating command that run_shell parked for "
+                "approval. ONLY trusted users may -- use when a trusted user okays "
+                "a pending request id (e.g. 'approve 3', 'go ahead')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request_id": {"type": "string", "description": "The id from the 'pending approval [id]' message."},
+                },
+                "required": ["request_id"],
+            },
+        },
+    },
 ]
 
 NAMES = {t["function"]["name"] for t in TOOLS}
@@ -37,24 +58,51 @@ def _trusted_tags():
     return " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "(no trusted users configured)"
 
 
+def _refuse(ctx, what):
+    """Loud refusal, and tag all trusted users so they know (post directly so
+    the tag is guaranteed, not left to the model to relay)."""
+    client, channel = ctx.get("client"), ctx.get("channel")
+    user_id = ctx.get("user_id")
+    alert = (
+        f":no_entry: <@{user_id}> asked me to {what}, but only trusted users "
+        f"may. {_trusted_tags()} -- heads up."
+    )
+    if client and channel:
+        try:
+            client.chat_postMessage(channel=channel, text=alert, thread_ts=ctx.get("thread_ts") or None)
+        except Exception:
+            pass
+    return "REFUSED: requester is not a trusted user. Trusted users have been notified."
+
+
+def _approve_command(args, ctx):
+    channel = ctx.get("channel")
+    req_id = str(args.get("request_id", "")).lstrip("#")
+    req = approvals.pop(req_id, channel)
+    if req is None:
+        outstanding = approvals.ids(channel) or ["(none)"]
+        return (
+            f"no pending request '{req_id}' in this channel. "
+            f"Outstanding here: {', '.join(outstanding)}"
+        )
+    policy = policy_mod.resolve(channel)
+    out = tools.execute(req["command"], policy)
+    return f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"
+
+
 def dispatch(name, args, ctx):
-    if name != "set_policy":
+    if name not in NAMES:
         return f"unknown admin tool: {name}"
     user_id = ctx.get("user_id")
     if user_id not in config.TRUSTED_USERS:
-        # Loud refusal, and tag all trusted users so they know (post directly so
-        # the tag is guaranteed, not left to the model to relay).
-        client, channel = ctx.get("client"), ctx.get("channel")
-        alert = (
-            f":no_entry: <@{user_id}> asked me to change my config restrictions, "
-            f"but only trusted users may. {_trusted_tags()} -- heads up."
+        what = (
+            "change my config restrictions" if name == "set_policy"
+            else "approve a mutating command"
         )
-        if client and channel:
-            try:
-                client.chat_postMessage(channel=channel, text=alert, thread_ts=ctx.get("thread_ts") or None)
-            except Exception:
-                pass
-        return "REFUSED: requester is not a trusted user. Trusted users have been notified."
+        return _refuse(ctx, what)
+    if name == "approve_command":
+        retval = _approve_command(args, ctx)
+        return retval
     updates = {
         "cwd": args.get("cwd"),
         "github_repos": args.get("github_repos"),

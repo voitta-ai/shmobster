@@ -2,12 +2,12 @@
 Iter #4, by the per-channel policy (cwd / aws_profile / github_repos).
 
 Read-only commands run in the channel's cwd (with its AWS_PROFILE) if they pass
-the channel's github/aws scope. Mutating commands are NOT executed -- one "needs
-approval" line. A real approval flow is a later iteration."""
+the channel's github/aws scope. A mutating command is parked as a pending
+approval request (#48) and runs only once a trusted user approves it by id."""
 import os
 import subprocess
 
-from . import config, policy as policy_mod, yolt_gate
+from . import approvals, config, policy as policy_mod, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -15,8 +15,10 @@ RUN_SHELL = {
         "name": "run_shell",
         "description": (
             "Run a shell command and return its output. Read-only commands run "
-            "immediately; mutating commands are blocked pending approval; commands "
-            "outside this channel's scope are blocked. Prefer read-only inspection."
+            "immediately; a mutating command is parked with a request id and runs "
+            "only after a trusted user approves it (approve_command) -- relay that "
+            "id to the user instead of retrying; commands outside this channel's "
+            "scope are blocked. Prefer read-only inspection."
         ),
         "parameters": {
             "type": "object",
@@ -36,11 +38,25 @@ TOOLS = [RUN_SHELL]
 _MAX_OUTPUT = 4000
 
 
-def run_shell(command, policy):
+def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command)
     if decision != "safe":
-        retval = f"NOT RUN (needs approval -- {reason}): {command}"
+        req_id = approvals.add(command, channel, reason)
+        retval = (
+            f"NOT RUN -- pending approval [{req_id}] ({reason}): {command}\n"
+            f"Tell the user: a trusted user can approve it by asking you to "
+            f"approve request {req_id} (approve_command). Do not retry the "
+            f"command; it will run on approval."
+        )
         return retval
+    retval = execute(command, policy)
+    return retval
+
+
+def execute(command, policy):
+    """Run a command that has already cleared the YOLT gate or been approved.
+    The channel policy is still enforced here -- approval is permission, policy
+    is scope, and both must pass."""
     ok, why = policy_mod.check(command, policy)
     if not ok:
         retval = f"BLOCKED by channel policy: {why}"
@@ -73,9 +89,9 @@ def run_shell(command, policy):
     return retval
 
 
-def dispatch(name, args, policy):
+def dispatch(name, args, policy, channel=None):
     if name == "run_shell":
-        retval = run_shell(args.get("command", ""), policy)
+        retval = run_shell(args.get("command", ""), policy, channel)
     else:
         retval = f"unknown tool: {name}"
     return retval

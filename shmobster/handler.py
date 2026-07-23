@@ -95,7 +95,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             elif name in slack_tools.NAMES:
                 result = slack_tools.dispatch(name, args, slack_client)
             else:
-                result = tools.dispatch(name, args, policy)
+                result = tools.dispatch(name, args, policy, channel)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )

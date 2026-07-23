@@ -236,4 +236,20 @@ _ran = admin_tools.dispatch(
 assert "approved_marker_456" in _ran, _ran
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# 12) Slack approval surface (#50): each parked command is handed to an ingest
+# exactly once, and Deny drops it unrun -- trust-gated like approve
+_parked2 = tools.run_shell("echo never_runs_789", {}, "C1")
+_req2 = _parked2.split("[", 1)[1].split("]", 1)[0]
+_surfaced = approvals.claim_unsurfaced("C1")
+assert [k for k, _ in _surfaced] == [_req2], _surfaced
+assert approvals.claim_unsurfaced("C1") == [], "already surfaced -> no duplicate buttons"
+
+_dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+assert _dref.startswith("REFUSED"), _dref
+assert approvals.ids("C1") == [_req2], approvals.ids("C1")
+
+_den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert _den.startswith("DENIED"), _den
+assert approvals.ids("C1") == [], approvals.ids("C1")
+
 print("selfcheck OK")

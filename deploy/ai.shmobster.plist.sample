@@ -8,6 +8,13 @@
 
   ThrottleInterval=10 is the anti-crash-loop guard (the OpenClaw gateway
   respawned every ~1.7s with no throttle and bloated its log to 1.8GB).
+
+  PATH is set explicitly (#50): launchd hands a process
+  /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so without this the agent
+  cannot see gh, git-lfs, aws, node, or anything else from Homebrew -- every
+  such command dies with exit 127 "command not found", which reads like a
+  permission gate but isn't. Adjust for Intel Macs (/usr/local/bin) or add
+  version-manager shims as needed.
 -->
 <plist version="1.0">
 <dict>
@@ -21,6 +28,11 @@
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/CHANGE_ME/path/to/shmobster</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>

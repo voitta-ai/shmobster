@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import config, handler
+from . import admin_tools, approvals, config, handler
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -56,6 +56,101 @@ def _seen(ts):
     return False
 
 
+def _approval_blocks(req_id, req):
+    """Approve/Deny buttons for one parked command (#50). The command goes in a
+    code block so a long one stays readable; the request id rides in the button
+    value, which is what the action handler acts on."""
+    retval = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":lock: *Needs approval* [{req_id}] ({req['reason']})\n"
+                    f"```{req['command']}```"
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": f"approval_{req_id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "approve_command",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "Approve"},
+                    "value": req_id,
+                },
+                {
+                    "type": "button",
+                    "action_id": "deny_command",
+                    "style": "danger",
+                    "text": {"type": "plain_text", "text": "Deny"},
+                    "value": req_id,
+                },
+            ],
+        },
+    ]
+    return retval
+
+
+def _post_pending(client, channel, thread_ts):
+    """Render any newly parked commands as button messages in this thread."""
+    for req_id, req in approvals.claim_unsurfaced(channel):
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"Needs approval [{req_id}]: {req['command']}",
+                blocks=_approval_blocks(req_id, req),
+            )
+        except Exception:
+            logging.exception("could not post approval buttons for %s", req_id)
+
+
+def _resolve(ack, body, client, action, run):
+    """Shared button plumbing: ack inside Slack's 3s budget, act as the clicking
+    user (never the model), then rewrite the message so the buttons are gone and
+    the outcome is on the record."""
+    ack()
+    channel = body["channel"]["id"]
+    message_ts = body["message"]["ts"]
+    thread_ts = body["message"].get("thread_ts") or message_ts
+    ctx = {
+        "user_id": body["user"]["id"],
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "client": client,
+    }
+    result = run(action["value"], ctx)
+    try:
+        client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=result[:2900],
+            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"```{result[:2900]}```"}}],
+        )
+    except Exception:
+        logging.exception("could not update approval message")
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=result[:2900])
+
+
+@app.action("approve_command")
+def on_approve(ack, body, client, action):
+    _resolve(
+        ack, body, client, action,
+        lambda req_id, ctx: admin_tools.dispatch(
+            "approve_command", {"request_id": req_id}, ctx
+        ),
+    )
+
+
+@app.action("deny_command")
+def on_deny(ack, body, client, action):
+    _resolve(ack, body, client, action, admin_tools.deny)
+
+
 @app.event("app_mention")
 def on_mention(event, say, client, logger):
     if _seen(event.get("ts")):
@@ -77,6 +172,9 @@ def on_mention(event, say, client, logger):
         logger.exception("handler failed")
         reply = f":warning: shmobster error: {exc}"
     say(text=reply, thread_ts=thread_ts)
+    # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
+    # user answers with a click instead of another round-trip through the model.
+    _post_pending(client, channel, thread_ts)
 
 
 @app.event("message")

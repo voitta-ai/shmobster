@@ -41,7 +41,7 @@ WATERFALL = _cfg.get("waterfall", [])
 
 # Exec (Iter 1): shell commands are gated by voitta-yolt. yolt_classifier is the
 # path to voitta-yolt's grammar_classifier.py. Read-only commands auto-run;
-# mutating ones are blocked pending approval.
+# mutating ones park for a trusted user's approval (#48, see approvals.py).
 _exec = _cfg.get("exec", {})
 YOLT_CLASSIFIER = _exec.get("yolt_classifier", "")
 EXEC_CWD = _exec.get("cwd", ".")

@@ -94,11 +94,34 @@ Two tiers:
   policy (default restricted: cwd / github repos / aws profile / tools).
 - **Trusted users** (`trusted_users` in config: a list of Slack user IDs) -- may
   ask the agent to change a channel's restrictions via chat (the `set_policy`
-  tool). Only they can widen scope; the `trusted_users` list itself is
+  tool) and to approve parked mutating commands (the `approve_command` tool).
+  Only they can widen scope; the `trusted_users` list itself is
   **file-only** (the agent can't grant trust -- no escalation). A non-trusted
   user who tries is refused loudly and all trusted users are tagged.
 
-The `trusted_users` gate protects **config changes**, not general use.
+The `trusted_users` gate protects **config changes and approvals**, not general
+use.
+
+## Approving mutating commands (#48)
+
+Two independent gates, deliberately separate:
+
+- **Approval** answers *may this run at all* -- YOLT says a command is mutating,
+  so a human has to say yes.
+- **Channel policy** answers *is this in scope* -- cwd / github repos / aws
+  profile. It is enforced on approved commands too; widening `github_repos` does
+  not auto-approve anything.
+
+When the agent hits a mutating command it parks it and replies with a request
+id:
+
+    NOT RUN -- pending approval [3] (mutating): gh issue create ...
+
+A trusted user in that channel then says e.g. `@agent approve 3`; the agent calls
+`approve_command`, the command runs under the channel's policy, and the output
+comes back in-thread. Requests are in-memory and channel-scoped: a restart clears
+them (re-ask rather than run a stale approval), and an approval in one channel
+cannot release a command parked in another.
 
 ## Config & run
 
@@ -123,8 +146,9 @@ One JSON config, no `.env`. Copy the example and fill it in:
   endpoints like openrouter / nvidia).
 - `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
-  `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones are
-  blocked pending approval. `cwd`: working dir for commands. `timeout_sec`: per
+  `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones
+  park for a trusted user's approval (see **Approving mutating commands**).
+  `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
 Per-channel policy lives in its own file, not in `shmobster-config.json` --

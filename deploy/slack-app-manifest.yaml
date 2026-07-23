@@ -26,6 +26,12 @@ oauth_config:
       - reactions:write
 settings:
   socket_mode_enabled: true
+  # Approve/Deny buttons on parked commands (#50). Over Socket Mode this needs
+  # no request URL and no extra OAuth scope -- interactions arrive on the same
+  # websocket. An app created before this line must enable Interactivity in the
+  # app settings and reinstall, or the buttons go nowhere.
+  interactivity:
+    is_enabled: true
   event_subscriptions:
     bot_events:
       - app_mention

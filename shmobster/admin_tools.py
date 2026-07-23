@@ -54,6 +54,27 @@ TOOLS = [
 NAMES = {t["function"]["name"] for t in TOOLS}
 
 
+def is_trusted(user_id):
+    retval = user_id in config.TRUSTED_USERS
+    return retval
+
+
+def deny(request_id, ctx):
+    """Drop a parked request without running it (#50 -- the Deny button).
+    Trust-gated like approve_command; denial is a privileged act too, since a
+    stranger could otherwise cancel work a trusted user asked for."""
+    if not is_trusted(ctx.get("user_id")):
+        retval = _refuse(ctx, "deny a mutating command")
+        return retval
+    channel = ctx.get("channel")
+    req = approvals.pop(str(request_id).lstrip("#"), channel)
+    if req is None:
+        retval = f"no pending request '{request_id}' in this channel."
+        return retval
+    retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
+    return retval
+
+
 def _trusted_tags():
     return " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "(no trusted users configured)"
 

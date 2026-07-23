@@ -128,16 +128,33 @@ Two independent gates, deliberately separate:
   profile. It is enforced on approved commands too; widening `github_repos` does
   not auto-approve anything.
 
-When the agent hits a mutating command it parks it and replies with a request
-id:
+When the agent hits a mutating command it parks it and posts **Approve / Deny**
+buttons in the thread (#50):
 
-    NOT RUN -- pending approval [3] (mutating): gh issue create ...
+    :lock: Needs approval [3] (mutating)
+    ```gh issue create ...```
+    [ Approve ]  [ Deny ]
 
-A trusted user in that channel then says e.g. `@agent approve 3`; the agent calls
-`approve_command`, the command runs under the channel's policy, and the output
-comes back in-thread. Requests are in-memory and channel-scoped: a restart clears
-them (re-ask rather than run a stale approval), and an approval in one channel
-cannot release a command parked in another.
+A trusted user clicks; the command runs under the channel's policy and the
+message is rewritten in place with the outcome, so the buttons can't be
+re-clicked. Talking works too -- `@agent approve 3` calls the same
+`approve_command` tool -- which is the fallback when the buttons aren't
+available.
+
+The click is authorized by the Slack user id on the interaction, never by
+anything the model says, so the agent cannot approve its own request. A
+non-trusted click is refused loudly and tags the trusted users, same as
+`set_policy`. Note that a click bypasses the model entirely: the command output
+is posted raw, not summarized.
+
+Requests are in-memory and channel-scoped: a restart clears them (re-ask rather
+than run a stale approval), and an approval in one channel cannot release a
+command parked in another.
+
+Buttons need **Interactivity** enabled on the Slack app. Apps created from the
+current [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) get it;
+an older app needs **Interactivity & Shortcuts** -> toggle on -> reinstall.
+Over Socket Mode there is no request URL to fill in and no extra OAuth scope.
 
 ## Config & run
 
@@ -222,6 +239,16 @@ The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
 `deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
 `KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop
 guard). Logs go to `logs/shmobster.{out,err}.log`.
+
+It also sets `PATH` explicitly, which matters more than it looks (#50): launchd
+gives a process only `/usr/bin:/bin:/usr/sbin:/sbin`, so without it the agent
+cannot see `gh`, `aws`, `node` or anything else under `/opt/homebrew/bin`, and
+those commands fail with exit 127 `command not found` -- easy to misread as the
+approval gate blocking them. If your plist predates this, copy the
+`EnvironmentVariables` block from the sample and run `deploy/service.sh update`.
+Check what the running agent actually has:
+
+    ps eww "$(launchctl print gui/$(id -u)/ai.shmobster.agent | awk '/pid =/{print $3}')" | tr ' ' '\n' | grep ^PATH=
 
 ## Running multiple instances
 

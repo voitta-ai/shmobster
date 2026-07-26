@@ -229,8 +229,8 @@ across restarts/sleep, independent of any shell. First time, make your own
 
 Then:
 
-    deploy/service.sh restart       # after `git pull`, to load new code
-    deploy/service.sh update        # after editing the plist, re-copy + restart
+    deploy/service.sh restart       # after `git pull`, to load new code (kickstart)
+    deploy/service.sh update        # after editing the plist, re-copy + full reload
     deploy/service.sh status        # pid / state
     deploy/service.sh logs          # tail logs/shmobster.err.log
     deploy/service.sh uninstall     # stop + remove

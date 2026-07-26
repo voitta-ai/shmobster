@@ -40,10 +40,15 @@ case "${1:-}" in
     echo "installed + started $LABEL"
     ;;
   update)
+    # Full reload, not kickstart: kickstart -k restarts the running process but
+    # reuses the service definition already loaded in the domain, so a freshly
+    # copied plist (new EnvironmentVariables / KeepAlive / paths) is NOT re-read.
+    # bootout + bootstrap actually reloads the file. (#56)
     need_src
     cp "$SRC" "$DST"
-    launchctl kickstart -k "$DOMAIN/$LABEL"
-    echo "re-copied plist + restarted $LABEL"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    launchctl bootstrap "$DOMAIN" "$DST"
+    echo "re-copied plist + reloaded $LABEL"
     ;;
   restart)
     launchctl kickstart -k "$DOMAIN/$LABEL"

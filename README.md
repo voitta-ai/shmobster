@@ -196,7 +196,8 @@ from the token/key config:
   (Iter #4). Channels not listed use `default_policy`. Each policy:
   - `cwd` -- commands run here (a channel scoped to a project points at that
     project's dir). A *free-for-all* channel is just `{ "cwd": ... }` with no
-    further keys -- nothing to restrict.
+    further keys -- nothing to restrict. `~` and `$VARS` are expanded at
+    exec-time, so `"~/g/project"` works.
   - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
     `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
   - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command

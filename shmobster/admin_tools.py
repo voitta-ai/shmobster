@@ -16,8 +16,11 @@ TOOLS = [
             "name": "set_policy",
             "description": (
                 "Change a channel's capability restrictions (cwd / github_repos / "
-                "aws_profile). ONLY trusted users may -- use when a trusted user "
-                "asks you to widen or change what you can do in a channel."
+                "aws_profile). ONLY trusted users may. Call this ONLY when a "
+                "trusted user explicitly asks you to widen or change your scope -- "
+                "do NOT call it on your own initiative because a task seems to need "
+                "more access. If you lack scope, say so and ask a trusted user; a "
+                "self-initiated call just gets refused and alarms everyone."
             ),
             "parameters": {
                 "type": "object",
@@ -81,12 +84,19 @@ def _trusted_tags():
 
 def _refuse(ctx, what):
     """Loud refusal, and tag all trusted users so they know (post directly so
-    the tag is guaranteed, not left to the model to relay)."""
+    the tag is guaranteed, not left to the model to relay).
+
+    Deliberately does NOT assert the user asked for this (#59): the attempt to
+    {what} may be the agent's own initiative during this user's turn, not a
+    request from them. The old wording ("<user> asked me to change my config")
+    read as a prompt-injection attack whenever the model self-initiated a
+    set_policy call, and sent agents into false-alarm paralysis."""
     client, channel = ctx.get("client"), ctx.get("channel")
     user_id = ctx.get("user_id")
     alert = (
-        f":no_entry: <@{user_id}> asked me to {what}, but only trusted users "
-        f"may. {_trusted_tags()} -- heads up."
+        f":warning: A privileged change was attempted during <@{user_id}>'s turn "
+        f"(to {what}) and refused -- only trusted users may. This can be my own "
+        f"doing, not necessarily their request. {_trusted_tags()} for visibility."
     )
     if client and channel:
         try:

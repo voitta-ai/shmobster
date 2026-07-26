@@ -5,6 +5,7 @@ check(command, policy) -> (ok, reason): enforces the parts that need command
 inspection -- github repo whitelist and aws-profile override guard. cwd and
 AWS_PROFILE themselves are applied at exec time (tools.run_shell)."""
 import fnmatch
+import os
 import re
 import shlex
 import subprocess
@@ -18,7 +19,12 @@ def resolve(channel):
 
 
 def cwd_for(policy):
-    retval = policy.get("cwd") or config.EXEC_CWD
+    # Expand ~ and $VARS at use-time (#54): a policy cwd like "~/g/git.voitta"
+    # is stored verbatim (set via chat, JSON, etc.), but subprocess needs a real
+    # absolute path -- an unexpanded "~" makes every command fail with ENOENT
+    # before it runs.
+    raw = policy.get("cwd") or config.EXEC_CWD
+    retval = os.path.expanduser(os.path.expandvars(raw))
     return retval
 
 

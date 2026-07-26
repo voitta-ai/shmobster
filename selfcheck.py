@@ -252,4 +252,49 @@ _den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client
 assert _den.startswith("DENIED"), _den
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
+# absolute path, not the literal string that makes subprocess raise ENOENT
+assert policy.cwd_for({"cwd": "~/xyzzy"}) == os.path.expanduser("~/xyzzy"), policy.cwd_for({"cwd": "~/xyzzy"})
+assert policy.cwd_for({}) == os.path.expanduser(os.path.expandvars(config.EXEC_CWD))
+
+# 14) mid-turn policy re-resolve (#58): a set_policy call partway through a turn
+# updates the policy the rest of that turn's tools receive (was stale before)
+_pols = {"C1": {"cwd": "/old"}}
+policy.resolve = lambda ch: _pols.get(ch, {})
+_seen_pol = []
+
+
+def _rec_tools(name, args, pol, channel=None):
+    _seen_pol.append(pol)
+    return "ok"
+
+
+def _flip_admin(name, args, ctx):
+    _pols["C1"] = {"cwd": "/new"}
+    return "policy updated"
+
+
+tools.dispatch = _rec_tools
+admin_tools.dispatch = _flip_admin
+admin_tools.NAMES = {"set_policy"}
+_turn_script = [
+    _FakeMsg(tool_calls=[_FakeCall("a", "set_policy", '{"channel_id":"C1"}')]),
+    _FakeMsg(tool_calls=[_FakeCall("b", "run_shell", '{"command":"x"}')]),
+    _FakeMsg(content="done"),
+]
+_turn_i = {"n": 0}
+
+
+def _turn(messages, tools=None):
+    m = _turn_script[_turn_i["n"]]
+    _turn_i["n"] += 1
+    return m
+
+
+config.MAX_TOOL_STEPS = 5
+config.WARN_TOOL_STEPS = 4
+llm.complete = _turn
+handler.handle("go", channel="C1", slack_client=_fs)
+assert _seen_pol and _seen_pol[-1] == {"cwd": "/new"}, _seen_pol  # run_shell saw the post-set_policy value
+
 print("selfcheck OK")

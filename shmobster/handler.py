@@ -92,6 +92,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             if name in admin_tools.NAMES:
                 ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
                 result = admin_tools.dispatch(name, args, ctx)
+                # An admin tool (set_policy) may have just changed this channel's
+                # policy; re-resolve so the rest of THIS turn's tool calls see the
+                # new scope instead of the stale dict from turn start (#58).
+                policy = policy_mod.resolve(channel)
             elif name in slack_tools.NAMES:
                 result = slack_tools.dispatch(name, args, slack_client)
             else:

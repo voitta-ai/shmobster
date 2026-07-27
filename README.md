@@ -202,6 +202,14 @@ from the token/key config:
     `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
   - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
     overriding to another profile is blocked. Omit for no AWS.
+  - `exclude` -- paths under `cwd` to keep off-limits, e.g.
+    `["~/g/OneDrive"]`. A command whose (expanded) tokens resolve under an
+    excluded path is blocked. **Best-effort only, not a sandbox:** `cwd` just
+    sets the working dir, so an absolute path elsewhere, a symlink, or a shell
+    resolving paths at runtime can still reach an excluded tree. It stops the
+    obvious textual cases (`cat ~/g/OneDrive/x`, `cd <excluded>`) to raise the
+    bar; true containment needs OS-level sandboxing (a separate, larger change).
+    Omit for no exclusions.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. These are
     **secrets**: they live only in the gitignored `shmobster-policies.json`

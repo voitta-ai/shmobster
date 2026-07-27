@@ -97,8 +97,38 @@ def _check_aws(command, policy):
     return (True, "")
 
 
+def _norm_path(p, base):
+    p = os.path.expanduser(os.path.expandvars(p))
+    if not os.path.isabs(p):
+        p = os.path.join(base, p)
+    retval = os.path.normpath(p)
+    return retval
+
+
+def _check_exclude(command, policy):
+    """Best-effort guard against a command touching an excluded subtree (#55).
+
+    NOTE: this is NOT a sandbox. cwd only sets the working dir; nothing stops an
+    absolute path elsewhere, a symlink, or a shell resolving paths at runtime.
+    This blocks the obvious textual cases (`cat ~/g/OneDrive/x`, `cd <excluded>`)
+    to raise the bar; real containment needs OS-level sandboxing (see README)."""
+    excludes = policy.get("exclude") or []
+    if not excludes:
+        return (True, "")
+    base = cwd_for(policy)
+    ex_norm = [_norm_path(p, base) for p in excludes]
+    for tok in _tokens(command):
+        if "/" not in tok and "~" not in tok:
+            continue  # not path-shaped; skip
+        cand = _norm_path(tok, base)
+        for ex in ex_norm:
+            if cand == ex or cand.startswith(ex + os.sep):
+                return (False, f"'{tok}' resolves under excluded path {ex}")
+    return (True, "")
+
+
 def check(command, policy):
-    for fn in (_check_github, _check_aws):
+    for fn in (_check_github, _check_aws, _check_exclude):
         ok, reason = fn(command, policy)
         if not ok:
             return (False, reason)

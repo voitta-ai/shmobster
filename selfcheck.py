@@ -297,4 +297,16 @@ llm.complete = _turn
 handler.handle("go", channel="C1", slack_client=_fs)
 assert _seen_pol and _seen_pol[-1] == {"cwd": "/new"}, _seen_pol  # run_shell saw the post-set_policy value
 
+# 15) cwd exclude guard (#55): a path under an excluded dir is blocked, siblings
+# and non-path tokens pass; tilde/relative both resolve against cwd
+_ex_pol = {"cwd": "/home/u", "exclude": ["/home/u/secret"]}
+assert not policy.check("cat /home/u/secret/x", _ex_pol)[0], "abs path under exclude blocks"
+assert not policy.check("cd /home/u/secret", _ex_pol)[0], "cd into exclude blocks"
+assert not policy.check("cat secret/x", _ex_pol)[0], "relative resolves against cwd then blocks"
+assert policy.check("cat /home/u/public/x", _ex_pol)[0], "sibling dir passes"
+assert policy.check("ls -la", _ex_pol)[0], "non-path token ignored"
+_ex_pol2 = {"cwd": "~/g", "exclude": ["~/g/OneDrive"]}
+assert not policy.check("cat ~/g/OneDrive/f", _ex_pol2)[0], "tilde exclude blocks"
+assert policy.check("cat ~/g/other/f", _ex_pol2)[0], "tilde sibling passes"
+
 print("selfcheck OK")

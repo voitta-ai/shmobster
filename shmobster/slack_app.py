@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, config, handler
+from . import admin_tools, approvals, config, handler, identity
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -36,7 +36,7 @@ def _thread_context(client, channel, thread_ts, cur_ts):
     for m in resp.get("messages", []):
         if m.get("ts") == cur_ts:
             continue  # the current mention -- handler adds it as the user turn
-        who = config.AGENT_LABEL if m.get("bot_id") else "user"
+        who = identity.speaker(m)  # self / sibling agent / human, not blanket "agent" (#60)
         text = (m.get("text") or "").strip()
         if text:
             lines.append(f"[{who}] {text}")

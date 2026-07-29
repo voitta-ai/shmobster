@@ -118,6 +118,16 @@ Two tiers:
 The `trusted_users` gate protects **config changes and approvals**, not general
 use.
 
+### Multiple instances in one channel (#60)
+
+Two instances (e.g. a bot per machine) can share a channel. Each is its own
+Slack app with a distinct bot user id (`config.BOT_USER_ID`, resolved from
+`auth.test` at startup), so history is labeled by *who actually posted*: an
+instance's own messages show as `<label> (me)`, a sibling's as
+`<name> (another agent)`, humans as `user <id>`. This is what stops an agent
+from mistaking a sibling's (or its own) posts for impersonation. `SOUL.md`
+tells the agent siblings are normal collaborators, not spoofing.
+
 ## Approving mutating commands (#48)
 
 Two independent gates, deliberately separate:

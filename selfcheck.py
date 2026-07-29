@@ -7,7 +7,7 @@ import os
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import admin_tools, approvals, config, handler, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import admin_tools, approvals, config, handler, identity, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -308,5 +308,18 @@ assert policy.check("ls -la", _ex_pol)[0], "non-path token ignored"
 _ex_pol2 = {"cwd": "~/g", "exclude": ["~/g/OneDrive"]}
 assert not policy.check("cat ~/g/OneDrive/f", _ex_pol2)[0], "tilde exclude blocks"
 assert policy.check("cat ~/g/other/f", _ex_pol2)[0], "tilde sibling passes"
+
+# 16) speaker identity (#60): own posts are "(me)", a sibling agent's are labeled
+# as another agent (not me), a human is a plain user
+config.BOT_USER_ID = "UME"
+config.AGENT_LABEL = "Cosima"
+_me = identity.speaker({"user": "UME", "bot_id": "B1", "text": ":robot_face: [agent: Cosima] hi"})
+assert "(me)" in _me and "Cosima" in _me, _me
+_sib = identity.speaker({"user": "UOTHER", "bot_id": "B2", "text": ":robot_face: [agent: Barrymore] hi"})
+assert "Barrymore" in _sib and "another agent" in _sib and "(me)" not in _sib, _sib
+assert identity.speaker({"user": "UHUMAN"}) == "user UHUMAN", identity.speaker({"user": "UHUMAN"})
+# _fmt (slack_read_*) uses the same labeling
+_flat = slack_tools._fmt([{"user": "UME", "bot_id": "B1", "text": "mine"}, {"user": "UH", "text": "theirs"}])
+assert "(me)] mine" in _flat and "user UH] theirs" in _flat, _flat
 
 print("selfcheck OK")

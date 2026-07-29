@@ -6,7 +6,7 @@ These are only exposed when the ingress provides a Slack client (i.e. the Slack
 app). Other ingresses pass client=None and these tools aren't offered."""
 import re
 
-from . import config
+from . import config, identity
 
 _MAX_OUTPUT = 4000
 _PERMALINK = re.compile(r"/archives/(C\w+)/p(\d+)")
@@ -80,7 +80,7 @@ NAMES = {t["function"]["name"] for t in TOOLS}
 def _fmt(messages):
     lines = []
     for m in messages:
-        who = m.get("user") or m.get("bot_id") or "?"
+        who = identity.speaker(m)
         text = (m.get("text") or "").strip()
         if text:
             lines.append(f"[{who}] {text}")

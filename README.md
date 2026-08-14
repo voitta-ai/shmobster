@@ -12,6 +12,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Iterations](#iterations)
 - [New instance setup](#new-instance-setup)
 - [Create the Slack app](#create-the-slack-app)
+- [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
 - [Config & run](#config--run)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
@@ -99,6 +100,37 @@ name and, ideally, a dedicated test channel to avoid cross-talk.
 > created from the manifest get it automatically; an app that predates the scope
 > must **reinstall** to grant it (OAuth & Permissions -> add the scope ->
 > Reinstall to Workspace) -- until then the reaction just no-ops.
+
+## Slack scopes
+
+Every bot scope the loop actually uses, all granted by
+[the manifest](deploy/slack-app-manifest.yaml):
+
+| Scope | Buys |
+|---|---|
+| `app_mentions:read` | receive the `app_mention` events the agent answers |
+| `chat:write` | post replies, and rewrite approval-button messages |
+| `channels:history` | read thread / channel context in public channels |
+| `groups:history` | the same, in private channels |
+| `im:history`, `mpim:history` | the same, in DMs and group DMs |
+| `reactions:write` | the `:eyes:` "on it" ack |
+
+Two the manifest deliberately leaves out:
+
+- **`users:read`** -- only needed if you leave `agent.label` empty and want the
+  label auto-derived from the app's display name (#8). Without it that lookup
+  fails and the label falls back to the bot handle, usually the same string.
+  Set `agent.label` and you never need this scope.
+- **`files:read`** -- would let the agent fetch image and file attachments. It
+  cannot today regardless: attachments are dropped before they reach the model
+  (#68), so granting this alone changes nothing.
+
+`channels:read` / `groups:read` are **not** needed -- nothing calls
+`conversations.info`. That has one consequence when debugging: you cannot use
+`conversations.info` to check whether the bot is in a channel. Call
+`conversations.history` instead and read the error -- `channel_not_found` there
+means **not a member**, not a bad token and not a bad channel ID. Fix it with
+`/invite @<app name>` in that channel.
 
 ## Trust model
 

@@ -3,9 +3,20 @@
 Iter 0: ordered failover (primary -> fb0 -> fb1 -> ...) with a cooldown so a
 rate-limited/broken vendor is skipped for a window instead of re-hit every call.
 Per-vendor observability + dead-fallback surfacing is Iter 3 (#5)."""
+import logging
+
+import litellm
 from litellm import Router
 
 from . import config
+
+# Never let the rented router log raw request params -- they carry api_key.
+# Belt and suspenders: disable verbose mode AND cap the LiteLLM logger at
+# WARNING, so a stray LITELLM_LOG=DEBUG or a library default flip cannot dump a
+# credential into the logs. (Redaction lesson from voitta-yolt#84.)
+litellm.set_verbose = False
+litellm.suppress_debug_info = True
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 _ROUTER = None
 

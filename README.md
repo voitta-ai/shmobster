@@ -233,6 +233,25 @@ One JSON config, no `.env`. Copy the example and fill it in:
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
   `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
   endpoints like openrouter / nvidia).
+
+### Secrets: reference the environment, don't paste keys (opinionated)
+
+Any string value in the config may contain `${VAR}`, expanded from the process
+environment at load time -- e.g. `"api_key": "${ANTHROPIC_API_KEY}"`,
+`"bot_token": "${SLACK_BOT_TOKEN}"`. A referenced variable that is **unset fails
+startup loudly** (it never sends an empty credential). Prefer this over literal
+keys so the config file holds no secrets. Don't like it? Send a PR.
+
+Values are **never logged**: shmobster logs no credential, and the LiteLLM router
+is pinned to non-verbose + WARNING so it can't dump request params (which carry
+`api_key`). See [voitta-yolt#84](https://github.com/voitta-ai/voitta-yolt/issues/84)
+for why that matters.
+
+**macOS launchd caveat:** launchd does **not** read `~/.bash_profile`, so a
+service-run shmobster won't see your shell's exports. Put the vars in the
+launchctl environment (`launchctl setenv VAR value`, or osx-env-sync, which syncs
+`~/.bash_profile` -> launchctl) or in the plist's `EnvironmentVariables`.
+Otherwise `${VAR}` expansion fails loudly at boot.
 - `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones

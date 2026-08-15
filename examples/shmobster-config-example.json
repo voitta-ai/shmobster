@@ -1,7 +1,8 @@
 {
+  "_comment": "Secrets are referenced from the environment as ${VAR} and expanded at load; an unset var fails startup loudly. Prefer this over pasting literal keys. macOS launchd does not read ~/.bash_profile -- export the vars via `launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables.",
   "slack": {
-    "bot_token": "xoxb-REPLACE",
-    "app_token": "xapp-REPLACE",
+    "bot_token": "${SLACK_BOT_TOKEN}",
+    "app_token": "${SLACK_APP_TOKEN}",
     "channels": [
       { "name": "your-channel", "id": "C0000000000" }
     ]
@@ -14,17 +15,17 @@
     {
       "name": "anthropic",
       "model": "anthropic/claude-sonnet-5",
-      "api_key": "sk-ant-REPLACE"
+      "api_key": "${ANTHROPIC_API_KEY}"
     },
     {
       "name": "openrouter",
       "model": "openrouter/openai/gpt-4o",
-      "api_key": "sk-or-REPLACE"
+      "api_key": "${OPENROUTER_API_KEY}"
     },
     {
       "name": "nvidia",
       "model": "nvidia_nim/meta/llama-3.1-405b-instruct",
-      "api_key": "nvapi-REPLACE",
+      "api_key": "${NVIDIA_API_KEY}",
       "api_base": "https://integrate.api.nvidia.com/v1"
     }
   ],

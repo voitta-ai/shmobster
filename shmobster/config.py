@@ -2,14 +2,62 @@
 ./shmobster-config.json. See examples/shmobster-config-example.json and README.
 
 Holds everything per-deployment: Slack tokens, agent identity, and the ordered
-waterfall. Gitignored; keep it chmod 600 (it holds secrets)."""
+waterfall. Gitignored; keep it chmod 600 if it holds literal secrets.
+
+Secrets should be referenced from the environment rather than pasted in:
+any string value may contain ${VAR} and is expanded from the process
+environment at load time (e.g. "api_key": "${GEMINI_API_KEY}"). A referenced
+variable that is unset fails startup loudly (never sends an empty key).
+
+macOS note: launchd does NOT read ~/.bash_profile. A launchd-run shmobster only
+sees ${VAR} if the variable is in the launchctl environment (export it via
+`launchctl setenv` / osx-env-sync) or the plist's EnvironmentVariables."""
 import json
 import os
+import re
+from typing import Any
 
 _PATH = os.getenv("SHMOBSTER_CONFIG", "shmobster-config.json")
 
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
-def _load():
+
+def _interpolate(obj: Any) -> Any:
+    """Recursively expand ${VAR} references in string values from os.environ.
+    Fail loudly (not open) on an unset variable, so a missing secret stops
+    startup instead of silently degrading to an empty credential."""
+    if isinstance(obj, dict):
+        retval = {k: _interpolate(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        retval = [_interpolate(v) for v in obj]
+    elif isinstance(obj, str):
+        missing = []
+
+        def _sub(m):
+            name = m.group(1)
+            val = os.environ.get(name)
+            if val is None:
+                missing.append(name)
+                replacement = m.group(0)
+            else:
+                replacement = val
+            return replacement
+
+        expanded = _ENV_REF.sub(_sub, obj)
+        if missing:
+            raise SystemExit(
+                "config references unset environment variable(s): "
+                + ", ".join(sorted(set(missing)))
+                + "\nmacOS launchd does not read ~/.bash_profile; export them via "
+                "`launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables."
+            )
+        retval = expanded
+    else:
+        retval = obj
+    return retval
+
+
+def _load() -> Any:
     if not os.path.exists(_PATH):
         raise SystemExit(
             f"config not found: {_PATH}\n"
@@ -17,7 +65,8 @@ def _load():
             "and fill in the values."
         )
     with open(_PATH, "r") as f:
-        retval = json.load(f)
+        raw = json.load(f)
+    retval = _interpolate(raw)
     return retval
 
 

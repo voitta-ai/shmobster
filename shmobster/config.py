@@ -124,3 +124,18 @@ if WARN_TOOL_STEPS >= MAX_TOOL_STEPS:
         f"config warn_tool_steps ({WARN_TOOL_STEPS}) must be < "
         f"max_tool_steps ({MAX_TOOL_STEPS})"
     )
+
+# Liveness watchdog (#66): seconds without a Slack ping/pong before we exit
+# nonzero so the supervisor restarts us. Must comfortably exceed a normal
+# reconnect (~1s); 0 disables the watchdog.
+WATCHDOG_TIMEOUT_SEC = _cfg.get("watchdog_timeout_sec", 120)
+if isinstance(WATCHDOG_TIMEOUT_SEC, bool) or not isinstance(WATCHDOG_TIMEOUT_SEC, int) or WATCHDOG_TIMEOUT_SEC < 0:
+    raise SystemExit(
+        "config watchdog_timeout_sec must be a non-negative integer "
+        f"(got {WATCHDOG_TIMEOUT_SEC!r})"
+    )
+if 0 < WATCHDOG_TIMEOUT_SEC < 30:
+    raise SystemExit(
+        f"config watchdog_timeout_sec ({WATCHDOG_TIMEOUT_SEC}) is too low; "
+        "use 0 to disable or at least 30 seconds"
+    )

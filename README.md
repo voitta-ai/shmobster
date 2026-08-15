@@ -315,6 +315,28 @@ Check what the running agent actually has:
 
     ps eww "$(launchctl print gui/$(id -u)/ai.shmobster.agent | awk '/pid =/{print $3}')" | tr ' ' '\n' | grep ^PATH=
 
+### Liveness watchdog (#66)
+
+`KeepAlive` only reacts to a process that exits, and the nastiest Socket Mode
+failure does not exit: the client reconnects forever without ever receiving
+anything (handshake 101, no `hello`, no pong, server drops the socket ~20s
+later, EPIPE, reconnect, repeat). Every error is caught and logged, so launchd
+sees a healthy service while the agent is deaf. One instance sat like that for
+13 days.
+
+So the process watches itself. A daemon thread checks the connection's last
+ping/pong; if nothing has been heard for `watchdog_timeout_sec` (default 120,
+`0` disables), it logs and exits nonzero, and `KeepAlive` restarts it.
+
+The signal is ping/pong rather than delivered events on purpose -- a bot in
+quiet channels can legitimately go days without an event, but ping/pong keeps
+flowing every 5s regardless of traffic. Reconnect churn is not a signal either:
+the wedged instance produced 52,215 reconnects in 13 days.
+
+A genuine network outage will restart the agent every timeout until the network
+comes back. That is noisy but harmless (`ThrottleInterval=10` bounds it), and it
+beats sitting deaf.
+
 ## Running multiple instances
 
 Each instance is one config file + one process. `shmobster` is just the project

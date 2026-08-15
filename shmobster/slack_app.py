@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, attachments, config, handler, identity
+from . import admin_tools, approvals, attachments, config, handler, identity, watchdog
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -219,7 +219,11 @@ def main():
     except Exception:
         logging.exception("could not resolve bot user id")
     logging.info("agent: %s (%s)", config.AGENT_LABEL, config.BOT_USER_ID)
-    SocketModeHandler(app, config.SLACK_APP_TOKEN).start()
+    socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
+    # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
+    # the connection ourselves and exit when it stops hearing Slack.
+    watchdog.start(socket_mode.client, config.WATCHDOG_TIMEOUT_SEC)
+    socket_mode.start()
 
 
 if __name__ == "__main__":

@@ -125,17 +125,22 @@ if WARN_TOOL_STEPS >= MAX_TOOL_STEPS:
         f"max_tool_steps ({MAX_TOOL_STEPS})"
     )
 
-# Liveness watchdog (#66): seconds without a Slack ping/pong before we exit
-# nonzero so the supervisor restarts us. Must comfortably exceed a normal
-# reconnect (~1s); 0 disables the watchdog.
+# Liveness watchdog (#66): seconds without a working Socket Mode connection
+# before we exit nonzero so the supervisor restarts us. 0 disables it.
+#
+# The floor is 90s, not "a bit more than a reconnect": the SDK tears a session
+# down at ping_interval * 4 (40s under slack_bolt's ping_interval of 10) and
+# then needs another cycle to re-establish and pong, and the watchdog wants a
+# session to survive 60s before calling it stable. Anything below that turns
+# hiccups the SDK heals by itself into a restart loop.
 WATCHDOG_TIMEOUT_SEC = _cfg.get("watchdog_timeout_sec", 120)
 if isinstance(WATCHDOG_TIMEOUT_SEC, bool) or not isinstance(WATCHDOG_TIMEOUT_SEC, int) or WATCHDOG_TIMEOUT_SEC < 0:
     raise SystemExit(
         "config watchdog_timeout_sec must be a non-negative integer "
         f"(got {WATCHDOG_TIMEOUT_SEC!r})"
     )
-if 0 < WATCHDOG_TIMEOUT_SEC < 30:
+if 0 < WATCHDOG_TIMEOUT_SEC < 90:
     raise SystemExit(
-        f"config watchdog_timeout_sec ({WATCHDOG_TIMEOUT_SEC}) is too low; "
-        "use 0 to disable or at least 30 seconds"
+        f"config watchdog_timeout_sec ({WATCHDOG_TIMEOUT_SEC}) is too low and would "
+        "restart on hiccups the SDK recovers from; use 0 to disable or at least 90"
     )

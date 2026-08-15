@@ -324,18 +324,29 @@ later, EPIPE, reconnect, repeat). Every error is caught and logged, so launchd
 sees a healthy service while the agent is deaf. One instance sat like that for
 13 days.
 
-So the process watches itself. A daemon thread checks the connection's last
-ping/pong; if nothing has been heard for `watchdog_timeout_sec` (default 120,
-`0` disables), it logs and exits nonzero, and `KeepAlive` restarts it.
+So the process watches itself. A daemon thread exits nonzero -- letting
+`KeepAlive` restart it -- once the connection has looked broken for
+`watchdog_timeout_sec` (default 120, minimum 90, `0` disables) by either of two
+measures:
 
-The signal is ping/pong rather than delivered events on purpose -- a bot in
-quiet channels can legitimately go days without an event, but ping/pong keeps
-flowing every 5s regardless of traffic. Reconnect churn is not a signal either:
-the wedged instance produced 52,215 reconnects in 13 days.
+- **No stable session.** In the wedge no session survives ~21s; a healthy one
+  lives for hours. The watchdog wants some session to reach 60s.
+- **No ping/pong.** Covers a session that stays up but goes quiet. Pongs land
+  every ~10s (`ping_interval`) no matter how busy the workspace is.
 
-A genuine network outage will restart the agent every timeout until the network
-comes back. That is noisy but harmless (`ThrottleInterval=10` bounds it), and it
-beats sitting deaf.
+Both have to look healthy, and neither is *delivered events*: a bot in quiet
+channels legitimately receives none for days. Reconnect logs are not a signal
+either -- the wedged instance emitted 52,707 of them in 13 days.
+
+The floor of 90s exists because the SDK heals ordinary stalls by itself: it
+tears a session down at `ping_interval * 4` (40s) and needs another cycle to
+re-establish. A shorter timeout turns that self-healing into a restart loop.
+
+Two costs, both accepted. A genuine network outage restarts the agent every
+timeout until the network returns (`ThrottleInterval=10` bounds the churn), and
+each restart clears the in-memory approval queue, so a command parked before the
+restart has to be asked again -- the same "safe direction" `approvals` already
+takes on any restart.
 
 ## Running multiple instances
 

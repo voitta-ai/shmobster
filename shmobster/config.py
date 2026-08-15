@@ -36,7 +36,7 @@ def _interpolate(obj: Any) -> Any:
         def _sub(m):
             name = m.group(1)
             val = os.environ.get(name)
-            if val is None:
+            if not val:  # unset OR empty -> fail loud; never send an empty credential
                 missing.append(name)
                 replacement = m.group(0)
             else:
@@ -46,7 +46,7 @@ def _interpolate(obj: Any) -> Any:
         expanded = _ENV_REF.sub(_sub, obj)
         if missing:
             raise SystemExit(
-                "config references unset environment variable(s): "
+                "config references unset or empty environment variable(s): "
                 + ", ".join(sorted(set(missing)))
                 + "\nmacOS launchd does not read ~/.bash_profile; export them via "
                 "`launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables."

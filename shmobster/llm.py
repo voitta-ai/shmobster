@@ -16,7 +16,10 @@ from . import config
 # credential into the logs. (Redaction lesson from voitta-yolt#84.)
 litellm.set_verbose = False
 litellm.suppress_debug_info = True
-logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+# Cap ALL THREE LiteLLM loggers: _turn_on_debug() flips every one to DEBUG, and
+# it is "LiteLLM Router" (not "LiteLLM") that services the Router used here.
+for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 _ROUTER = None
 

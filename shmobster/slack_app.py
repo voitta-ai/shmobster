@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, config, handler, identity
+from . import admin_tools, approvals, attachments, config, handler, identity
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -166,8 +166,15 @@ def on_mention(event, say, client, logger):
     # scoped by per-channel policy, not by which channels we respond in.
     thread_ts = event.get("thread_ts") or event.get("ts")
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
+    # Attachments ride in event["files"], not in the text (#68). Only this
+    # message's -- files in thread *history* stay unread for now, since every
+    # reply would re-download them.
+    parts, notes = attachments.to_parts(event.get("files"))
+    text = event.get("text", "")
+    if notes:
+        text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
     try:
-        reply = handler.handle(event.get("text", ""), thread_context=context, channel=channel, thread_ts=thread_ts, user_id=event.get("user"), slack_client=client)
+        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=event.get("user"), slack_client=client, attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
         logger.exception("handler failed")
         reply = f":warning: shmobster error: {exc}"

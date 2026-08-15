@@ -315,6 +315,39 @@ Check what the running agent actually has:
 
     ps eww "$(launchctl print gui/$(id -u)/ai.shmobster.agent | awk '/pid =/{print $3}')" | tr ' ' '\n' | grep ^PATH=
 
+### Liveness watchdog (#66)
+
+`KeepAlive` only reacts to a process that exits, and the nastiest Socket Mode
+failure does not exit: the client reconnects forever without ever receiving
+anything (handshake 101, no `hello`, no pong, server drops the socket ~20s
+later, EPIPE, reconnect, repeat). Every error is caught and logged, so launchd
+sees a healthy service while the agent is deaf. One instance sat like that for
+13 days.
+
+So the process watches itself. A daemon thread exits nonzero -- letting
+`KeepAlive` restart it -- once the connection has looked broken for
+`watchdog_timeout_sec` (default 120, minimum 90, `0` disables) by either of two
+measures:
+
+- **No stable session.** In the wedge no session survives ~21s; a healthy one
+  lives for hours. The watchdog wants some session to reach 60s.
+- **No ping/pong.** Covers a session that stays up but goes quiet. Pongs land
+  every ~10s (`ping_interval`) no matter how busy the workspace is.
+
+Both have to look healthy, and neither is *delivered events*: a bot in quiet
+channels legitimately receives none for days. Reconnect logs are not a signal
+either -- the wedged instance emitted 52,707 of them in 13 days.
+
+The floor of 90s exists because the SDK heals ordinary stalls by itself: it
+tears a session down at `ping_interval * 4` (40s) and needs another cycle to
+re-establish. A shorter timeout turns that self-healing into a restart loop.
+
+Two costs, both accepted. A genuine network outage restarts the agent every
+timeout until the network returns (`ThrottleInterval=10` bounds the churn), and
+each restart clears the in-memory approval queue, so a command parked before the
+restart has to be asked again -- the same "safe direction" `approvals` already
+takes on any restart.
+
 ## Running multiple instances
 
 Each instance is one config file + one process. `shmobster` is just the project

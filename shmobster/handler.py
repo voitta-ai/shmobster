@@ -37,7 +37,7 @@ def _finalize(answer, steps):
     return retval
 
 
-def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, slack_client=None):
+def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, slack_client=None, attachments=None):
     policy = policy_mod.resolve(channel)
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
@@ -70,9 +70,17 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         system += "\n\n" + loc
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
+    # A plain string when there's nothing attached -- multimodal content lists
+    # are the exception, and not every vendor in the waterfall accepts one.
+    # ponytail: if a fallback rejects images the Router just moves on; add a
+    # per-vendor capability flag only once that actually costs us a turn.
+    if attachments:
+        user_content = [{"type": "text", "text": text}] + list(attachments)
+    else:
+        user_content = text
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": text},
+        {"role": "user", "content": user_content},
     ]
     steps = 0
     while steps < config.MAX_TOOL_STEPS:

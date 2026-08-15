@@ -24,6 +24,7 @@ oauth_config:
       - im:history
       - mpim:history
       - reactions:write
+      - files:read
 settings:
   socket_mode_enabled: true
   # Approve/Deny buttons on parked commands (#50). Over Socket Mode this needs

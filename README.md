@@ -114,16 +114,14 @@ Every bot scope the loop actually uses, all granted by
 | `groups:history` | the same, in private channels |
 | `im:history`, `mpim:history` | the same, in DMs and group DMs |
 | `reactions:write` | the `:eyes:` "on it" ack |
+| `files:read` | download image and text attachments on a mention (#68) |
 
-Two the manifest deliberately leaves out:
+One the manifest deliberately leaves out:
 
 - **`users:read`** -- only needed if you leave `agent.label` empty and want the
   label auto-derived from the app's display name (#8). Without it that lookup
   fails and the label falls back to the bot handle, usually the same string.
   Set `agent.label` and you never need this scope.
-- **`files:read`** -- would let the agent fetch image and file attachments. It
-  cannot today regardless: attachments are dropped before they reach the model
-  (#68), so granting this alone changes nothing.
 
 `channels:read` / `groups:read` are **not** needed -- nothing calls
 `conversations.info`. That has one consequence when debugging: you cannot use
@@ -131,6 +129,22 @@ Two the manifest deliberately leaves out:
 `conversations.history` instead and read the error -- `channel_not_found` there
 means **not a member**, not a bad token and not a bad channel ID. Fix it with
 `/invite @<app name>` in that channel.
+
+### Attachments (#68)
+
+Mention the agent with a file attached and it reads it: images go to the model
+as images, text files as text. Anything else comes back as a one-line note in
+the reply saying what was skipped and why -- the agent never silently answers as
+though the message were text-only.
+
+Only files on the *mentioning* message are read. Attachments earlier in the
+thread are not, because every reply in that thread would re-download them.
+
+An app created before `files:read` landed in the manifest must **reinstall** to
+grant it (same flow as `reactions:write` above). Until it does, attachments come
+back as `got Slack's sign-in page instead of the file` -- Slack answers an
+unauthorized file fetch with a **200 and the HTML login page**, not an error, so
+that string is the scope being missing rather than a network problem.
 
 ## Trust model
 

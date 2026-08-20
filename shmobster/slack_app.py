@@ -202,9 +202,30 @@ def main():
             logging.info("skills: %s at %s shadowed by a higher-precedence path", name, path)
     # Say so in the channels when this instance came back on a new version (#77).
     # Ingest-agnostic: announce knows only how to call post(text).
+    #
+    # One dead channel must not silence the rest (#89). A stale or archived
+    # channel id makes chat_postMessage raise, and an unguarded loop aborts
+    # before the healthy channels are ever reached -- observed live, where a
+    # stale DM id sorted first out of the set and the announcement reached
+    # nobody, with one traceback about one channel as the only trace.
+    #
+    # Raising only when NOTHING got through is what keeps announce's retry
+    # honest: it does not record a failed post, so a partial success that
+    # reported failure would re-announce to the channels that already have it
+    # on every boot -- and the watchdog (#66) makes boots frequent. Fan-out
+    # semantics live here rather than in announce, which owns the version
+    # comparison and the state file and knows only post(text).
     def _post(text):
+        delivered = 0
         for channel in config.CHANNELS:
-            app.client.chat_postMessage(channel=channel, text=text)
+            try:
+                app.client.chat_postMessage(channel=channel, text=text)
+                delivered += 1
+            except Exception:
+                logging.exception(
+                    "announce: could not post to %s", config.CHANNEL_NAMES.get(channel, channel))
+        if not delivered:
+            raise RuntimeError("no configured channel accepted the announcement")
 
     announce.check(_post)
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)

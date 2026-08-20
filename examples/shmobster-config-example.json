@@ -1,5 +1,5 @@
 {
-  "_comment": "Secrets are referenced from the environment as ${VAR} and expanded at load; an unset var fails startup loudly. Prefer this over pasting literal keys. macOS launchd does not read ~/.bash_profile -- export the vars via `launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables.",
+  "_comment": "Secrets are referenced from the environment by name (dollar-brace syntax, as in the token and api_key values below) and expanded at load; an unset var fails startup loudly. Prefer this over pasting literal keys. macOS launchd does not read ~/.bash_profile -- export the vars via `launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables.",
   "slack": {
     "bot_token": "${SLACK_BOT_TOKEN}",
     "app_token": "${SLACK_APP_TOKEN}",

@@ -7,6 +7,17 @@ import os
 import tempfile
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
+# The example config references its secrets from the environment (#73), and an
+# unset one is a hard startup failure by design. Offline sanity must not need
+# real keys, so stub every name the example refers to with a placeholder.
+for _var in (
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENROUTER_API_KEY",
+    "NVIDIA_API_KEY",
+):
+    os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
 from shmobster import admin_tools, approvals, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
 

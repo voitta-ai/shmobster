@@ -423,20 +423,26 @@ _ann = os.path.join(tempfile.mkdtemp(), "state.json")
 announce._STATE_PATH = _ann
 _said = []
 
-# fresh install -> recorded silently, so standing up an instance is not an "upgrade"
-assert announce.check(_said.append) is None, _said
-assert _said == [], _said
+# no state (a pre-state install OR a fresh one -- indistinguishable) -> announced,
+# because staying quiet here would skip the first rollout of this very feature
+_first = announce.check(_said.append)
+assert _first is not None and _said == [_first], (_first, _said)
+assert f"v{__version__}" in _first and f"releases/tag/v{__version__}" in _first, _first
+assert "from v" not in _first, "must not claim a previous version it never recorded"
 assert json.load(open(_ann))["announced_version"] == __version__
 
-# same version again (a watchdog restart) -> still silent
+# same version again (a watchdog restart) -> silent; restarts are not events
+_said.clear()
 assert announce.check(_said.append) is None, _said
 assert _said == [], _said
 
-# version moved -> announced once, with the release-notes link, then silent again
+# version moved -> announced once, naming where it came from, then silent again
+_said.clear()
 with open(_ann, "w") as _f:
     json.dump({"announced_version": "0.0.1"}, _f)
 _text = announce.check(_said.append)
 assert _text is not None and _said == [_text], (_text, _said)
+assert "from v0.0.1" in _text, _text
 assert f"v{__version__}" in _text and "0.0.1" in _text, _text
 assert f"releases/tag/v{__version__}" in _text, _text
 assert announce.check(_said.append) is None, _said

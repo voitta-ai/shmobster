@@ -459,9 +459,20 @@ version:
 The trigger is a *version change*, not a boot -- the watchdog and launchd restart
 this process often, and none of that is worth a message. The last announced
 version lives in `shmobster-state.json` (gitignored, path from `SHMOBSTER_STATE`).
-A missing state file means a new install rather than an upgrade, so a fresh
-instance records its version silently instead of announcing to a channel that
-has never seen it. A failed post is not recorded, so the next boot retries.
+
+An instance with **no** recorded version announces too, without claiming where it
+came from:
+
+> :sparkles: now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
+
+That case is a deployment installed before the state file existed *or* a brand
+new one -- indistinguishable from inside the process. Staying quiet would skip
+the first upgrade to any version that has this feature, which is the rollout it
+was written for; the cost is one extra message on a new install, which tells that
+channel which build just joined it.
+
+A failed post is not recorded, so the next boot retries rather than losing the
+announcement.
 
 `announce` knows nothing about Slack -- it takes a `post(text)` callable. A new
 ingest mode wires its own poster; see [CLAUDE.md](CLAUDE.md).

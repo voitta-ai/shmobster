@@ -4,6 +4,14 @@ An instance is restarted constantly -- the watchdog does it, launchd does it --
 so "announce on boot" would be noise. The signal is a *version change*: the
 last announced version is persisted, and only a difference is worth saying.
 
+No state file does NOT mean "stay quiet". Every deployment that predates this
+feature has no state, and the first boot after pulling it is precisely the
+upgrade worth announcing -- staying silent there would skip the only rollout
+this feature was written for. So an unrecorded previous version announces too,
+in a shape that does not claim to know where it came from. The cost is one
+extra message on a genuinely new install, which tells that channel which build
+just joined it -- worth saying anyway.
+
 Ingest-agnostic on purpose. This module knows nothing about Slack; it takes a
 `post(text)` callable, so a second ingest mode (email, CLI, whatever comes) gets
 upgrade announcements by passing its own poster. See CLAUDE.md -- a new ingest
@@ -45,31 +53,35 @@ def _write_state(state):
 
 
 def message(previous):
-    """The announcement text. `previous` is the version last announced."""
+    """The announcement text. `previous` is the version last announced, or None
+    when this instance has never recorded one -- an install that predates the
+    state file, or a new deployment. Those are indistinguishable from here, so
+    the wording claims only what is known."""
     url = _RELEASE_URL.format(version=__version__)
-    retval = (
-        f":sparkles: upgraded to *shmobster v{__version__}* (from v{previous}) "
-        f"-- <{url}|release notes>. Now running `{build()}`."
-    )
+    if previous is None:
+        retval = (
+            f":sparkles: now running *shmobster v{__version__}* "
+            f"-- <{url}|release notes>. Build `{build()}`."
+        )
+    else:
+        retval = (
+            f":sparkles: upgraded to *shmobster v{__version__}* (from v{previous}) "
+            f"-- <{url}|release notes>. Now running `{build()}`."
+        )
     return retval
 
 
 def check(post):
-    """Announce via `post(text)` if the version changed since the last boot that
-    announced. Returns the text posted, or None.
+    """Announce via `post(text)` if this instance is running a version it has not
+    announced before. Returns the text posted, or None.
 
-    A missing state file means a new install, not an upgrade: the version is
-    recorded silently, so standing up an instance does not announce to a channel
-    that has never seen this agent before."""
+    A missing state file is announced, not swallowed: an install that predates
+    the state file looks exactly like a fresh one from here, and staying quiet
+    would skip the first real upgrade to this feature. The message just does not
+    claim a previous version it does not have."""
     state = _read_state()
     previous = state.get("announced_version")
     if previous == __version__:
-        retval = None
-        return retval
-    if previous is None:
-        state["announced_version"] = __version__
-        _write_state(state)
-        logging.info("announce: first boot at %s -- recorded, not announced", __version__)
         retval = None
         return retval
     text = message(previous)
@@ -83,6 +95,6 @@ def check(post):
         return retval
     state["announced_version"] = __version__
     _write_state(state)
-    logging.info("announce: %s -> %s announced", previous, __version__)
+    logging.info("announce: %s -> %s announced", previous or "(unrecorded)", __version__)
     retval = text
     return retval

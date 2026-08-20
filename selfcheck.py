@@ -418,7 +418,8 @@ handler.handle("what version are you", channel="C1", slack_client=_fs)
 assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
 
 # 19) upgrade announcement (#77): a version change is announced once, a restart
-# on the same version is silent, and a fresh install does not announce at all
+# on the same version is silent, and an install with no recorded version still
+# announces -- without claiming an origin it never had
 _ann = os.path.join(tempfile.mkdtemp(), "state.json")
 announce._STATE_PATH = _ann
 _said = []

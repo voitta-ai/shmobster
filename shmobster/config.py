@@ -85,6 +85,12 @@ AGENT_LABEL = _agent.get("label", "")  # empty -> auto-derive from Slack (#8)
 BOT_USER_ID = ""  # resolved at startup (auth.test) so the agent recognizes itself
 WORKSPACE = _agent.get("workspace", "./workspace")
 
+# Skills (#74): directories holding skillz-format `<name>/SKILL.md` files. Order
+# is precedence -- the first path that defines a name wins, so a private catalog
+# listed first shadows the public one. Empty (the default) means no skills, and
+# the standing prompt pays nothing for the feature.
+SKILL_PATHS = _cfg.get("skills", {}).get("paths", [])
+
 # Ordered list of {name, model, api_key, [api_base]} -- first is primary.
 WATERFALL = _cfg.get("waterfall", [])
 

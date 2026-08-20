@@ -1,5 +1,5 @@
 {
-  "_comment": "Secrets are referenced from the environment as ${VAR} and expanded at load; an unset var fails startup loudly. Prefer this over pasting literal keys. macOS launchd does not read ~/.bash_profile -- export the vars via `launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables.",
+  "_comment": "Secrets are referenced from the environment by name (dollar-brace syntax, as in the token and api_key values below) and expanded at load; an unset var fails startup loudly. Prefer this over pasting literal keys. macOS launchd does not read ~/.bash_profile -- export the vars via `launchctl setenv` (osx-env-sync) or the plist EnvironmentVariables.",
   "slack": {
     "bot_token": "${SLACK_BOT_TOKEN}",
     "app_token": "${SLACK_APP_TOKEN}",
@@ -29,6 +29,12 @@
       "api_base": "https://integrate.api.nvidia.com/v1"
     }
   ],
+  "skills": {
+    "_comment": "Directories of skillz-format <name>/SKILL.md skills (#74). Order is precedence: the first path defining a name wins, so a private catalog can shadow the public one. Omit the block for no skills.",
+    "paths": [
+      "/path/to/skillz/skills"
+    ]
+  },
   "exec": {
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",

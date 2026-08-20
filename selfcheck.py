@@ -3,7 +3,9 @@
 Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
 handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
+import io
 import json
+import logging
 import os
 import tempfile
 
@@ -20,7 +22,7 @@ for _var in (
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
-from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
 # config points at a placeholder path (CI has no yolt checkout). Stand up a stub
@@ -479,5 +481,34 @@ if True:
     _out = handler.handle("dump env", channel="C1", slack_client=_fs)
     assert _akia not in "".join(_leaked), "raw credential reached the model context"
     assert _akia not in _out, _out
+
+    # the approval surface renders the command TWICE -- fallback text and the
+    # mrkdwn block -- and a credential rides argv routinely, so both are scrubbed
+    _blocks = slack_blocks.approval("7", {"command": f"aws configure --key {_akia}", "reason": "mutating"})
+    _rendered = json.dumps(_blocks)
+    assert _akia not in _rendered, _rendered
+    assert "[REDACTED:" in _rendered, _rendered
+    assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
+
+    # logs: a credential inside an exception traceback is appended by the
+    # FORMATTER from exc_info, so a filter on record.msg would never see it
+    _stream = io.StringIO()
+    _h = logging.StreamHandler(_stream)
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    _root = logging.getLogger()
+    _saved = list(_root.handlers)
+    _root.handlers = [_h]
+    try:
+        redact.install_logging()
+        try:
+            raise RuntimeError(f"vendor rejected key {_akia}")
+        except RuntimeError:
+            logging.getLogger("selfcheck").exception("handler failed")
+        _logged = _stream.getvalue()
+    finally:
+        _root.handlers = _saved
+    assert _akia not in _logged, _logged
+    assert "[REDACTED:" in _logged, _logged
+    assert "RuntimeError" in _logged, "the traceback must survive -- only the secret goes"
 
 print(f"selfcheck OK -- shmobster {_b}")

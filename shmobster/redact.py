@@ -24,6 +24,7 @@ Redaction happens at collection (the tool result), not only at render, so every
 downstream copy -- model context, vendor-side logs, the Slack message -- inherits
 it."""
 import importlib.util
+import logging
 import os
 
 from . import config
@@ -97,4 +98,39 @@ def scrub(text):
         if value in out:
             out = out.replace(value, _MARK)
     retval = _load().redact(out)
+    return retval
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Scrub a log record after it is fully rendered.
+
+    A `logging.Filter` on `record.msg` is not enough: the traceback from
+    `logger.exception(...)` is appended by the *formatter*, from `exc_info`, so a
+    credential inside an exception message or its frames bypasses any filter that
+    only sees the format string. Formatting is the last point where the whole
+    line exists as one string, so that is where the scrub belongs."""
+
+    def __init__(self, inner):
+        super().__init__()
+        self._inner = inner
+
+    def format(self, record):
+        retval = scrub(self._inner.format(record))
+        return retval
+
+
+def install_logging():
+    """Wrap every root handler's formatter so nothing reaches a log file
+    unscrubbed -- including third-party loggers (#72).
+
+    Call after logging is configured. Idempotent: a handler already wrapped is
+    left alone, so a second call cannot double-wrap."""
+    root = logging.getLogger()
+    wrapped = 0
+    for handler in root.handlers:
+        if isinstance(handler.formatter, _RedactingFormatter):
+            continue
+        handler.setFormatter(_RedactingFormatter(handler.formatter or logging.Formatter()))
+        wrapped += 1
+    retval = wrapped
     return retval

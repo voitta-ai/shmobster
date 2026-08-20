@@ -52,6 +52,7 @@
   },
   "max_tool_steps": 50,
   "warn_tool_steps": 40,
+  "budget_park_sec": 3600,
   "watchdog_timeout_sec": 120,
   "trusted_users": []
 }

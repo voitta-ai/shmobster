@@ -180,6 +180,16 @@ if WARN_TOOL_STEPS >= MAX_TOOL_STEPS:
         f"max_tool_steps ({MAX_TOOL_STEPS})"
     )
 
+# Budget parking (#80): seconds to skip a vendor that reported no budget, when
+# the vendor does not say when it will be back. LiteLLM cools only 429/401/408/404,
+# so a 400 usage cap or a 402 no-credits is re-dialled every turn unless we park
+# it ourselves. 0 disables parking (every turn pays the dead vendor again).
+BUDGET_PARK_SEC = _cfg.get("budget_park_sec", 3600)
+if isinstance(BUDGET_PARK_SEC, bool) or not isinstance(BUDGET_PARK_SEC, int) or BUDGET_PARK_SEC < 0:
+    raise SystemExit(
+        f"config budget_park_sec must be a non-negative integer (got {BUDGET_PARK_SEC!r})"
+    )
+
 # Liveness watchdog (#66): seconds without a working Socket Mode connection
 # before we exit nonzero so the supervisor restarts us. 0 disables it.
 #

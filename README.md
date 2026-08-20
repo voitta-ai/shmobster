@@ -16,6 +16,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Trust model](#trust-model)
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
+- [When a vendor runs out of budget (#80)](#when-a-vendor-runs-out-of-budget-80)
 - [Skills (#74)](#skills-74)
 - [Credential redaction (#72)](#credential-redaction-72)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
@@ -239,6 +240,8 @@ One JSON config, no `.env`. Copy the example and fill it in:
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
   `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
   endpoints like openrouter / nvidia).
+- `budget_park_sec` -- how long to skip a vendor that reported no budget
+  (default 3600; 0 disables). See **When a vendor runs out of budget**.
 - `skills.paths` -- directories of skills to load (see **Skills** below). Omit
   for none.
 
@@ -385,6 +388,46 @@ reachable through OpenRouter and Requesty, which is the easier path.
 Model ids retire. `gemini-2.0-flash` and `meta/llama-3.1-405b-instruct` both went
 404 during this round of testing, so prefer an alias like `gemini-flash-latest`
 where the provider offers one, and expect to re-run the probe above periodically.
+
+### When a vendor runs out of budget (#80)
+
+LiteLLM decides cooldowns by HTTP status and cools only 429/401/408/404. Budget
+exhaustion is none of those -- Anthropic answers a usage cap with **400**,
+OpenRouter answers no-credit with **402** -- so out of the box a vendor that is
+dead for a month is re-dialled on every single turn, failing before the waterfall
+falls through. (Filed upstream as
+[BerriAI/litellm#37592](https://github.com/BerriAI/litellm/issues/37592).)
+
+shmobster parks it instead. On a 4xx whose message names a spend problem, the
+vendor is dropped from the chain and the Router is rebuilt without it, so it is
+never dialled again until its window expires:
+
+    waterfall: openrouter is out of budget; parked for 3600s
+    waterfall: rebuilding, chain is now anthropic -> gemini -> requesty
+
+- **Status alone is not enough.** A 400 is also "your request was malformed", and
+  parking a vendor for an hour over one bad prompt would be worse than the
+  problem. The message has to name money too.
+- **A stated recovery date wins.** Anthropic says `You will regain access on
+  YYYY-MM-DD`; that date is used instead of the window. A date that fails to
+  parse falls back to the window rather than being trusted -- a mis-parse could
+  park a vendor for a year.
+- **The window is `budget_park_sec`** (default 3600). `0` disables parking.
+- **It survives restarts.** Expiries live in `shmobster-state.json`; the watchdog
+  restarts this process routinely, and an in-memory park would be re-learned
+  every few minutes.
+- **A vendor comes back on its own**, with no timer: expired entries are pruned
+  whenever the chain is read, so the first turn after the window rebuilds with
+  that vendor back in place.
+- **A fully parked chain still tries.** Refusing to answer is worse than one
+  wasted call, and every park is ultimately a guess about someone else's billing.
+- **The turn that discovers the exhaustion is still answered** -- park, rebuild,
+  retry once -- rather than surfacing the error to whoever happened to ask.
+
+Rate limits are the other half and LiteLLM does handle those: `allowed_fails=0`
+now cools a deployment on the *first* 429 rather than after a threshold (#51).
+A Slack agent's traffic is bursty and low-volume, so by the time a threshold is
+reached the burst is over and every failure in it was a wasted round-trip.
 
 ## Skills (#74)
 

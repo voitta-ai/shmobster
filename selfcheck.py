@@ -16,15 +16,19 @@ for _var in (
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "REQUESTY_API_KEY",
     "OPENROUTER_API_KEY",
-    "NVIDIA_API_KEY",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
 from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
-assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
+assert [v["name"] for v in config.WATERFALL] == ["anthropic", "gemini", "requesty", "openrouter"], config.WATERFALL
+# every fallback must be a distinct vendor: a waterfall whose slots share a
+# rate-limit budget is one outage, listed four times
+assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), config.WATERFALL
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
 assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER

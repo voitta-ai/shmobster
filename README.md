@@ -17,6 +17,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
 - [When a vendor runs out of budget (#80)](#when-a-vendor-runs-out-of-budget-80)
+- [Codex subscription as a rung (#35)](#codex-subscription-as-a-rung-35)
 - [Skills (#74)](#skills-74)
 - [Credential redaction (#72)](#credential-redaction-72)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
@@ -383,11 +384,63 @@ reachable through OpenRouter and Requesty, which is the easier path.
 | Requesty | `nvidia/nemotron-3-super-120b-a12b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `nvidia/nemotron-3-ultra-550b-a55b`, `google/gemma-4-31b-it` | yes |
 | OpenRouter | `z-ai/glm-5.2:free`, `nvidia/nemotron-3-super-120b-a12b:free` | yes |
 | Gemini | `gemini-flash-latest` | yes |
+| Codex subscription | `chatgpt/gpt-5.5` (see below) | yes |
 | NVIDIA direct | `meta/llama-3.3-70b-instruct` | **times out** -- not usable |
 
 Model ids retire. `gemini-2.0-flash` and `meta/llama-3.1-405b-instruct` both went
 404 during this round of testing, so prefer an alias like `gemini-flash-latest`
 where the provider offers one, and expect to re-run the probe above periodically.
+
+### Codex subscription as a rung (#35)
+
+Every other rung is an `api_key` HTTP row that LiteLLM can dial from config
+alone. A **codex subscription** is not: it authenticates with the ChatGPT OAuth
+tokens the codex CLI keeps in `~/.codex/auth.json`, and it speaks the Responses
+API rather than chat/completions. `shmobster/codex_llm.py` is the bridge that
+makes it look like any other rung -- an in-process `litellm.CustomLLM`, so there
+is **no second process** to run under launchd.
+
+Config is one keyless row:
+
+    {"name": "codex", "model": "codex/chatgpt/gpt-5.5"}
+
+Three things about that string:
+
+- **No `api_key`.** The credential is the CLI's token file. `CODEX_HOME` is
+  honoured if you set it.
+- **The `chatgpt/` segment is required, not decoration.** LiteLLM dispatches on
+  the model name *before* it dispatches on the custom provider, so a row of
+  `codex/gpt-5.5` leaves it holding the bare `gpt-5.5`, recognising that as an
+  OpenAI model, and quietly billing a platform API key -- the bridge is never
+  reached. The segment is stripped back off before the request goes out.
+- **The model must be one your ChatGPT plan allows.** `gpt-5.5` works;
+  `gpt-5.1-codex` is refused with *"not supported when using Codex with a
+  ChatGPT account"*.
+
+It is a full participant, not a text-only last resort: **tool calls work**, so
+it can sit anywhere in the chain.
+
+**Token rotation is yours, not ours.** `auth.json` is re-read on every call, so
+any rotation the codex CLI performs is picked up without a restart -- and the
+access token is a ~10-day JWT that the CLI rotates whenever it runs. shmobster
+deliberately does **not** refresh it: that would mean writing back to `auth.json`
+and racing the CLI over a refresh token that may be single-use, and breaking the
+operator's actual codex login is far worse than one dead rung. Instead:
+
+- within 24h of expiry, every call logs `codex: the ChatGPT token expires in ~Nh`
+  (at most hourly, so a busy channel does not turn it into spam);
+- once expired, the rung returns 401, LiteLLM cools it, and the chain falls
+  through.
+
+Either way the fix is `codex login` -- or just using the codex CLI for anything,
+which rotates the file as a side effect.
+
+Why read the token rather than drive the binary (`codex exec`, or the
+`codex app-server` protocol OpenClaw's codex extension speaks): both of those
+keep the token out of our hands, but both hand us an *agent* -- codex brings its
+own tool set, sandbox and approval policy, and shmobster already owns that loop
+(handler + YOLT gate + channel policy). Nesting a second agent inside one
+waterfall rung buys nothing here.
 
 ### When a vendor runs out of budget (#80)
 

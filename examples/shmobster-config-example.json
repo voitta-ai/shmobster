@@ -4,7 +4,10 @@
     "bot_token": "${SLACK_BOT_TOKEN}",
     "app_token": "${SLACK_APP_TOKEN}",
     "channels": [
-      { "name": "your-channel", "id": "C0000000000" }
+      {
+        "name": "your-channel",
+        "id": "C0000000000"
+      }
     ]
   },
   "agent": {
@@ -13,20 +16,27 @@
   },
   "waterfall": [
     {
+      "_comment": "First entry is primary. Below it, independent free-tier routers: they are rate-limited separately, so one being throttled does not take the others with it. See README 'Free-tier fallbacks'.",
       "name": "anthropic",
       "model": "anthropic/claude-sonnet-5",
       "api_key": "${ANTHROPIC_API_KEY}"
     },
     {
-      "name": "openrouter",
-      "model": "openrouter/openai/gpt-4o",
-      "api_key": "${OPENROUTER_API_KEY}"
+      "name": "gemini",
+      "model": "gemini/gemini-flash-latest",
+      "api_key": "${GEMINI_API_KEY}"
     },
     {
-      "name": "nvidia",
-      "model": "nvidia_nim/meta/llama-3.1-405b-instruct",
-      "api_key": "${NVIDIA_API_KEY}",
-      "api_base": "https://integrate.api.nvidia.com/v1"
+      "_comment": "Requesty has no litellm provider prefix; it is OpenAI-compatible, so use openai/<model> plus api_base.",
+      "name": "requesty",
+      "model": "openai/nvidia/nemotron-3-super-120b-a12b",
+      "api_key": "${REQUESTY_API_KEY}",
+      "api_base": "https://router.requesty.ai/v1"
+    },
+    {
+      "name": "openrouter",
+      "model": "openrouter/z-ai/glm-5.2:free",
+      "api_key": "${OPENROUTER_API_KEY}"
     }
   ],
   "skills": {

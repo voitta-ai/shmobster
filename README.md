@@ -15,6 +15,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
 - [Config & run](#config--run)
+- [Free-tier fallbacks](#free-tier-fallbacks)
 - [Skills (#74)](#skills-74)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
 - [Versioning & releases (#76)](#versioning--releases-76)
@@ -306,6 +307,83 @@ Run:
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     .venv/bin/python selfcheck.py            # offline sanity check
     .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
+
+## Free-tier fallbacks
+
+The waterfall exists for rate limits, so the slots below the primary should be
+things that keep answering when the primary will not. Free-tier models on the
+routers below cost nothing and are **rate-limited independently of each other**,
+which is the property that matters: one throttled route does not take the rest
+down with it. Observed directly -- `google/gemma-4-31b-it` returns 429 on
+OpenRouter's free tier while the same model answers through Requesty.
+
+Two rules before adding any fallback:
+
+**1. It must actually do tool calls.** The loop is a tool-calling loop
+(`run_shell`, the Slack tools, approvals). A model that answers prose but ignores
+tool schemas does not error -- it replies without ever calling a tool, and the
+agent looks lobotomized rather than broken. *Declared* support is not enough;
+send a real tool schema and assert a `tool_calls` came back:
+
+    import litellm
+    TOOLS = [{"type": "function", "function": {
+        "name": "run_shell", "description": "Run a shell command.",
+        "parameters": {"type": "object",
+                       "properties": {"command": {"type": "string"}},
+                       "required": ["command"]}}}]
+    r = litellm.completion(model="...", api_key="...", timeout=45,
+                           messages=[{"role": "user", "content":
+                                      "Use run_shell to run: uname -a"}],
+                           tools=TOOLS)
+    assert r.choices[0].message.tool_calls   # prose here == unusable fallback
+
+**2. Pass a `timeout`.** A free endpoint that hangs is worse than one that
+fails: without a timeout the whole turn blocks, and the Slack ack just spins.
+NVIDIA's direct NIM endpoint answers plain completions but timed out twice at 45s
+on a tool-schema request, which is why it is not in the example config.
+
+### Finding free, tool-capable models
+
+**OpenRouter** -- free ids end in `:free`; the catalogue lists capabilities:
+
+    curl -s https://openrouter.ai/api/v1/models | python3 -c '
+    import json,sys
+    for m in json.load(sys.stdin)["data"]:
+        p = m.get("pricing", {})
+        if p.get("prompt") in ("0","0.0") and "tools" in (m.get("supported_parameters") or []):
+            print(m["id"], m.get("context_length"))'
+
+Config: `"model": "openrouter/<id>"`, `"api_key": "${OPENROUTER_API_KEY}"`.
+
+**Requesty** -- `input_price` / `output_price` of 0, and `supports_tool_calling`:
+
+    curl -s https://router.requesty.ai/v1/models -H "Authorization: Bearer $REQUESTY_API_KEY"       | python3 -c '
+    import json,sys
+    for m in json.load(sys.stdin)["data"]:
+        if float(m.get("input_price") or 0) == 0 and m.get("supports_tool_calling"):
+            print(m["id"], m.get("context_window"))'
+
+litellm has no `requesty/` provider prefix, but the endpoint is OpenAI-compatible:
+`"model": "openai/<id>"` plus `"api_base": "https://router.requesty.ai/v1"`.
+
+**NVIDIA NIM** -- `https://integrate.api.nvidia.com/v1/models` lists what a key
+can reach, but note two traps: that endpoint answers `200` to *any* bearer token,
+so it cannot tell you whether a key is valid; and model ids are retired without
+notice (`meta/llama-3.1-405b-instruct` now 404s). The same NVIDIA models are
+reachable through OpenRouter and Requesty, which is the easier path.
+
+### Verified working
+
+| Route | Model | Tool calls |
+|---|---|---|
+| Requesty | `nvidia/nemotron-3-super-120b-a12b`, `nvidia/nemotron-3.5-lightning-30b-a3b`, `nvidia/nemotron-3-ultra-550b-a55b`, `google/gemma-4-31b-it` | yes |
+| OpenRouter | `z-ai/glm-5.2:free`, `nvidia/nemotron-3-super-120b-a12b:free` | yes |
+| Gemini | `gemini-flash-latest` | yes |
+| NVIDIA direct | `meta/llama-3.3-70b-instruct` | **times out** -- not usable |
+
+Model ids retire. `gemini-2.0-flash` and `meta/llama-3.1-405b-instruct` both went
+404 during this round of testing, so prefer an alias like `gemini-flash-latest`
+where the provider offers one, and expect to re-run the probe above periodically.
 
 ## Skills (#74)
 

@@ -17,12 +17,13 @@ for _var in (
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "REQUESTY_API_KEY",
     "OPENROUTER_API_KEY",
-    "NVIDIA_API_KEY",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
-from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
 # config points at a placeholder path (CI has no yolt checkout). Stand up a stub
@@ -45,7 +46,10 @@ _REAL_YOLT = config.YOLT_CLASSIFIER
 config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 
 # 0) config parsed: waterfall + channels + exec block
-assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
+assert [v["name"] for v in config.WATERFALL] == ["anthropic", "gemini", "requesty", "openrouter"], config.WATERFALL
+# every fallback must be a distinct vendor: a waterfall whose slots share a
+# rate-limit budget is one outage, listed four times
+assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), config.WATERFALL
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
 assert _REAL_YOLT.endswith("grammar_classifier.py"), _REAL_YOLT
@@ -438,7 +442,53 @@ handler._SYSTEM = None
 handler.handle("what version are you", channel="C1", slack_client=_fs)
 assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
 
-# 19) credential redaction (#72): tool output is scrubbed at collection, this
+# 19) upgrade announcement (#77): a version change is announced once, a restart
+# on the same version is silent, and an install with no recorded version still
+# announces -- without claiming an origin it never had
+_ann = os.path.join(tempfile.mkdtemp(), "state.json")
+announce._STATE_PATH = _ann
+_said = []
+
+# no state (a pre-state install OR a fresh one -- indistinguishable) -> announced,
+# because staying quiet here would skip the first rollout of this very feature
+_first = announce.check(_said.append)
+assert _first is not None and _said == [_first], (_first, _said)
+assert f"v{__version__}" in _first and f"releases/tag/v{__version__}" in _first, _first
+assert "from v" not in _first, "must not claim a previous version it never recorded"
+assert json.load(open(_ann))["announced_version"] == __version__
+
+# same version again (a watchdog restart) -> silent; restarts are not events
+_said.clear()
+assert announce.check(_said.append) is None, _said
+assert _said == [], _said
+
+# version moved -> announced once, naming where it came from, then silent again
+_said.clear()
+with open(_ann, "w") as _f:
+    json.dump({"announced_version": "0.0.1"}, _f)
+_text = announce.check(_said.append)
+assert _text is not None and _said == [_text], (_text, _said)
+assert "from v0.0.1" in _text, _text
+assert f"v{__version__}" in _text and "0.0.1" in _text, _text
+assert f"releases/tag/v{__version__}" in _text, _text
+assert announce.check(_said.append) is None, _said
+assert len(_said) == 1, _said
+
+# a post that raises is not recorded -- the next boot retries instead of skipping
+with open(_ann, "w") as _f:
+    json.dump({"announced_version": "0.0.1"}, _f)
+
+
+def _boom(_text):
+    raise RuntimeError("slack down")
+
+
+logging.disable(logging.ERROR)  # the failure is the point here; don't print its traceback
+assert announce.check(_boom) is None
+logging.disable(logging.NOTSET)
+assert json.load(open(_ann))["announced_version"] == "0.0.1", "failed post must not advance state"
+
+# 20) credential redaction (#72): tool output is scrubbed at collection, this
 # instance's own secrets are caught by value, and ordinary output survives
 _real_hooks = os.path.dirname(_REAL_YOLT)
 if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):

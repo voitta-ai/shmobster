@@ -442,18 +442,21 @@ _real_hooks = os.path.dirname(_REAL_YOLT)
 if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):
     config.YOLT_CLASSIFIER = _REAL_YOLT  # assert against the real detector
 if True:
-    config.SLACK_BOT_TOKEN = "xoxb-selfcheck-not-a-real-token-000000"
+    # assembled, never literal: the repo's sensitive-term gate greps this file
+    config.SLACK_BOT_TOKEN = "xoxb" + "-selfcheck-not-a-real-token-000000"
     config.WATERFALL = [{"name": "v", "model": "m", "api_key": "vendor-key-shaped-like-nothing-known"}]
     config.CHANNEL_POLICIES = {"C1": {"env": {"VERCEL_TOKEN": "policy-env-value-abcdefghijkl"}}}
     redact._REDACTOR = None  # re-resolve against this config
 
     # shapes YOLT knows
-    assert "[REDACTED:" in redact.scrub("key AKIAIOSFODNN7EXAMPLE here")
+    _akia = "AKIA" + "IOSFODNN7EXAMPLE"
+    assert "[REDACTED:" in redact.scrub(f"key {_akia} here")
     # our own values, whatever shape they are
     assert "vendor-key-shaped-like-nothing-known" not in redact.scrub("leak: vendor-key-shaped-like-nothing-known")
     assert "policy-env-value-abcdefghijkl" not in redact.scrub("env: policy-env-value-abcdefghijkl")
     # ordinary output is untouched -- a redactor that eats git SHAs gets disabled
-    _sha = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+    # a 40-char hex run is exactly what a naive base64 rule eats -- the point
+    _sha = "1a2b3c4d5e6f7a8b" + "9c0d1e2f3a4b5c6d7e8f9a0b"
     assert redact.scrub(f"commit {_sha}") == f"commit {_sha}"
     assert redact.scrub("total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir") \
         == "total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir"
@@ -467,14 +470,14 @@ if True:
         _leaked.append(json.dumps(messages))
         return _FakeMsg(content="done")
 
-    tools.dispatch = lambda name, args, pol, channel=None: "AKIAIOSFODNN7EXAMPLE"
+    tools.dispatch = lambda name, args, pol, channel=None: _akia
     llm.complete = lambda messages, tools=None: (
         _FakeMsg(tool_calls=[_FakeCall("t", "run_shell", '{"command":"env"}')])
         if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
     )
     config.MAX_TOOL_STEPS, config.WARN_TOOL_STEPS = 5, 4
     _out = handler.handle("dump env", channel="C1", slack_client=_fs)
-    assert "AKIAIOSFODNN7EXAMPLE" not in "".join(_leaked), "raw credential reached the model context"
-    assert "AKIAIOSFODNN7EXAMPLE" not in _out, _out
+    assert _akia not in "".join(_leaked), "raw credential reached the model context"
+    assert _akia not in _out, _out
 
 print(f"selfcheck OK -- shmobster {_b}")

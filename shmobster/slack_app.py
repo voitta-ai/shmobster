@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, attachments, build, config, handler, identity, skills, watchdog
+from . import admin_tools, approvals, attachments, build, config, handler, identity, redact, skills, watchdog
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -102,7 +102,9 @@ def _post_pending(client, channel, thread_ts):
             client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
-                text=f"Needs approval [{req_id}]: {req['command']}",
+                # A parked command is echoed verbatim, and a credential rides
+                # command lines routinely -- that is the YOLT lesson (#72).
+                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
                 blocks=_approval_blocks(req_id, req),
             )
         except Exception:
@@ -123,7 +125,7 @@ def _resolve(ack, body, client, action, run):
         "thread_ts": thread_ts,
         "client": client,
     }
-    result = run(action["value"], ctx)
+    result = redact.scrub(run(action["value"], ctx))
     try:
         client.chat_update(
             channel=channel,
@@ -218,6 +220,9 @@ def main():
         config.BOT_USER_ID = app.client.auth_test().get("user_id", "")
     except Exception:
         logging.exception("could not resolve bot user id")
+    # Fail at boot if redaction is unavailable, not at the first credential --
+    # posting an unredacted secret is worse than not starting (#72).
+    redact.require()
     logging.info("agent: %s (%s) -- shmobster %s", config.AGENT_LABEL, config.BOT_USER_ID, build())
     # Skills index (#74): names only in the log -- a skill body is content, and
     # logs are a surface we keep boring.

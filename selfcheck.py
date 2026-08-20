@@ -3,6 +3,7 @@
 Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
 handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
+import json
 import os
 import tempfile
 
@@ -19,13 +20,33 @@ for _var in (
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
-from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
+
+# Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
+# config points at a placeholder path (CI has no yolt checkout). Stand up a stub
+# next to a stub classifier so every handler path below exercises the scrub; the
+# real detector is asserted in section 19 when this machine has it.
+_yolt_dir = tempfile.mkdtemp()
+with open(os.path.join(_yolt_dir, "secret_redact.py"), "w") as _f:
+    _f.write(
+        "import re\n"
+        "_P = [('aws-access-key-id', re.compile(r'\\bAKIA[0-9A-Z]{16}\\b')),\n"
+        "      ('slack-token', re.compile(r'\\bxox[baprse]-[0-9A-Za-z-]{8,}'))]\n"
+        "def redact(text):\n"
+        "    if not text:\n"
+        "        return text\n"
+        "    for kind, pat in _P:\n"
+        "        text = pat.sub('[REDACTED:%s]' % kind, text)\n"
+        "    return text\n"
+    )
+_REAL_YOLT = config.YOLT_CLASSIFIER
+config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
-assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER
+assert _REAL_YOLT.endswith("grammar_classifier.py"), _REAL_YOLT
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
@@ -414,5 +435,46 @@ llm.complete = _cap_ver
 handler._SYSTEM = None
 handler.handle("what version are you", channel="C1", slack_client=_fs)
 assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
+
+# 19) credential redaction (#72): tool output is scrubbed at collection, this
+# instance's own secrets are caught by value, and ordinary output survives
+_real_hooks = os.path.dirname(_REAL_YOLT)
+if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):
+    config.YOLT_CLASSIFIER = _REAL_YOLT  # assert against the real detector
+if True:
+    config.SLACK_BOT_TOKEN = "xoxb-selfcheck-not-a-real-token-000000"
+    config.WATERFALL = [{"name": "v", "model": "m", "api_key": "vendor-key-shaped-like-nothing-known"}]
+    config.CHANNEL_POLICIES = {"C1": {"env": {"VERCEL_TOKEN": "policy-env-value-abcdefghijkl"}}}
+    redact._REDACTOR = None  # re-resolve against this config
+
+    # shapes YOLT knows
+    assert "[REDACTED:" in redact.scrub("key AKIAIOSFODNN7EXAMPLE here")
+    # our own values, whatever shape they are
+    assert "vendor-key-shaped-like-nothing-known" not in redact.scrub("leak: vendor-key-shaped-like-nothing-known")
+    assert "policy-env-value-abcdefghijkl" not in redact.scrub("env: policy-env-value-abcdefghijkl")
+    # ordinary output is untouched -- a redactor that eats git SHAs gets disabled
+    _sha = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+    assert redact.scrub(f"commit {_sha}") == f"commit {_sha}"
+    assert redact.scrub("total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir") \
+        == "total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir"
+    # non-strings pass through
+    assert redact.scrub(None) is None
+
+    # the tool-result path scrubs before the model ever sees it
+    _leaked = []
+
+    def _cap_tool(messages, tools=None):
+        _leaked.append(json.dumps(messages))
+        return _FakeMsg(content="done")
+
+    tools.dispatch = lambda name, args, pol, channel=None: "AKIAIOSFODNN7EXAMPLE"
+    llm.complete = lambda messages, tools=None: (
+        _FakeMsg(tool_calls=[_FakeCall("t", "run_shell", '{"command":"env"}')])
+        if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
+    )
+    config.MAX_TOOL_STEPS, config.WARN_TOOL_STEPS = 5, 4
+    _out = handler.handle("dump env", channel="C1", slack_client=_fs)
+    assert "AKIAIOSFODNN7EXAMPLE" not in "".join(_leaked), "raw credential reached the model context"
+    assert "AKIAIOSFODNN7EXAMPLE" not in _out, _out
 
 print(f"selfcheck OK -- shmobster {_b}")

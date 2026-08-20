@@ -7,6 +7,7 @@ import ast
 import io
 import json
 import logging
+import datetime
 import os
 import tempfile
 import time
@@ -24,6 +25,8 @@ for _var in (
     "OPENROUTER_API_KEY",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
+
+import litellm  # noqa: E402
 
 from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, state, tools, yolt_gate  # noqa: E402
 
@@ -614,8 +617,11 @@ class _VendorError(Exception):
 
 
 # the real shapes, verbatim from live failures
+# Derived, never hard-coded: a literal date stops being "in the future" and the
+# assertions below would start failing on a calendar boundary rather than a bug.
+_future = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
 _cap = _VendorError(400, "AnthropicException - You have reached your specified API usage "
-                         "limits. You will regain access on 2026-09-01", "claude-sonnet-5", "anthropic")
+                         f"limits. You will regain access on {_future}", "claude-sonnet-5", "anthropic")
 _credits = _VendorError(402, "OpenrouterException - Insufficient credits. Add more using "
                              "https://openrouter.ai/settings/credits", "openai/gpt-4o", "openrouter")
 # a 400 that is NOT about money must not park a vendor over one bad prompt
@@ -626,21 +632,34 @@ assert llm.is_budget_error(_cap), "usage cap is a budget error"
 assert llm.is_budget_error(_credits), "insufficient credits is a budget error"
 assert not llm.is_budget_error(_malformed), "a malformed request must not park a vendor"
 
-# identification survives litellm stripping the provider prefix from .model
-assert llm._vendor_for(_credits) == "openrouter", llm._vendor_for(_credits)
-assert llm._vendor_for(_cap) == "anthropic", llm._vendor_for(_cap)
-assert llm._vendor_for(_VendorError(400, "x", "", "")) is None, "unidentified vendor -> park nothing"
+# identification keys off the exact deployment string litellm hands the callback
+assert llm._vendor_for("openrouter/openai/gpt-4o") == "openrouter"
+assert llm._vendor_for("anthropic/claude-sonnet-5") == "anthropic"
+assert llm._vendor_for("", _credits) == "openrouter", "falls back to provider+suffix"
+assert llm._vendor_for("", _VendorError(400, "x", "", "")) is None, "unidentified -> park nothing"
+
+# two vendors reachable at the same stripped model name must park NEITHER: the
+# provider prefix is the only thing telling openrouter's gpt-4o from a router
+# that proxies the same model, and parking the wrong one removes a working rung
+_saved_wf = config.WATERFALL
+config.WATERFALL = [
+    {"name": "requesty", "model": "openai/gpt-4o", "api_key": "k", "api_base": "https://router.requesty.ai/v1"},
+    {"name": "openrouter", "model": "openrouter/openai/gpt-4o", "api_key": "k"},
+]
+assert llm._vendor_for("", _credits) is None, "ambiguous suffix must not park a guess"
+assert llm._vendor_for("openrouter/openai/gpt-4o") == "openrouter", "exact deployment is unambiguous"
+config.WATERFALL = _saved_wf
 
 # a stated regain date wins over the configured window
 _until, _human = llm._park_until(_cap.message)
-assert "2026-09-01" in _human, _human
+assert _future in _human, _human
 assert _until > time.time() + 3600, "stated date must outlast the default window"
 # no date -> the configured window; an unparseable one falls back to it, not to a guess
 assert abs(llm._park_until(_credits.message)[0] - (time.time() + 3600)) < 5
 assert abs(llm._park_until("regain access on 2026-13-45")[0] - (time.time() + 3600)) < 5
 
 # parking removes the vendor from the chain and persists across a "restart"
-assert llm.park(_credits) == "openrouter"
+assert llm.park(_credits, "openrouter/openai/gpt-4o") == "openrouter"
 assert [v["name"] for v in llm._live_waterfall()] == ["anthropic", "gemini"], llm._live_waterfall()
 assert "openrouter" in (state.get("parked_vendors") or {}), state.get("parked_vendors")
 llm._invalidate()  # as a restart would
@@ -658,30 +677,47 @@ state.put("parked_vendors", {})
 
 # parking disabled -> nothing is parked, whatever the vendor says
 config.BUDGET_PARK_SEC = 0
-assert llm.park(_credits) is None
+assert llm.park(_credits, "openrouter/openai/gpt-4o") is None
 assert not (state.get("parked_vendors") or {}), state.get("parked_vendors")
 config.BUDGET_PARK_SEC = 3600
 
-# the turn that discovers exhaustion is still answered: park, rebuild, retry once
-_calls = []
+# THE case this feature exists for, and the one a raising fake router cannot
+# show: the Router's fallbacks cover the failure, so complete() returns a normal
+# answer and nothing is ever raised -- yet the exhausted vendor must still be
+# parked. Verified live against OpenRouter's real 402 with gemini answering; the
+# kwargs below are that call's actual callback payload.
+_fail_kwargs = {
+    "model": "openai/gpt-4o",          # litellm strips the provider prefix here
+    "exception": _credits,
+    "litellm_params": {
+        "api_base": "https://openrouter.ai/api/v1/chat/completions",
+        "custom_llm_provider": "openrouter",
+        "metadata": {"model_group": "primary", "deployment": "openrouter/openai/gpt-4o"},
+    },
+}
+assert llm._deployment_of(_fail_kwargs) == "openrouter/openai/gpt-4o"
+llm._on_failure(_fail_kwargs)
+assert "openrouter" in (state.get("parked_vendors") or {}), "a fallback-covered failure must still park"
+assert [v["name"] for v in llm._live_waterfall()] == ["anthropic", "gemini"]
 
+# a failure that is not about money leaves the chain alone
+state.put("parked_vendors", {})
+llm._invalidate()
+llm._on_failure({**_fail_kwargs, "exception": _malformed})
+assert not (state.get("parked_vendors") or {}), "a malformed request must not park a vendor"
 
-class _FakeRouter:
-    def completion(self, **kwargs):
-        _calls.append(kwargs)
-        if len(_calls) == 1:
-            raise _credits
-        return type("R", (), {"choices": [type("C", (), {"message": _FakeMsg(content="answered")})()]})()
+# the callback fires once per attempt, including retries -- parking is idempotent
+llm._on_failure(_fail_kwargs)
+_first = dict(state.get("parked_vendors") or {})
+llm._on_failure(_fail_kwargs)
+assert state.get("parked_vendors") == _first, "re-parking must not extend the window"
 
+# and it is registered exactly once, however many times the router is rebuilt
+llm._watch()
+llm._watch()
+assert sum(1 for cb in litellm.callbacks if isinstance(cb, llm._BudgetWatch)) == 1
 
-# park() invalidates the cached router, so _build must hand back a stable stub
-# rather than reading llm._ROUTER (which is None by then)
-_fake_router = _FakeRouter()
-llm._ROUTER, llm._ROUTER_VENDORS = _fake_router, ("anthropic", "openrouter", "gemini")
-llm._build = lambda: _fake_router
-_msg = _REAL_COMPLETE([{"role": "user", "content": "hi"}])
-assert _msg.content == "answered", _msg
-assert len(_calls) == 2, "must retry once on the shortened chain"
-assert "openrouter" in (state.get("parked_vendors") or {}), "the failing vendor is parked"
+state.put("parked_vendors", {})
+llm._invalidate()
 
 print(f"selfcheck OK -- shmobster {_b}")

@@ -398,13 +398,25 @@ dead for a month is re-dialled on every single turn, failing before the waterfal
 falls through. (Filed upstream as
 [BerriAI/litellm#37592](https://github.com/BerriAI/litellm/issues/37592).)
 
-shmobster parks it instead. On a 4xx whose message names a spend problem, the
-vendor is dropped from the chain and the Router is rebuilt without it, so it is
-never dialled again until its window expires:
+shmobster parks it instead, hanging off litellm's **failure callback** rather
+than an `except` around the call. This is the part that is easy to get wrong:
+when a fallback covers the failure, the Router returns that answer and the
+primary's exception never propagates, so an `except` only ever sees the case
+where the *whole chain* is dead -- which is the one case parking cannot help.
+The callback sees each deployment's failure regardless.
+
+On a 4xx whose message names a spend problem, the vendor is dropped from the
+chain and the Router is rebuilt without it, so it is never dialled again until
+its window expires:
 
     waterfall: openrouter is out of budget; parked for 3600s
     waterfall: rebuilding, chain is now anthropic -> gemini -> requesty
 
+- **The vendor is identified by its exact deployment string**, which litellm
+  hands the callback as `litellm_params.metadata.deployment`. Not by
+  `kwargs["model"]`: litellm strips the provider prefix there, so two vendors
+  reached through different routers both report `openai/gpt-4o` and the wrong
+  one gets parked. An ambiguous match parks nothing.
 - **Status alone is not enough.** A 400 is also "your request was malformed", and
   parking a vendor for an hour over one bad prompt would be worse than the
   problem. The message has to name money too.

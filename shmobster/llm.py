@@ -11,6 +11,13 @@ Fallback still works, so requests are answered, but the dead vendor is re-dialle
 on every single turn for as long as the cap lasts -- weeks, in the case that
 prompted this. So we park it ourselves.
 
+Parking hangs off litellm's failure callback, NOT off an `except` around
+`router.completion()`. When a fallback succeeds the Router returns that
+response and the primary's exception never propagates -- verified live:
+OpenRouter 402 as primary, gemini answering, no exception raised, and the
+failure callback firing with the 402. An `except` here would only see the case
+where the whole chain is dead, which is the case parking cannot help.
+
 Parking rebuilds the Router without that vendor rather than reaching into
 litellm's private cooldown: the group names here are positional (`primary`,
 `fb0`, ...) and `complete()` asks for `primary` by name, so dropping the primary
@@ -28,6 +35,7 @@ import time
 
 import litellm
 from litellm import Router
+from litellm.integrations.custom_logger import CustomLogger
 
 from . import config, state
 
@@ -114,20 +122,46 @@ def _park_until(message):
     return retval
 
 
-def _vendor_for(exc):
-    """Which configured vendor raised this. litellm strips the provider prefix
-    from `model` (config `openrouter/openai/gpt-4o` arrives as `openai/gpt-4o`),
-    so match on suffix, with llm_provider as the cross-check."""
+def _deployment_of(kwargs):
+    """The vendor's configured model string, straight from the failure callback.
+
+    `litellm_params.metadata.deployment` is the exact string we put in the
+    model_list (`openrouter/openai/gpt-4o`), so identification is a lookup rather
+    than a guess. `kwargs["model"]` is NOT usable for this: litellm strips the
+    provider prefix, so two vendors reached through different routers can report
+    the same `openai/gpt-4o` and the wrong one gets parked."""
+    params = kwargs.get("litellm_params") or {}
+    metadata = params.get("metadata") or {}
+    retval = metadata.get("deployment") or ""
+    return retval
+
+
+def _vendor_for(deployment, exc=None):
+    """Which configured vendor this failure belongs to.
+
+    Exact match on the deployment string first. Only if that is unavailable do we
+    fall back to provider+suffix matching, and a suffix that matches more than
+    one vendor identifies none of them -- parking the wrong vendor would take a
+    working rung out of the chain, which is worse than not parking at all."""
+    if deployment:
+        for vendor in config.WATERFALL:
+            if vendor.get("model") == deployment:
+                retval = vendor.get("name")
+                return retval
     model = str(getattr(exc, "model", "") or "")
     provider = str(getattr(exc, "llm_provider", "") or "")
-    for vendor in config.WATERFALL:
-        configured = vendor.get("model", "")
-        if model and (configured == model or configured.endswith("/" + model)):
-            retval = vendor.get("name")
+    if model:
+        matches = [v.get("name") for v in config.WATERFALL
+                   if v.get("model") == model
+                   or (v.get("model", "").endswith("/" + model)
+                       and (not provider or v.get("model", "").startswith(provider + "/")))]
+        if len(matches) == 1:
+            retval = matches[0]
             return retval
-    for vendor in config.WATERFALL:
-        if provider and vendor.get("model", "").startswith(provider + "/"):
-            retval = vendor.get("name")
+        if len(matches) > 1:
+            logging.warning(
+                "waterfall: %r matches %d configured vendors; not parking any", model, len(matches))
+            retval = None
             return retval
     retval = None
     return retval
@@ -145,17 +179,20 @@ def is_budget_error(exc):
     return retval
 
 
-def park(exc):
-    """Park the vendor that raised `exc`. Returns its name, or None if the vendor
-    could not be identified (in which case parking nothing is the safe choice --
-    parking the wrong vendor would take a working rung out of the chain)."""
+def park(exc, deployment=""):
+    """Park the vendor that raised `exc`. Returns its name, or None when the
+    vendor could not be identified -- in which case parking nothing is the safe
+    choice, since parking the wrong one removes a working rung."""
     if not config.BUDGET_PARK_SEC:
         retval = None
         return retval
-    name = _vendor_for(exc)
+    name = _vendor_for(deployment, exc)
     if name is None:
         logging.warning("waterfall: budget error from an unidentified vendor; not parking")
         retval = None
+        return retval
+    if name in _parked():
+        retval = name  # already parked; the callback fires per attempt
         return retval
     text = str(getattr(exc, "message", "") or str(exc))
     until, human = _park_until(text)
@@ -168,6 +205,37 @@ def park(exc):
     _invalidate()
     retval = name
     return retval
+
+
+class _BudgetWatch(CustomLogger):
+    """Park on litellm's per-deployment failure callback.
+
+    This is the only hook that sees a failure the fallbacks went on to cover --
+    and that is the whole case: the turn still gets answered, so nothing raises,
+    yet the exhausted vendor must not be dialled again next turn."""
+
+    def log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        _on_failure(kwargs)
+
+    async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+        _on_failure(kwargs)
+
+
+def _on_failure(kwargs):
+    exc = kwargs.get("exception")
+    if exc is None or not is_budget_error(exc):
+        return
+    park(exc, _deployment_of(kwargs))
+
+
+_WATCH = _BudgetWatch()
+
+
+def _watch():
+    """Register the failure callback once. litellm.callbacks is global, and a
+    duplicate registration would park (idempotently) twice per failure."""
+    if not any(isinstance(cb, _BudgetWatch) for cb in litellm.callbacks):
+        litellm.callbacks = list(litellm.callbacks) + [_WATCH]
 
 
 def _invalidate():
@@ -184,6 +252,7 @@ def _deployment(model_name, vendor):
 
 
 def _build():
+    _watch()
     wf = _live_waterfall()
     if not wf:
         raise SystemExit("config waterfall is empty -- add at least one vendor")
@@ -222,18 +291,15 @@ def _ensure():
 def complete(messages, tools=None):
     """Return the raw assistant message (has .content and .tool_calls).
 
-    A budget failure parks the vendor and retries once on the shortened chain, so
-    the turn that discovers the exhaustion still gets answered rather than
-    surfacing the error to the user."""
+    No try/except for budget errors here on purpose: when a fallback covers the
+    failure nothing is raised, so parking lives in the failure callback instead.
+    An exception reaching this caller means the whole chain failed, which parking
+    cannot rescue -- the vendors are already parked by the callback, and the next
+    turn rebuilds without them."""
     kwargs = {"model": "primary", "messages": messages}
     if tools:
         kwargs["tools"] = tools
-    try:
-        resp = _ensure().completion(**kwargs)
-    except Exception as exc:
-        if not is_budget_error(exc) or park(exc) is None:
-            raise
-        resp = _ensure().completion(**kwargs)
+    resp = _ensure().completion(**kwargs)
     retval = resp.choices[0].message
     return retval
 

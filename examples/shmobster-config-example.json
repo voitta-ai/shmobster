@@ -34,6 +34,11 @@
       "api_base": "https://router.requesty.ai/v1"
     },
     {
+      "_comment": "Codex subscription (#35): no api_key -- it authenticates with the ChatGPT OAuth tokens the codex CLI keeps in ~/.codex/auth.json (CODEX_HOME is honoured). The chatgpt/ segment is required, see README 'Codex subscription'. Remove this row if you do not have a codex login on this box.",
+      "name": "codex",
+      "model": "codex/chatgpt/gpt-5.5"
+    },
+    {
       "name": "openrouter",
       "model": "openrouter/z-ai/glm-5.2:free",
       "api_key": "${OPENROUTER_API_KEY}"

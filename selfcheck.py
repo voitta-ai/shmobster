@@ -54,7 +54,11 @@ _REAL_YOLT = config.YOLT_CLASSIFIER
 config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 
 # 0) config parsed: waterfall + channels + exec block
-assert [v["name"] for v in config.WATERFALL] == ["anthropic", "gemini", "requesty", "openrouter"], config.WATERFALL
+assert [v["name"] for v in config.WATERFALL] == [
+    "anthropic", "gemini", "requesty", "codex", "openrouter"], config.WATERFALL
+# the codex rung (#35) is a subscription, not an api_key row: it authenticates
+# from the codex CLI's token file, so a key here would be a config error
+assert "api_key" not in next(v for v in config.WATERFALL if v["name"] == "codex")
 # every fallback must be a distinct vendor: a waterfall whose slots share a
 # rate-limit budget is one outage, listed four times
 assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), config.WATERFALL

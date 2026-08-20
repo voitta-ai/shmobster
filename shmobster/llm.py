@@ -37,7 +37,7 @@ import litellm
 from litellm import Router
 from litellm.integrations.custom_logger import CustomLogger
 
-from . import config, state
+from . import codex_llm, config, state
 
 # Never let the rented router log raw request params -- they carry api_key.
 # Belt and suspenders: disable verbose mode AND cap the LiteLLM logger at
@@ -244,7 +244,12 @@ def _invalidate():
 
 
 def _deployment(model_name, vendor):
-    params = {"model": vendor["model"], "api_key": vendor.get("api_key")}
+    # A subscription rung (codex, #35) has no api_key at all: it authenticates
+    # from the CLI's own token file. Sending `api_key: None` is not the same as
+    # omitting it -- litellm treats the key as present-but-empty.
+    params = {"model": vendor["model"]}
+    if vendor.get("api_key"):
+        params["api_key"] = vendor["api_key"]
     if vendor.get("api_base"):
         params["api_base"] = vendor["api_base"]
     retval = {"model_name": model_name, "litellm_params": params}
@@ -253,6 +258,9 @@ def _deployment(model_name, vendor):
 
 def _build():
     _watch()
+    # Registered before the Router is built, not at import: a `codex/` row is
+    # optional, and litellm must know the prefix by the time it resolves one.
+    codex_llm.register()
     wf = _live_waterfall()
     if not wf:
         raise SystemExit("config waterfall is empty -- add at least one vendor")

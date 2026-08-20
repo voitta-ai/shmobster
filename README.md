@@ -18,6 +18,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Skills (#74)](#skills-74)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
 - [Versioning & releases (#76)](#versioning--releases-76)
+- [Upgrade announcements (#77)](#upgrade-announcements-77)
 - [Running multiple instances](#running-multiple-instances)
 - [License](#license)
 
@@ -447,6 +448,23 @@ configs, and runs a structural sensitive-term gate ported from skillz
 (`scripts/check-sensitive-terms.sh` -- token and key shapes, account ids, private
 IPs, internal domains). The name-wordlist half of that gate stays off CI on
 purpose; it reads a private out-of-repo file, see the script header.
+
+### Upgrade announcements (#77)
+
+An instance announces itself in its channels the first time it boots on a new
+version:
+
+> :sparkles: upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
+
+The trigger is a *version change*, not a boot -- the watchdog and launchd restart
+this process often, and none of that is worth a message. The last announced
+version lives in `shmobster-state.json` (gitignored, path from `SHMOBSTER_STATE`).
+A missing state file means a new install rather than an upgrade, so a fresh
+instance records its version silently instead of announcing to a channel that
+has never seen it. A failed post is not recorded, so the next boot retries.
+
+`announce` knows nothing about Slack -- it takes a `post(text)` callable. A new
+ingest mode wires its own poster; see [CLAUDE.md](CLAUDE.md).
 
 ## Running multiple instances
 

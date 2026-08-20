@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, attachments, build, config, handler, identity, skills, watchdog
+from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, skills, watchdog
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -226,6 +226,13 @@ def main():
         logging.info("skills: %d indexed from %d path(s)", count, len(config.SKILL_PATHS))
         for name, path in skills.shadowed():
             logging.info("skills: %s at %s shadowed by a higher-precedence path", name, path)
+    # Say so in the channels when this instance came back on a new version (#77).
+    # Ingest-agnostic: announce knows only how to call post(text).
+    def _post(text):
+        for channel in config.CHANNELS:
+            app.client.chat_postMessage(channel=channel, text=text)
+
+    announce.check(_post)
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
     # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
     # the connection ourselves and exit when it stops hearing Slack.

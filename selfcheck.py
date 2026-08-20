@@ -19,7 +19,7 @@ for _var in (
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
-from shmobster import admin_tools, approvals, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, approvals, build, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -397,4 +397,22 @@ config.SKILL_PATHS = []
 assert skills.reload() == 0
 assert skills.prompt_block() == ""
 
-print("selfcheck OK")
+# 18) version anchor (#76): a build identifies itself, and the agent is told
+# what it is running so "which version are you" is answered, not guessed
+_b = build()
+assert _b.startswith(__version__), (_b, __version__)
+assert _b == build(), "build() is cached; a running process cannot change sha"
+_capv = {}
+
+
+def _cap_ver(messages, tools=None):
+    _capv["sys"] = messages[0]["content"]
+    return _FakeMsg(content="ok")
+
+
+llm.complete = _cap_ver
+handler._SYSTEM = None
+handler.handle("what version are you", channel="C1", slack_client=_fs)
+assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
+
+print(f"selfcheck OK -- shmobster {_b}")

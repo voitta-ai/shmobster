@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, approvals, attachments, config, handler, identity, skills, watchdog
+from . import admin_tools, approvals, attachments, build, config, handler, identity, skills, watchdog
 
 logging.basicConfig(level=logging.INFO)
 app = App(token=config.SLACK_BOT_TOKEN)
@@ -218,7 +218,7 @@ def main():
         config.BOT_USER_ID = app.client.auth_test().get("user_id", "")
     except Exception:
         logging.exception("could not resolve bot user id")
-    logging.info("agent: %s (%s)", config.AGENT_LABEL, config.BOT_USER_ID)
+    logging.info("agent: %s (%s) -- shmobster %s", config.AGENT_LABEL, config.BOT_USER_ID, build())
     # Skills index (#74): names only in the log -- a skill body is content, and
     # logs are a surface we keep boring.
     if config.SKILL_PATHS:

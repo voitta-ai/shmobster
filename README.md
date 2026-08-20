@@ -17,6 +17,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
 - [Skills (#74)](#skills-74)
+- [Credential redaction (#72)](#credential-redaction-72)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
 - [Versioning & releases (#76)](#versioning--releases-76)
 - [Upgrade announcements (#77)](#upgrade-announcements-77)
@@ -429,6 +430,45 @@ exactly the thing the gate is for.
 **Scope.** A skill is instructions, not permission. Anything a skill tells the
 agent to run still goes through YOLT and the channel policy, so a skill cannot
 widen what a channel can do.
+
+## Credential redaction (#72)
+
+Everything this agent says is scrubbed before it leaves the process. The bug
+class is the one that bit [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)
+(#84, #91): anything returning command output verbatim hoards every credential
+that rides through it. `run_shell` hands output straight to a channel, and `cat`,
+`env` and `printenv` are read-only -- they clear the YOLT gate and run with no
+approval.
+
+Two layers:
+
+- **Known shapes** -- detection is voitta-yolt's `secret_redact` (v1.0.0+),
+  imported from the same tree as the classifier this instance already uses. One
+  source of truth, not a second pattern list that drifts. Markers name the shape
+  (`[REDACTED:github-token]`) so a redacted record stays diagnosable.
+- **Known values** -- the one thing YOLT cannot know: this process's own secrets.
+  Every Slack token, waterfall `api_key` and per-channel policy `env` value is
+  matched exactly, so a credential in a format nobody anticipated is still caught
+  when it is one of ours.
+
+Scrubbing happens **at collection** -- the tool result, before it enters the
+model's context -- so every downstream copy inherits it: the vendor's logs, the
+thread, and anything the model later quotes. The final reply and the
+approval-button messages are scrubbed again on the way out, since a parked
+command carries its own argv.
+
+Deliberately not included: a generic "40 characters of base64" rule. It matches a
+git SHA, so it would redact half of any `git log`. A redactor that mangles
+ordinary output gets switched off, and then it protects nothing.
+
+**Fails loudly, never open.** With `secret_redact` unavailable the agent refuses
+to start rather than posting unredacted output -- posting a secret is worse than
+not booting. That makes voitta-yolt v1.0.0+ a hard requirement, not just for the
+exec gate.
+
+> Redaction is best-effort on shapes it knows plus values it holds. It is a
+> backstop for accidents, not a licence to put secrets where the agent can read
+> them. Config values stay `${VAR}` references (#73).
 
 ## Running as a service (launchd, macOS)
 

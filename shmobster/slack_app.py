@@ -8,9 +8,16 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, skills, watchdog
+from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, redact, skills, slack_blocks, watchdog
 
 logging.basicConfig(level=logging.INFO)
+# Installed here, at import, before ANY statement that can log (#72). The App()
+# constructor below round-trips auth.test, and every startup call can raise with
+# request details attached -- so there must be no window in which an exception is
+# rendered into a log unscrubbed. require() fails the boot outright if the
+# redactor is unavailable, which is the safe direction.
+redact.require()
+redact.install_logging()
 app = App(token=config.SLACK_BOT_TOKEN)
 
 
@@ -56,45 +63,6 @@ def _seen(ts):
     return False
 
 
-def _approval_blocks(req_id, req):
-    """Approve/Deny buttons for one parked command (#50). The command goes in a
-    code block so a long one stays readable; the request id rides in the button
-    value, which is what the action handler acts on."""
-    retval = [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": (
-                    f":lock: *Needs approval* [{req_id}] ({req['reason']})\n"
-                    f"```{req['command']}```"
-                ),
-            },
-        },
-        {
-            "type": "actions",
-            "block_id": f"approval_{req_id}",
-            "elements": [
-                {
-                    "type": "button",
-                    "action_id": "approve_command",
-                    "style": "primary",
-                    "text": {"type": "plain_text", "text": "Approve"},
-                    "value": req_id,
-                },
-                {
-                    "type": "button",
-                    "action_id": "deny_command",
-                    "style": "danger",
-                    "text": {"type": "plain_text", "text": "Deny"},
-                    "value": req_id,
-                },
-            ],
-        },
-    ]
-    return retval
-
-
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel):
@@ -102,8 +70,10 @@ def _post_pending(client, channel, thread_ts):
             client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
-                text=f"Needs approval [{req_id}]: {req['command']}",
-                blocks=_approval_blocks(req_id, req),
+                # A parked command is echoed verbatim, and a credential rides
+                # command lines routinely -- that is the YOLT lesson (#72).
+                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
+                blocks=slack_blocks.approval(req_id, req),
             )
         except Exception:
             logging.exception("could not post approval buttons for %s", req_id)
@@ -123,7 +93,7 @@ def _resolve(ack, body, client, action, run):
         "thread_ts": thread_ts,
         "client": client,
     }
-    result = run(action["value"], ctx)
+    result = redact.scrub(run(action["value"], ctx))
     try:
         client.chat_update(
             channel=channel,
@@ -176,8 +146,12 @@ def on_mention(event, say, client, logger):
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=event.get("user"), slack_client=client, attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
+        # Both paths are scrubbed: a provider exception can carry the request it
+        # failed on, api_key and Authorization header included (#72). The log
+        # side is covered by redact.install_logging(), which scrubs the rendered
+        # traceback too.
         logger.exception("handler failed")
-        reply = f":warning: shmobster error: {exc}"
+        reply = redact.scrub(f":warning: shmobster error: {exc}")
     say(text=reply, thread_ts=thread_ts)
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.

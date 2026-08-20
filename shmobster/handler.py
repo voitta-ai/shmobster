@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import admin_tools, build, config, llm, policy as policy_mod, skills, slack_tools, spine, tools
+from . import admin_tools, build, config, llm, policy as policy_mod, redact, skills, slack_tools, spine, tools
 
 _SYSTEM = None
 
@@ -26,8 +26,10 @@ def _agent_marker():
 
 
 def _finalize(answer, steps):
-    """Prefix the agent marker; warn on the reply once the loop neared the cap."""
-    out = f"{_agent_marker()} {answer}"
+    """Prefix the agent marker; warn on the reply once the loop neared the cap.
+    Scrubbed again on the way out -- the model can quote a credential it read
+    before this turn, or one a human typed into the thread (#72)."""
+    out = f"{_agent_marker()} {redact.scrub(answer)}"
     if steps >= config.WARN_TOOL_STEPS:
         out += (
             f"\n\n:warning: used {steps}/{config.MAX_TOOL_STEPS} tool steps "
@@ -120,8 +122,11 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 result = slack_tools.dispatch(name, args, slack_client)
             else:
                 result = tools.dispatch(name, args, policy, channel)
+            # Redact at collection (#72): every downstream copy -- this context,
+            # the vendor's logs, the Slack message -- inherits the scrub, and a
+            # credential never reaches the model to be repeated later.
             messages.append(
-                {"role": "tool", "tool_call_id": call.id, "content": result}
+                {"role": "tool", "tool_call_id": call.id, "content": redact.scrub(result)}
             )
     # Hit the step cap -> one final tools-less call so the user gets a real
     # answer from what we gathered, instead of a dead-end "(stopped)" message.

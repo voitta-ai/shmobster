@@ -3,6 +3,8 @@
 Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
 handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
+import ast
+import io
 import json
 import logging
 import os
@@ -22,7 +24,27 @@ for _var in (
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
-from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, tools, yolt_gate  # noqa: E402
+
+# Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
+# config points at a placeholder path (CI has no yolt checkout). Stand up a stub
+# next to a stub classifier so every handler path below exercises the scrub; the
+# real detector is asserted in section 19 when this machine has it.
+_yolt_dir = tempfile.mkdtemp()
+with open(os.path.join(_yolt_dir, "secret_redact.py"), "w") as _f:
+    _f.write(
+        "import re\n"
+        "_P = [('aws-access-key-id', re.compile(r'\\bAKIA[0-9A-Z]{16}\\b')),\n"
+        "      ('slack-token', re.compile(r'\\bxox[baprse]-[0-9A-Za-z-]{8,}'))]\n"
+        "def redact(text):\n"
+        "    if not text:\n"
+        "        return text\n"
+        "    for kind, pat in _P:\n"
+        "        text = pat.sub('[REDACTED:%s]' % kind, text)\n"
+        "    return text\n"
+    )
+_REAL_YOLT = config.YOLT_CLASSIFIER
+config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "gemini", "requesty", "openrouter"], config.WATERFALL
@@ -31,7 +53,7 @@ assert [v["name"] for v in config.WATERFALL] == ["anthropic", "gemini", "request
 assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), config.WATERFALL
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
-assert config.YOLT_CLASSIFIER.endswith("grammar_classifier.py"), config.YOLT_CLASSIFIER
+assert _REAL_YOLT.endswith("grammar_classifier.py"), _REAL_YOLT
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
@@ -466,5 +488,108 @@ logging.disable(logging.ERROR)  # the failure is the point here; don't print its
 assert announce.check(_boom) is None
 logging.disable(logging.NOTSET)
 assert json.load(open(_ann))["announced_version"] == "0.0.1", "failed post must not advance state"
+
+# 20) credential redaction (#72): tool output is scrubbed at collection, this
+# instance's own secrets are caught by value, and ordinary output survives
+_real_hooks = os.path.dirname(_REAL_YOLT)
+if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):
+    config.YOLT_CLASSIFIER = _REAL_YOLT  # assert against the real detector
+if True:
+    # assembled, never literal: the repo's sensitive-term gate greps this file
+    config.SLACK_BOT_TOKEN = "xoxb" + "-selfcheck-not-a-real-token-000000"
+    config.WATERFALL = [{"name": "v", "model": "m", "api_key": "vendor-key-shaped-like-nothing-known"}]
+    config.CHANNEL_POLICIES = {"C1": {"env": {"VERCEL_TOKEN": "policy-env-value-abcdefghijkl"}}}
+    redact._REDACTOR = None  # re-resolve against this config
+
+    # shapes YOLT knows
+    _akia = "AKIA" + "IOSFODNN7EXAMPLE"
+    assert "[REDACTED:" in redact.scrub(f"key {_akia} here")
+    # our own values, whatever shape they are
+    assert "vendor-key-shaped-like-nothing-known" not in redact.scrub("leak: vendor-key-shaped-like-nothing-known")
+    assert "policy-env-value-abcdefghijkl" not in redact.scrub("env: policy-env-value-abcdefghijkl")
+    # ordinary output is untouched -- a redactor that eats git SHAs gets disabled
+    # a 40-char hex run is exactly what a naive base64 rule eats -- the point
+    _sha = "1a2b3c4d5e6f7a8b" + "9c0d1e2f3a4b5c6d7e8f9a0b"
+    assert redact.scrub(f"commit {_sha}") == f"commit {_sha}"
+    assert redact.scrub("total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir") \
+        == "total 12\ndrwxr-xr-x  3 user staff  96 Jan  1 00:00 dir"
+    # non-strings pass through
+    assert redact.scrub(None) is None
+
+    # the tool-result path scrubs before the model ever sees it
+    _leaked = []
+
+    def _cap_tool(messages, tools=None):
+        _leaked.append(json.dumps(messages))
+        return _FakeMsg(content="done")
+
+    tools.dispatch = lambda name, args, pol, channel=None: _akia
+    llm.complete = lambda messages, tools=None: (
+        _FakeMsg(tool_calls=[_FakeCall("t", "run_shell", '{"command":"env"}')])
+        if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
+    )
+    config.MAX_TOOL_STEPS, config.WARN_TOOL_STEPS = 5, 4
+    _out = handler.handle("dump env", channel="C1", slack_client=_fs)
+    assert _akia not in "".join(_leaked), "raw credential reached the model context"
+    assert _akia not in _out, _out
+
+    # the approval surface renders the command TWICE -- fallback text and the
+    # mrkdwn block -- and a credential rides argv routinely, so both are scrubbed
+    _blocks = slack_blocks.approval("7", {"command": f"aws configure --key {_akia}", "reason": "mutating"})
+    _rendered = json.dumps(_blocks)
+    assert _akia not in _rendered, _rendered
+    assert "[REDACTED:" in _rendered, _rendered
+    assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
+
+    # logs: a credential inside an exception traceback is appended by the
+    # FORMATTER from exc_info, so a filter on record.msg would never see it
+    _stream = io.StringIO()
+    _h = logging.StreamHandler(_stream)
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    _root = logging.getLogger()
+    _saved = list(_root.handlers)
+    _root.handlers = [_h]
+    try:
+        redact.install_logging()
+        try:
+            raise RuntimeError(f"vendor rejected key {_akia}")
+        except RuntimeError:
+            logging.getLogger("selfcheck").exception("handler failed")
+        _logged = _stream.getvalue()
+    finally:
+        _root.handlers = _saved
+    assert _akia not in _logged, _logged
+    assert "[REDACTED:" in _logged, _logged
+    assert "RuntimeError" in _logged, "the traceback must survive -- only the secret goes"
+
+    # ordering must not drift: slack_app's own startup calls can raise with
+    # request details attached (App() round-trips auth.test), so the redacting
+    # formatter has to be installed before ANY statement that can log. This is
+    # asserted statically -- importing slack_app offline is impossible, because
+    # constructing the Bolt App is itself one of those calls.
+    _src = ast.parse(open(os.path.join("shmobster", "slack_app.py")).read())
+    _install_line = None
+    _first_loggable = None
+    for _node in ast.walk(_src):
+        if not isinstance(_node, ast.Call):
+            continue
+        _f = _node.func
+        _name = (f"{getattr(_f.value, 'id', '')}.{_f.attr}" if isinstance(_f, ast.Attribute)
+                 else getattr(_f, "id", ""))
+        if _name == "redact.install_logging":
+            _install_line = _node.lineno
+        elif _name in ("App", "logging.exception", "logging.info", "logging.error"):
+            if _first_loggable is None or _node.lineno < _first_loggable:
+                _first_loggable = _node.lineno
+    assert _install_line is not None, "slack_app must install the redacting formatter"
+    assert _first_loggable is not None and _install_line < _first_loggable, (
+        f"redact.install_logging() is on line {_install_line}, after a call that can log "
+        f"on line {_first_loggable} -- an exception there would be logged unredacted"
+    )
+    # and it must be at module scope, not inside main(): an import-time failure
+    # in App() happens before main() is ever called
+    _toplevel = {n.value.lineno for n in _src.body
+                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)}
+    assert _install_line in _toplevel, "install_logging() must run at import, not inside a function"
 
 print(f"selfcheck OK -- shmobster {_b}")

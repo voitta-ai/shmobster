@@ -17,6 +17,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Config & run](#config--run)
 - [Skills (#74)](#skills-74)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
+- [Versioning & releases (#76)](#versioning--releases-76)
 - [Running multiple instances](#running-multiple-instances)
 - [License](#license)
 
@@ -415,6 +416,37 @@ timeout until the network returns (`ThrottleInterval=10` bounds the churn), and
 each restart clears the in-memory approval queue, so a command parked before the
 restart has to be asked again -- the same "safe direction" `approvals` already
 takes on any restart.
+
+## Versioning & releases (#76)
+
+`shmobster.__version__` is the anchor. An instance reports `<version>+<short-sha>`
+-- ask it which build it is and it answers from `build()`, the same string it
+logs at boot and selfcheck prints. Between tags the sha is the only thing that
+tells two running instances apart, which matters when each machine pulls on its
+own schedule.
+
+**Cutting a release.** Feature PRs leave the version alone. A release is its own
+commit that bumps `__version__`; on master, `.github/workflows/release.yml` sees
+a version with no matching tag and creates `vX.Y.Z` plus the GitHub release.
+Nothing else is keyed on the version, so there is no per-PR bump gate (unlike
+[skillz](https://github.com/voitta-ai/skillz), where the version *is* the plugin
+cache key and a missed bump silently freezes every install).
+
+**Notes.** `docs/release-notes/vX.Y.Z.md` is used when it exists; otherwise the
+release is generated from merged PR titles. Curated notes are the norm for
+anything an operator has to act on -- see
+[v0.1.0](docs/release-notes/v0.1.0.md). Give each one an **Upgrading** section
+naming new config keys and dependencies, since every operator holds their own
+`shmobster-config.json` and a `git pull` will not fix it for them.
+
+**0.x** holds until the config schema is stable enough that someone else's config
+survives an upgrade.
+
+**CI** (`.github/workflows/checks.yml`) runs `selfcheck.py`, parses the example
+configs, and runs a structural sensitive-term gate ported from skillz
+(`scripts/check-sensitive-terms.sh` -- token and key shapes, account ids, private
+IPs, internal domains). The name-wordlist half of that gate stays off CI on
+purpose; it reads a private out-of-repo file, see the script header.
 
 ## Running multiple instances
 

@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import admin_tools, config, llm, policy as policy_mod, skills, slack_tools, spine, tools
+from . import admin_tools, build, config, llm, policy as policy_mod, skills, slack_tools, spine, tools
 
 _SYSTEM = None
 
@@ -50,7 +50,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     system = _system_prompt()
     if skill_menu:
         system += "\n\n" + skill_menu
-    _ident = []
+    _ident = [
+        f"You are running shmobster {build()} -- report exactly that when asked "
+        "which version or build you are."
+    ]
     if config.AGENT_LABEL:
         _ident.append(
             f"Your name is {config.AGENT_LABEL}. Introduce and refer to yourself "

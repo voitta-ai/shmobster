@@ -1,0 +1,47 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      # The repo's whole test surface. Offline by design: no Slack, no network,
+      # no real keys -- it stubs the env refs the example config makes.
+      - name: selfcheck
+        run: python selfcheck.py
+
+      # The file every new operator copies. A trailing comma here breaks setup
+      # for someone who has no reason to suspect the example.
+      - name: Example configs parse
+        run: |
+          for f in examples/*.json; do
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+            echo "ok $f"
+          done
+
+      # Structural half of the pre-publish gate, ported from skillz: token and
+      # key shapes, account ids, private IPs, internal domains. A public repo
+      # that ships example configs and pasted terminal output is exactly where
+      # a real value slips in. The name-wordlist half stays off CI on purpose
+      # (see the script header).
+      - name: Sensitive-term gate (structural)
+        run: |
+          bash scripts/check-sensitive-terms.sh \
+            shmobster/ examples/ deploy/ docs/ workspace/ README.md selfcheck.py

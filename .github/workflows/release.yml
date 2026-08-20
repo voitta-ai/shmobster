@@ -1,0 +1,53 @@
+name: release
+
+# Tag-on-bump (#76). Feature PRs leave the version alone -- unlike a plugin
+# catalog, nothing here is keyed on the version string, so a per-PR bump would
+# churn numbers for no consumer. Cutting a release is its own commit that moves
+# shmobster.__version__; this workflow notices a version with no tag and creates
+# the tag plus the GitHub release.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  tag-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag and release if the version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c 'import re,pathlib; print(re.search(r"__version__ = \"([^\"]+)\"", pathlib.Path("shmobster/__init__.py").read_text()).group(1))')
+          if [ -z "$version" ]; then
+            echo "::error::could not read __version__ from shmobster/__init__.py"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already tagged; nothing to release."
+            exit 0
+          fi
+          # Curated notes when the release deserved prose, generated from merged
+          # PR titles otherwise -- a release should never block on writing.
+          notes="docs/release-notes/v$version.md"
+          if [ -f "$notes" ]; then
+            echo "using curated notes: $notes"
+            gh release create "v$version" \
+              --title "v$version" \
+              --notes-file "$notes" \
+              --target "$GITHUB_SHA"
+          else
+            echo "no $notes -- generating notes from merged PRs"
+            gh release create "v$version" \
+              --title "v$version" \
+              --generate-notes \
+              --target "$GITHUB_SHA"
+          fi

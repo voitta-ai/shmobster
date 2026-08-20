@@ -18,6 +18,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Skills (#74)](#skills-74)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
 - [Versioning & releases (#76)](#versioning--releases-76)
+- [Upgrade announcements (#77)](#upgrade-announcements-77)
 - [Running multiple instances](#running-multiple-instances)
 - [License](#license)
 
@@ -447,6 +448,34 @@ configs, and runs a structural sensitive-term gate ported from skillz
 (`scripts/check-sensitive-terms.sh` -- token and key shapes, account ids, private
 IPs, internal domains). The name-wordlist half of that gate stays off CI on
 purpose; it reads a private out-of-repo file, see the script header.
+
+### Upgrade announcements (#77)
+
+An instance announces itself in its channels the first time it boots on a new
+version:
+
+> :sparkles: upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
+
+The trigger is a *version change*, not a boot -- the watchdog and launchd restart
+this process often, and none of that is worth a message. The last announced
+version lives in `shmobster-state.json` (gitignored, path from `SHMOBSTER_STATE`).
+
+An instance with **no** recorded version announces too, without claiming where it
+came from:
+
+> :sparkles: now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
+
+That case is a deployment installed before the state file existed *or* a brand
+new one -- indistinguishable from inside the process. Staying quiet would skip
+the first upgrade to any version that has this feature, which is the rollout it
+was written for; the cost is one extra message on a new install, which tells that
+channel which build just joined it.
+
+A failed post is not recorded, so the next boot retries rather than losing the
+announcement.
+
+`announce` knows nothing about Slack -- it takes a `post(text)` callable. A new
+ingest mode wires its own poster; see [CLAUDE.md](CLAUDE.md).
 
 ## Running multiple instances
 

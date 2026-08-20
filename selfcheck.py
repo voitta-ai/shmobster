@@ -3,6 +3,7 @@
 Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
 handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
+import ast
 import io
 import json
 import logging
@@ -560,5 +561,35 @@ if True:
     assert _akia not in _logged, _logged
     assert "[REDACTED:" in _logged, _logged
     assert "RuntimeError" in _logged, "the traceback must survive -- only the secret goes"
+
+    # ordering must not drift: slack_app's own startup calls can raise with
+    # request details attached (App() round-trips auth.test), so the redacting
+    # formatter has to be installed before ANY statement that can log. This is
+    # asserted statically -- importing slack_app offline is impossible, because
+    # constructing the Bolt App is itself one of those calls.
+    _src = ast.parse(open(os.path.join("shmobster", "slack_app.py")).read())
+    _install_line = None
+    _first_loggable = None
+    for _node in ast.walk(_src):
+        if not isinstance(_node, ast.Call):
+            continue
+        _f = _node.func
+        _name = (f"{getattr(_f.value, 'id', '')}.{_f.attr}" if isinstance(_f, ast.Attribute)
+                 else getattr(_f, "id", ""))
+        if _name == "redact.install_logging":
+            _install_line = _node.lineno
+        elif _name in ("App", "logging.exception", "logging.info", "logging.error"):
+            if _first_loggable is None or _node.lineno < _first_loggable:
+                _first_loggable = _node.lineno
+    assert _install_line is not None, "slack_app must install the redacting formatter"
+    assert _first_loggable is not None and _install_line < _first_loggable, (
+        f"redact.install_logging() is on line {_install_line}, after a call that can log "
+        f"on line {_first_loggable} -- an exception there would be logged unredacted"
+    )
+    # and it must be at module scope, not inside main(): an import-time failure
+    # in App() happens before main() is ever called
+    _toplevel = {n.value.lineno for n in _src.body
+                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)}
+    assert _install_line in _toplevel, "install_logging() must run at import, not inside a function"
 
 print(f"selfcheck OK -- shmobster {_b}")

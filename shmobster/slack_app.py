@@ -11,6 +11,13 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, redact, skills, slack_blocks, watchdog
 
 logging.basicConfig(level=logging.INFO)
+# Installed here, at import, before ANY statement that can log (#72). The App()
+# constructor below round-trips auth.test, and every startup call can raise with
+# request details attached -- so there must be no window in which an exception is
+# rendered into a log unscrubbed. require() fails the boot outright if the
+# redactor is unavailable, which is the safe direction.
+redact.require()
+redact.install_logging()
 app = App(token=config.SLACK_BOT_TOKEN)
 
 
@@ -185,10 +192,6 @@ def main():
         config.BOT_USER_ID = app.client.auth_test().get("user_id", "")
     except Exception:
         logging.exception("could not resolve bot user id")
-    # Fail at boot if redaction is unavailable, not at the first credential --
-    # posting an unredacted secret is worse than not starting (#72).
-    redact.require()
-    redact.install_logging()
     logging.info("agent: %s (%s) -- shmobster %s", config.AGENT_LABEL, config.BOT_USER_ID, build())
     # Skills index (#74): names only in the log -- a skill body is content, and
     # logs are a surface we keep boring.

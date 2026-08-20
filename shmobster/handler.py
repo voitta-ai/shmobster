@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import admin_tools, config, llm, policy as policy_mod, slack_tools, spine, tools
+from . import admin_tools, config, llm, policy as policy_mod, skills, slack_tools, spine, tools
 
 _SYSTEM = None
 
@@ -42,7 +42,14 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
         tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
+    # Skills are offered only when some are configured, and the menu is rebuilt
+    # per turn so a reload_skills takes effect without a restart (#74).
+    skill_menu = skills.prompt_block()
+    if skill_menu:
+        tool_schemas += skills.TOOLS
     system = _system_prompt()
+    if skill_menu:
+        system += "\n\n" + skill_menu
     _ident = []
     if config.AGENT_LABEL:
         _ident.append(
@@ -104,6 +111,8 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 # policy; re-resolve so the rest of THIS turn's tool calls see the
                 # new scope instead of the stale dict from turn start (#58).
                 policy = policy_mod.resolve(channel)
+            elif name in skills.NAMES:
+                result = skills.dispatch(name, args)
             elif name in slack_tools.NAMES:
                 result = slack_tools.dispatch(name, args, slack_client)
             else:

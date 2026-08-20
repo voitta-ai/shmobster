@@ -15,6 +15,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
 - [Config & run](#config--run)
+- [Skills (#74)](#skills-74)
 - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
 - [Running multiple instances](#running-multiple-instances)
 - [License](#license)
@@ -156,7 +157,8 @@ Two tiers:
   policy (default restricted: cwd / github repos / aws profile / tools).
 - **Trusted users** (`trusted_users` in config: a list of Slack user IDs) -- may
   ask the agent to change a channel's restrictions via chat (the `set_policy`
-  tool) and to approve parked mutating commands (the `approve_command` tool).
+  tool), to approve parked mutating commands (the `approve_command` tool), and
+  to re-scan the skills catalog (the `reload_skills` tool, see **Skills**).
   Only they can widen scope; the `trusted_users` list itself is
   **file-only** (the agent can't grant trust -- no escalation). A non-trusted
   user who tries is refused loudly and all trusted users are tagged.
@@ -233,6 +235,8 @@ One JSON config, no `.env`. Copy the example and fill it in:
 - `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
   `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
   endpoints like openrouter / nvidia).
+- `skills.paths` -- directories of skills to load (see **Skills** below). Omit
+  for none.
 
 ### Secrets: reference the environment, don't paste keys (opinionated)
 
@@ -300,6 +304,51 @@ Run:
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     .venv/bin/python selfcheck.py            # offline sanity check
     .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
+
+## Skills (#74)
+
+A skill is a directory holding a `SKILL.md`: YAML frontmatter with `name` and
+`description`, then a Markdown body of steps. That is the format
+[skillz](https://github.com/voitta-ai/skillz) already publishes for the `claude`
+and `codex` hosts; shmobster is a third host and reads the same files unchanged,
+so a procedure written once reaches the agent that is actually in the channel
+with you.
+
+Point at one or more catalogs:
+
+    "skills": {
+      "paths": [
+        "~/g/manda/git/skillz-private/skills",
+        "~/g/git.voitta/skillz/skills"
+      ]
+    }
+
+Each path is a directory of `<name>/SKILL.md`. **Order is precedence** -- the
+first path that defines a name wins, so a private catalog listed first shadows
+the public one; shadowed entries are logged at boot, not silently dropped.
+
+**How they reach the model.** Two stages, because the system prompt is paid on
+every turn by every vendor in the waterfall:
+
+1. **The menu** -- one line per skill in the system prompt: name plus the first
+   sentence of its description, capped. The 44-skill public catalog costs about
+   7KB standing. Full descriptions inline would be ~25KB; names alone would never
+   be searched for, since the model cannot search for what it does not know.
+2. **The body** -- a `load_skill(name)` tool the model calls when a request
+   matches a menu line, returning that `SKILL.md` in full (capped at 20k chars).
+
+With no `skills.paths` configured there is no menu and no tool -- the feature
+costs nothing when unused.
+
+**Refresh.** The index is built at boot. A trusted user can say "reload your
+skills" to re-scan after pulling a catalog; the `reload_skills` tool sits behind
+the same trust gate as `set_policy` (see **Trust model**). Reading files is not a
+mutation, but it changes which instructions the agent will follow, which is
+exactly the thing the gate is for.
+
+**Scope.** A skill is instructions, not permission. Anything a skill tells the
+agent to run still goes through YOLT and the channel policy, so a skill cannot
+widen what a channel can do.
 
 ## Running as a service (launchd, macOS)
 

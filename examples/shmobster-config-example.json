@@ -29,6 +29,12 @@
       "api_base": "https://integrate.api.nvidia.com/v1"
     }
   ],
+  "skills": {
+    "_comment": "Directories of skillz-format <name>/SKILL.md skills (#74). Order is precedence: the first path defining a name wins, so a private catalog can shadow the public one. Omit the block for no skills.",
+    "paths": [
+      "/path/to/skillz/skills"
+    ]
+  },
   "exec": {
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",

@@ -6,8 +6,9 @@ non-trusted attempt is refused loudly and all trusted users are tagged.
 set_policy changes *restrictions* (cwd / github_repos / aws_profile) -- never
 the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
-policy still bounds its scope when it runs."""
-from . import approvals, config, policy as policy_mod, tools
+policy still bounds its scope when it runs. reload_skills re-reads the skills
+catalog (#74) -- gated too, since it changes which instructions I will follow."""
+from . import approvals, config, policy as policy_mod, skills, tools
 
 TOOLS = [
     {
@@ -33,6 +34,18 @@ TOOLS = [
                 },
                 "required": ["channel_id"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reload_skills",
+            "description": (
+                "Re-scan the configured skills directories so newly added or "
+                "edited skills are usable without restarting. ONLY trusted users "
+                "may -- call it when one asks you to pick up new skills."
+            ),
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -107,6 +120,18 @@ def _refuse(ctx, what):
     return "REFUSED: requester is not a trusted user. Trusted users have been notified."
 
 
+def _reload_skills():
+    """Re-scan the skills paths (#74). Reading files is not a mutation, but the
+    trust gate stays on: it changes what instructions the agent will follow."""
+    try:
+        count = skills.reload()
+    except Exception as exc:
+        retval = f"reload_skills failed: {exc}"
+        return retval
+    retval = f"skills reloaded: {count} indexed ({', '.join(skills.names()) or 'none'})"
+    return retval
+
+
 def _approve_command(args, ctx):
     channel = ctx.get("channel")
     req_id = str(args.get("request_id", "")).lstrip("#")
@@ -127,11 +152,14 @@ def dispatch(name, args, ctx):
         return f"unknown admin tool: {name}"
     user_id = ctx.get("user_id")
     if user_id not in config.TRUSTED_USERS:
-        what = (
-            "change my config restrictions" if name == "set_policy"
-            else "approve a mutating command"
-        )
+        what = {
+            "set_policy": "change my config restrictions",
+            "reload_skills": "reload my skills",
+        }.get(name, "approve a mutating command")
         return _refuse(ctx, what)
+    if name == "reload_skills":
+        retval = _reload_skills()
+        return retval
     if name == "approve_command":
         retval = _approve_command(args, ctx)
         return retval

@@ -2,3 +2,4 @@ slack-bolt>=1.18
 litellm>=1.40
 tree-sitter>=0.21
 tree-sitter-bash>=0.21
+pyyaml>=6

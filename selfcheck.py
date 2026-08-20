@@ -4,10 +4,11 @@ Verifies config parse, spine load, the YOLT gate wiring (yolt stubbed), and the
 handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
 import os
+import tempfile
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 
-from shmobster import admin_tools, approvals, config, handler, identity, llm, policy, slack_tools, spine, tools, yolt_gate  # noqa: E402
+from shmobster import admin_tools, approvals, config, handler, identity, llm, policy, skills, slack_tools, spine, tools, yolt_gate  # noqa: E402
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == ["anthropic", "openrouter", "nvidia"], config.WATERFALL
@@ -275,6 +276,7 @@ def _flip_admin(name, args, ctx):
 
 
 tools.dispatch = _rec_tools
+_real_admin = (admin_tools.dispatch, admin_tools.NAMES)  # restored in 17)
 admin_tools.dispatch = _flip_admin
 admin_tools.NAMES = {"set_policy"}
 _turn_script = [
@@ -321,5 +323,67 @@ assert identity.speaker({"user": "UHUMAN"}) == "user UHUMAN", identity.speaker({
 # _fmt (slack_read_*) uses the same labeling
 _flat = slack_tools._fmt([{"user": "UME", "bot_id": "B1", "text": "mine"}, {"user": "UH", "text": "theirs"}])
 assert "(me)] mine" in _flat and "user UH] theirs" in _flat, _flat
+
+# 17) skill loading (#74): a skillz-format SKILL.md is indexed, summarized into
+# the standing menu, offered as a tool and readable in full on demand
+_skroot = os.path.join(tempfile.mkdtemp(), "skills")
+os.makedirs(os.path.join(_skroot, "worktree-convention"))
+with open(os.path.join(_skroot, "worktree-convention", "SKILL.md"), "w") as _f:
+    _f.write(
+        "---\nname: worktree-convention\ndescription: |\n"
+        "  Where worktrees live and how to name them. Long tail that the menu "
+        "line should not carry, repeated at length so the summary has to cut it.\n"
+        "---\n\n# worktree-convention\n\nPut worktrees in <REPO>.worktrees.\n"
+    )
+config.SKILL_PATHS = [_skroot]
+assert skills.reload() == 1
+assert skills.names() == ["worktree-convention"], skills.names()
+_menu = skills.prompt_block()
+assert "- worktree-convention: Where worktrees live and how to name them." in _menu, _menu
+assert "Long tail" not in _menu, _menu  # only the first sentence reaches the prompt
+assert "Put worktrees in <REPO>.worktrees." in skills.load("worktree-convention")
+assert "no such skill" in skills.load("worktree"), skills.load("worktree")
+assert "Closest: worktree-convention" in skills.load("worktree")
+
+# earlier path wins a name collision; the loser is reported, not silently dropped
+_skroot2 = os.path.join(tempfile.mkdtemp(), "skills2")
+os.makedirs(os.path.join(_skroot2, "worktree-convention"))
+with open(os.path.join(_skroot2, "worktree-convention", "SKILL.md"), "w") as _f:
+    _f.write("---\nname: worktree-convention\ndescription: shadowed copy\n---\n\nbody2\n")
+config.SKILL_PATHS = [_skroot, _skroot2]
+assert skills.reload() == 1
+assert "Put worktrees" in skills.load("worktree-convention")
+assert [n for n, _ in skills.shadowed()] == ["worktree-convention"], skills.shadowed()
+
+# the menu + load_skill tool reach the model, and load_skill dispatches
+_capsk = {}
+
+
+def _cap_skill(messages, tools=None):
+    _capsk["sys"] = messages[0]["content"]
+    _capsk["tools"] = [t["function"]["name"] for t in (tools or [])]
+    return _FakeMsg(content="ok")
+
+
+tools.dispatch = _rec_tools  # (already stubbed above; keep exec off this machine)
+llm.complete = _cap_skill
+handler._SYSTEM = None
+handler.handle("do the thing", channel="C1", slack_client=_fs)
+assert "## Skills" in _capsk["sys"], _capsk["sys"]
+assert "load_skill" in _capsk["tools"], _capsk["tools"]
+assert "Put worktrees" in skills.dispatch("load_skill", {"name": "worktree-convention"})
+
+# reload_skills is trust-gated like the other admin tools (14) stubbed these out)
+admin_tools.dispatch, admin_tools.NAMES = _real_admin
+assert "reload_skills" in admin_tools.NAMES, admin_tools.NAMES
+_skref = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+assert _skref.startswith("REFUSED"), _skref
+_skok = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert "skills reloaded: 1" in _skok, _skok
+
+# no configured paths -> no menu, no tool, nothing paid for the feature
+config.SKILL_PATHS = []
+assert skills.reload() == 0
+assert skills.prompt_block() == ""
 
 print("selfcheck OK")

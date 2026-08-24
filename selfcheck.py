@@ -329,6 +329,16 @@ _den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "clien
 assert _den3.startswith("DENIED"), _den3
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# a click on a stale card -- the request already claimed, denied, or cleared by
+# a restart -- must not claim it is "still parked". Being confidently wrong in
+# the alert is the failure this whole path exists to stop.
+_sref = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+)
+assert _sref.startswith("REFUSED"), _sref
+assert "no longer pending" in _posted["text"], _posted
+assert "still parked" not in _posted["text"], _posted
+
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
 # absolute path, not the literal string that makes subprocess raise ENOENT
 assert policy.cwd_for({"cwd": "~/xyzzy"}) == os.path.expanduser("~/xyzzy"), policy.cwd_for({"cwd": "~/xyzzy"})

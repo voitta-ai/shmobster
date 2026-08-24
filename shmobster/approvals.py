@@ -63,8 +63,12 @@ def pop(key, channel):
     req = _PENDING.get(str(key))
     if req is None or req.get("channel") != channel:
         return None
-    del _PENDING[str(key)]
+    # Logged before the delete, not after: scrub() is fail-closed and raises
+    # when the redactor cannot be loaded, and a raise between the delete and
+    # the caller's execute() would consume the request without running it.
+    # Failing here instead leaves it parked, which is the retryable direction.
     logging.info("approvals: claimed [%s] in %s: %s", key, channel, redact.scrub(req["command"]))
+    del _PENDING[str(key)]
     retval = req
     return retval
 

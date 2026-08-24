@@ -143,16 +143,26 @@ def refuse_click(request_id, ctx, action_id):
     consume the request.
     """
     label = _CLICK_LABELS.get(action_id, "a button")
+    who = f"<@{ctx.get('user_id')}>"
     req = approvals.peek(str(request_id).lstrip("#"), ctx.get("channel"))
-    alert = (
-        f":warning: <@{ctx.get('user_id')}> clicked *{label}* on request "
-        f"[{request_id}], but only trusted users may act on a parked command -- "
-        f"nothing ran and it is still parked. {_trusted_tags()} for visibility."
-    )
-    if req is not None:
-        # Scrubbed like every other rendering of a parked command (#72): a
-        # credential rides argv routinely, and this is a fresh channel post.
-        alert += "\n" + redact.scrub(f"```{req['command']}```")
+    if req is None:
+        # A stale card -- already claimed, denied, evicted, or cleared by a
+        # restart. Saying "still parked" here would be the same kind of
+        # confident falsehood this whole change exists to stop telling.
+        alert = (
+            f":warning: {who} clicked *{label}* on request [{request_id}], which is "
+            f"no longer pending in this channel -- nothing ran. Only trusted users "
+            f"may act on a parked command. {_trusted_tags()} for visibility."
+        )
+    else:
+        alert = (
+            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
+            f"trusted users may act on a parked command -- nothing ran and it is "
+            f"still parked. {_trusted_tags()} for visibility."
+            # Scrubbed like every other rendering of a parked command (#72): a
+            # credential rides argv routinely, and this is a fresh channel post.
+            "\n" + redact.scrub(f"```{req['command']}```")
+        )
     retval = _refuse(ctx, f"{label.lower()} a mutating command", alert=alert)
     return retval
 

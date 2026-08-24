@@ -578,6 +578,26 @@ if True:
     assert "[REDACTED:" in _rendered, _rendered
     assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
 
+    # the approval LOG is durable in a way the card is not, and approvals is
+    # ingest-agnostic -- so it scrubs at the emission site rather than trusting
+    # that whoever booted us installed the redacting formatter (#94). Asserted
+    # against a plain formatter, which is what a script or a future ingest gets.
+    _astream = io.StringIO()
+    _ah = logging.StreamHandler(_astream)
+    _ah.setFormatter(logging.Formatter("%(message)s"))
+    _root = logging.getLogger()
+    _root.addHandler(_ah)
+    _lvl = _root.level
+    _root.setLevel(logging.INFO)
+    try:
+        _akey = approvals.add(f"aws configure --key {_akia}", "C_LOG", "mutating")
+        approvals.pop(_akey, "C_LOG")
+    finally:
+        _root.removeHandler(_ah)
+        _root.setLevel(_lvl)
+    assert _akia not in _astream.getvalue(), _astream.getvalue()
+    assert "[REDACTED:" in _astream.getvalue(), _astream.getvalue()
+
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it
     _stream = io.StringIO()

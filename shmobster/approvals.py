@@ -14,10 +14,18 @@ answers *is this in scope* at exec time. The two are separate gates.
 Park and claim are logged (#94). The queue lives only in this process, and the
 approval card is the only other place a parked command is ever written down --
 so once that card is gone, the log is the sole surviving record of what was
-asked for. Log lines are scrubbed by redact.install_logging(), which wraps the
-formatter, so a credential riding argv does not reach the file."""
+asked for.
+
+The command is scrubbed here, at the emission site, not left to the formatter
+redact.install_logging() wraps. That formatter is installed by the Slack ingest
+at import; this module is deliberately ingest-agnostic and reachable through
+tools.run_shell from a script, a test, or the next ingest, none of which have
+run that bootstrap. A log file is durable in a way an approval card is not, so
+the one place that must not depend on who booted us is this one."""
 import itertools
 import logging
+
+from . import redact
 
 _PENDING = {}
 _ids = itertools.count(1)
@@ -31,7 +39,7 @@ def add(command, channel, reason):
     }
     while len(_PENDING) > _MAX:
         del _PENDING[next(iter(_PENDING))]
-    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, command)
+    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, redact.scrub(command))
     retval = key
     return retval
 
@@ -56,7 +64,7 @@ def pop(key, channel):
     if req is None or req.get("channel") != channel:
         return None
     del _PENDING[str(key)]
-    logging.info("approvals: claimed [%s] in %s: %s", key, channel, req["command"])
+    logging.info("approvals: claimed [%s] in %s: %s", key, channel, redact.scrub(req["command"]))
     retval = req
     return retval
 

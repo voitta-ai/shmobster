@@ -8,7 +8,7 @@ the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
 policy still bounds its scope when it runs. reload_skills re-reads the skills
 catalog (#74) -- gated too, since it changes which instructions I will follow."""
-from . import approvals, config, policy as policy_mod, skills, tools
+from . import approvals, config, policy as policy_mod, redact, skills, tools
 
 TOOLS = [
     {
@@ -96,28 +96,65 @@ def _trusted_tags():
     return " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "(no trusted users configured)"
 
 
-def _refuse(ctx, what):
+def _refuse(ctx, what, alert=None):
     """Loud refusal, and tag all trusted users so they know (post directly so
     the tag is guaranteed, not left to the model to relay).
 
-    Deliberately does NOT assert the user asked for this (#59): the attempt to
-    {what} may be the agent's own initiative during this user's turn, not a
-    request from them. The old wording ("<user> asked me to change my config")
-    read as a prompt-injection attack whenever the model self-initiated a
-    set_policy call, and sent agents into false-alarm paralysis."""
+    The default wording deliberately does NOT assert the user asked for this
+    (#59): on the model path the attempt to {what} may be the agent's own
+    initiative during this user's turn, not a request from them. The old
+    wording ("<user> asked me to change my config") read as a prompt-injection
+    attack whenever the model self-initiated a set_policy call, and sent agents
+    into false-alarm paralysis.
+
+    A caller that *does* know who acted passes its own `alert` -- see
+    refuse_click, where a human pressed a button and the hedge would be a lie
+    (#94)."""
     client, channel = ctx.get("client"), ctx.get("channel")
     user_id = ctx.get("user_id")
-    alert = (
-        f":warning: A privileged change was attempted during <@{user_id}>'s turn "
-        f"(to {what}) and refused -- only trusted users may. This can be my own "
-        f"doing, not necessarily their request. {_trusted_tags()} for visibility."
-    )
+    if alert is None:
+        alert = (
+            f":warning: A privileged change was attempted during <@{user_id}>'s turn "
+            f"(to {what}) and refused -- only trusted users may. This can be my own "
+            f"doing, not necessarily their request. {_trusted_tags()} for visibility."
+        )
     if client and channel:
         try:
             client.chat_postMessage(channel=channel, text=alert, thread_ts=ctx.get("thread_ts") or None)
         except Exception:
             pass
     return "REFUSED: requester is not a trusted user. Trusted users have been notified."
+
+
+_CLICK_LABELS = {"approve_command": "Approve", "deny_command": "Deny"}
+
+
+def refuse_click(request_id, ctx, action_id):
+    """A non-trusted user pressed Approve or Deny on a parked command (#94).
+
+    Split from the model path because the two know different things. A button
+    press has an unambiguous actor -- the model cannot click -- so the #59
+    hedge would be a falsehood here, and saying it sent an agent hunting a
+    self-initiated mutation that had never happened.
+
+    It also names the command, because the click is exactly when someone asks
+    "what was parked?", and the card that answers that is the only other place
+    it is written down. The queue is left untouched: refusing a click must not
+    consume the request.
+    """
+    label = _CLICK_LABELS.get(action_id, "a button")
+    req = approvals.peek(str(request_id).lstrip("#"), ctx.get("channel"))
+    alert = (
+        f":warning: <@{ctx.get('user_id')}> clicked *{label}* on request "
+        f"[{request_id}], but only trusted users may act on a parked command -- "
+        f"nothing ran and it is still parked. {_trusted_tags()} for visibility."
+    )
+    if req is not None:
+        # Scrubbed like every other rendering of a parked command (#72): a
+        # credential rides argv routinely, and this is a fresh channel post.
+        alert += "\n" + redact.scrub(f"```{req['command']}```")
+    retval = _refuse(ctx, f"{label.lower()} a mutating command", alert=alert)
+    return retval
 
 
 def _reload_skills():
@@ -151,7 +188,7 @@ def dispatch(name, args, ctx):
     if name not in NAMES:
         return f"unknown admin tool: {name}"
     user_id = ctx.get("user_id")
-    if user_id not in config.TRUSTED_USERS:
+    if not is_trusted(user_id):
         what = {
             "set_policy": "change my config restrictions",
             "reload_skills": "reload my skills",

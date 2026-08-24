@@ -303,6 +303,32 @@ _den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client
 assert _den.startswith("DENIED"), _den
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# 12b) a refused click (#94). The ingest half -- that slack_app leaves the card
+# and its buttons standing -- can't be reached offline, since importing
+# slack_app builds a Bolt App. What is checkable is everything the ingest calls:
+# the queue survives, and the alert says who clicked, which button, and what it
+# did not run.
+_parked3 = tools.run_shell("echo refused_click_321", {}, "C1")
+_req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
+assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
+
+_cref = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
+)
+assert _cref.startswith("REFUSED"), _cref
+assert approvals.ids("C1") == [_req3], approvals.ids("C1")
+assert "<@U_STRANGER>" in _posted["text"], _posted
+assert "Approve" in _posted["text"], _posted
+assert "echo refused_click_321" in _posted["text"], _posted
+# ...and it does not hedge about the agent's own initiative: that wording is
+# #59's, for the model path, and a button press has exactly one possible actor.
+assert "my own" not in _posted["text"], _posted
+
+_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert _den3.startswith("DENIED"), _den3
+assert approvals.ids("C1") == [], approvals.ids("C1")
+
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
 # absolute path, not the literal string that makes subprocess raise ENOENT
 assert policy.cwd_for({"cwd": "~/xyzzy"}) == os.path.expanduser("~/xyzzy"), policy.cwd_for({"cwd": "~/xyzzy"})

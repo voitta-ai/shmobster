@@ -93,6 +93,14 @@ def _resolve(ack, body, client, action, run):
         "thread_ts": thread_ts,
         "client": client,
     }
+    # A click that resolves nothing must not touch the card (#94). chat_update
+    # is destructive, and the card is the only place a parked command is ever
+    # displayed -- overwriting it with a refusal both loses the command text and
+    # takes the buttons away from the trusted user who could still act on it,
+    # while the request itself stays in the queue, surfaced and unreachable.
+    if not admin_tools.is_trusted(ctx["user_id"]):
+        admin_tools.refuse_click(action["value"], ctx, action.get("action_id"))
+        return
     result = redact.scrub(run(action["value"], ctx))
     try:
         client.chat_update(

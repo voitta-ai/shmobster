@@ -349,6 +349,23 @@ assert _sref.startswith("REFUSED"), _sref
 assert "no longer pending" in _posted["text"], _posted
 assert "still parked" not in _posted["text"], _posted
 
+
+# ...and the one alert a user gets is spent on a DELIVERED one. A Slack failure
+# is swallowed, so counting the attempt would leave the trusted users never
+# told and every retry suppressed as already-told.
+class _FailingPost:
+    def chat_postMessage(self, channel, text, thread_ts=None):
+        raise RuntimeError("slack is down")
+
+
+_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "client": _FailingPost()}
+_posted.clear()
+assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
+assert _posted == {}, _posted
+_ctx_flaky["client"] = _FakePost()
+assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
+assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the alert"
+
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
 # absolute path, not the literal string that makes subprocess raise ENOENT
 assert policy.cwd_for({"cwd": "~/xyzzy"}) == os.path.expanduser("~/xyzzy"), policy.cwd_for({"cwd": "~/xyzzy"})

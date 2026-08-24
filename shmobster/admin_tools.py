@@ -127,6 +127,28 @@ def _refuse(ctx, what, alert=None):
 
 
 _CLICK_LABELS = {"approve_command": "Approve", "deny_command": "Deny"}
+_CLICK_ALERTED = {}  # (request_id, user_id) -> None; one alert per pair
+_CLICK_ALERT_MAX = 200
+
+
+def _first_click_alert(request_id, user_id):
+    """True only the first time this user clicks this request.
+
+    Leaving the card standing (#94) also leaves its buttons re-clickable, and
+    the alert tags every trusted user -- so without this, one stranger holding
+    down a button is an unbounded ping. The destructive chat_update used to
+    swallow the second click by accident; this does it on purpose. In-memory
+    and capped, like the queue it shadows.
+    """
+    key = (str(request_id), user_id)
+    if key in _CLICK_ALERTED:
+        retval = False
+        return retval
+    _CLICK_ALERTED[key] = None
+    while len(_CLICK_ALERTED) > _CLICK_ALERT_MAX:
+        del _CLICK_ALERTED[next(iter(_CLICK_ALERTED))]
+    retval = True
+    return retval
 
 
 def refuse_click(request_id, ctx, action_id):
@@ -144,6 +166,9 @@ def refuse_click(request_id, ctx, action_id):
     """
     label = _CLICK_LABELS.get(action_id, "a button")
     who = f"<@{ctx.get('user_id')}>"
+    if not _first_click_alert(request_id, ctx.get("user_id")):
+        retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
+        return retval
     req = approvals.peek(str(request_id).lstrip("#"), ctx.get("channel"))
     if req is None:
         # A stale card -- already claimed, denied, evicted, or cleared by a

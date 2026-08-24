@@ -329,11 +329,21 @@ _den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "clien
 assert _den3.startswith("DENIED"), _den3
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# the card stays live, so its buttons stay clickable -- one stranger must not
+# be able to tag every trusted user on repeat. Second click, same pair: still
+# refused, but silent.
+_posted.clear()
+_again = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+)
+assert _again.startswith("REFUSED"), _again
+assert _posted == {}, _posted
+
 # a click on a stale card -- the request already claimed, denied, or cleared by
 # a restart -- must not claim it is "still parked". Being confidently wrong in
 # the alert is the failure this whole path exists to stop.
 _sref = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "client": _FakePost()}, "deny_command"
 )
 assert _sref.startswith("REFUSED"), _sref
 assert "no longer pending" in _posted["text"], _posted

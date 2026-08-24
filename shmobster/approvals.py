@@ -34,12 +34,16 @@ _MAX = 50
 
 def add(command, channel, reason):
     key = str(next(_ids))
+    # Logged before the queue is touched, for the same reason pop logs before
+    # the delete: scrub() is fail-closed, and a raise after the insert would
+    # leave a request parked that no caller ever got an id for -- an orphan
+    # nobody can approve, which is the shape of bug this all exists to fix.
+    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, redact.scrub(command))
     _PENDING[key] = {
         "command": command, "channel": channel, "reason": reason, "surfaced": False,
     }
     while len(_PENDING) > _MAX:
         del _PENDING[next(iter(_PENDING))]
-    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, redact.scrub(command))
     retval = key
     return retval
 

@@ -303,6 +303,69 @@ _den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client
 assert _den.startswith("DENIED"), _den
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
+# 12b) a refused click (#94). The ingest half -- that slack_app leaves the card
+# and its buttons standing -- can't be reached offline, since importing
+# slack_app builds a Bolt App. What is checkable is everything the ingest calls:
+# the queue survives, and the alert says who clicked, which button, and what it
+# did not run.
+_parked3 = tools.run_shell("echo refused_click_321", {}, "C1")
+_req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
+assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
+
+_cref = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
+)
+assert _cref.startswith("REFUSED"), _cref
+assert approvals.ids("C1") == [_req3], approvals.ids("C1")
+assert "<@U_STRANGER>" in _posted["text"], _posted
+assert "Approve" in _posted["text"], _posted
+assert "echo refused_click_321" in _posted["text"], _posted
+# ...and it does not hedge about the agent's own initiative: that wording is
+# #59's, for the model path, and a button press has exactly one possible actor.
+assert "my own" not in _posted["text"], _posted
+
+_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert _den3.startswith("DENIED"), _den3
+assert approvals.ids("C1") == [], approvals.ids("C1")
+
+# the card stays live, so its buttons stay clickable -- one stranger must not
+# be able to tag every trusted user on repeat. Second click, same pair: still
+# refused, but silent.
+_posted.clear()
+_again = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+)
+assert _again.startswith("REFUSED"), _again
+assert _posted == {}, _posted
+
+# a click on a stale card -- the request already claimed, denied, or cleared by
+# a restart -- must not claim it is "still parked". Being confidently wrong in
+# the alert is the failure this whole path exists to stop.
+_sref = admin_tools.refuse_click(
+    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "client": _FakePost()}, "deny_command"
+)
+assert _sref.startswith("REFUSED"), _sref
+assert "no longer pending" in _posted["text"], _posted
+assert "still parked" not in _posted["text"], _posted
+
+
+# ...and the one alert a user gets is spent on a DELIVERED one. A Slack failure
+# is swallowed, so counting the attempt would leave the trusted users never
+# told and every retry suppressed as already-told.
+class _FailingPost:
+    def chat_postMessage(self, channel, text, thread_ts=None):
+        raise RuntimeError("slack is down")
+
+
+_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "client": _FailingPost()}
+_posted.clear()
+assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
+assert _posted == {}, _posted
+_ctx_flaky["client"] = _FakePost()
+assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
+assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the alert"
+
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
 # absolute path, not the literal string that makes subprocess raise ENOENT
 assert policy.cwd_for({"cwd": "~/xyzzy"}) == os.path.expanduser("~/xyzzy"), policy.cwd_for({"cwd": "~/xyzzy"})
@@ -551,6 +614,26 @@ if True:
     assert _akia not in _rendered, _rendered
     assert "[REDACTED:" in _rendered, _rendered
     assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
+
+    # the approval LOG is durable in a way the card is not, and approvals is
+    # ingest-agnostic -- so it scrubs at the emission site rather than trusting
+    # that whoever booted us installed the redacting formatter (#94). Asserted
+    # against a plain formatter, which is what a script or a future ingest gets.
+    _astream = io.StringIO()
+    _ah = logging.StreamHandler(_astream)
+    _ah.setFormatter(logging.Formatter("%(message)s"))
+    _root = logging.getLogger()
+    _root.addHandler(_ah)
+    _lvl = _root.level
+    _root.setLevel(logging.INFO)
+    try:
+        _akey = approvals.add(f"aws configure --key {_akia}", "C_LOG", "mutating")
+        approvals.pop(_akey, "C_LOG")
+    finally:
+        _root.removeHandler(_ah)
+        _root.setLevel(_lvl)
+    assert _akia not in _astream.getvalue(), _astream.getvalue()
+    assert "[REDACTED:" in _astream.getvalue(), _astream.getvalue()
 
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it

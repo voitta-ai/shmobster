@@ -60,7 +60,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "slack_post",
-            "description": "Post a message to a Slack channel (optionally as a thread reply). Use to proactively message a channel or ping another user -- mention them with <@USERID>.",
+            "description": "Post a message to a Slack channel (optionally as a thread reply). Use to proactively message a channel or ping another user -- mention them with <@USERID>. Do NOT use it to deliver your answer to the person who asked: your reply is already posted in the current thread for you, and posting it here as well puts it somewhere they are not looking. If you do post into a thread, pass thread_ts -- without it the message lands in the channel, outside the thread.",
             "parameters": {
                 "type": "object",
                 "properties": {

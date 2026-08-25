@@ -627,7 +627,13 @@ if True:
     _lvl = _root.level
     _root.setLevel(logging.INFO)
     try:
-        _akey = approvals.add(f"aws configure --key {_akia}", "C_LOG", "mutating")
+        # the REASON needs it as much as the command: yolt_gate renders its own
+        # failures as "yolt error: <exc>", and a TimeoutExpired there carries
+        # the classifier's argv -- the command again, by another route
+        _akey = approvals.add(
+            f"aws configure --key {_akia}", "C_LOG",
+            f"yolt error: Command '['python', 'gc.py', 'aws configure --key {_akia}']' timed out",
+        )
         approvals.pop(_akey, "C_LOG")
         # ...and so is every other disposition (#97): parked was recorded, ran
         # and blocked were not, which left "did it try and get blocked, or never

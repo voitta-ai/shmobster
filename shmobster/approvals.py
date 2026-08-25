@@ -39,7 +39,11 @@ def add(command, channel, reason):
     # the delete: scrub() is fail-closed, and a raise after the insert would
     # leave a request parked that no caller ever got an id for -- an orphan
     # nobody can approve, which is the shape of bug this all exists to fix.
-    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, repr(redact.scrub(command)))
+    # The reason gets the same treatment as the command: yolt_gate renders its
+    # own failures as "yolt error: <exc>", and a TimeoutExpired there carries
+    # the classifier's argv -- which is the command, again, by another route.
+    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel,
+                 repr(redact.scrub(reason)), repr(redact.scrub(command)))
     _PENDING[key] = {
         "command": command, "channel": channel, "reason": reason, "surfaced": False,
     }

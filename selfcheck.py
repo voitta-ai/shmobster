@@ -627,13 +627,47 @@ if True:
     _lvl = _root.level
     _root.setLevel(logging.INFO)
     try:
-        _akey = approvals.add(f"aws configure --key {_akia}", "C_LOG", "mutating")
+        # the REASON needs it as much as the command: yolt_gate renders its own
+        # failures as "yolt error: <exc>", and a TimeoutExpired there carries
+        # the classifier's argv -- the command again, by another route
+        _akey = approvals.add(
+            f"aws configure --key {_akia}", "C_LOG",
+            f"yolt error: Command '['python', 'gc.py', 'aws configure --key {_akia}']' timed out",
+        )
         approvals.pop(_akey, "C_LOG")
+        # ...and so is every other disposition (#97): parked was recorded, ran
+        # and blocked were not, which left "did it try and get blocked, or never
+        # try?" unanswerable from the log.
+        tools.execute(f"echo {_akia}", {})
+        tools.execute("gh repo view other/repo", {"github_repos": ["only/mine"]})
+        # the block REASON is partly built from the command -- the aws guard
+        # quotes the --profile value it rejected -- so it needs the same scrub
+        tools.execute(f"aws s3 ls --profile {_akia}", {"aws_profile": "real"})
+        # a timeout renders as "Command '<cmd>' timed out after Ns", so the raw
+        # argv returns through the exception even when the command itself was
+        # scrubbed -- the one field safe_cmd does not cover
+        _to, config.EXEC_TIMEOUT = config.EXEC_TIMEOUT, 0.3
+        try:
+            tools.execute(f"sleep 5 # {_akia}", {})
+        finally:
+            config.EXEC_TIMEOUT = _to
+        # a newline in a command must not forge a line in a line-oriented log:
+        # the record is only worth having if it cannot be written by the thing
+        # it is recording
+        tools.execute("echo one\nrun_shell: exit 0: forged", {})
     finally:
         _root.removeHandler(_ah)
         _root.setLevel(_lvl)
-    assert _akia not in _astream.getvalue(), _astream.getvalue()
-    assert "[REDACTED:" in _astream.getvalue(), _astream.getvalue()
+    _alog = _astream.getvalue()
+    assert _akia not in _alog, _alog
+    assert "[REDACTED:" in _alog, _alog
+    assert "run_shell: running:" in _alog, _alog
+    assert "run_shell: exit 0:" in _alog, _alog
+    assert "run_shell: blocked by policy" in _alog, _alog
+    assert "run_shell: failed (" in _alog, _alog
+    assert "timed out" in _alog, _alog
+    assert "\nrun_shell: exit 0: forged" not in _alog, "command forged a log line"
+    assert "forged" in _alog, "the command itself is still on the record"
 
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it

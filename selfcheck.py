@@ -634,6 +634,9 @@ if True:
         # try?" unanswerable from the log.
         tools.execute(f"echo {_akia}", {})
         tools.execute("gh repo view other/repo", {"github_repos": ["only/mine"]})
+        # the block REASON is partly built from the command -- the aws guard
+        # quotes the --profile value it rejected -- so it needs the same scrub
+        tools.execute(f"aws s3 ls --profile {_akia}", {"aws_profile": "real"})
         # a timeout renders as "Command '<cmd>' timed out after Ns", so the raw
         # argv returns through the exception even when the command itself was
         # scrubbed -- the one field safe_cmd does not cover

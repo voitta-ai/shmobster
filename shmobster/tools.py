@@ -72,7 +72,10 @@ def execute(command, policy):
     safe_cmd = repr(redact.scrub(command))
     ok, why = policy_mod.check(command, policy)
     if not ok:
-        logging.info("run_shell: blocked by policy (%s): %s", why, safe_cmd)
+        # The reason gets the same treatment as the command, because it is
+        # partly built from it: the aws guard quotes the --profile value it
+        # rejected and the exclude guard quotes the offending path token.
+        logging.info("run_shell: blocked by policy (%s): %s", repr(redact.scrub(why)), safe_cmd)
         retval = f"BLOCKED by channel policy: {why}"
         return retval
     # Logged before the subprocess, not only after: a command that hangs to the

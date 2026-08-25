@@ -642,6 +642,10 @@ if True:
             tools.execute(f"sleep 5 # {_akia}", {})
         finally:
             config.EXEC_TIMEOUT = _to
+        # a newline in a command must not forge a line in a line-oriented log:
+        # the record is only worth having if it cannot be written by the thing
+        # it is recording
+        tools.execute("echo one\nrun_shell: exit 0: forged", {})
     finally:
         _root.removeHandler(_ah)
         _root.setLevel(_lvl)
@@ -653,6 +657,8 @@ if True:
     assert "run_shell: blocked by policy" in _alog, _alog
     assert "run_shell: failed (" in _alog, _alog
     assert "timed out" in _alog, _alog
+    assert "\nrun_shell: exit 0: forged" not in _alog, "command forged a log line"
+    assert "forged" in _alog, "the command itself is still on the record"
 
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it

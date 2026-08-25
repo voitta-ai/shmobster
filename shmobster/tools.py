@@ -65,7 +65,11 @@ def execute(command, policy):
     """Run a command that has already cleared the YOLT gate or been approved.
     The channel policy is still enforced here -- approval is permission, policy
     is scope, and both must pass."""
-    safe_cmd = redact.scrub(command)
+    # repr, not the bare string: a command carrying a newline would
+    # otherwise write extra lines into a line-oriented log and forge
+    # entries -- "run_shell: exit 0: <something that never ran>" -- in the
+    # exact record this logging exists to be trusted as.
+    safe_cmd = repr(redact.scrub(command))
     ok, why = policy_mod.check(command, policy)
     if not ok:
         logging.info("run_shell: blocked by policy (%s): %s", why, safe_cmd)
@@ -105,7 +109,7 @@ def execute(command, policy):
         # TimeoutExpired renders as "Command '<cmd>' timed out after Ns", so the
         # raw argv comes back around through the one field safe_cmd never
         # covered. Same reason the return value below is scrubbed downstream.
-        logging.info("run_shell: failed (%s): %s", redact.scrub(str(exc)), safe_cmd)
+        logging.info("run_shell: failed (%s): %s", repr(redact.scrub(str(exc))), safe_cmd)
         retval = f"exec error: {exc}"
     return retval
 

@@ -14,7 +14,8 @@ answers *is this in scope* at exec time. The two are separate gates.
 Park and claim are logged (#94). The queue lives only in this process, and the
 approval card is the only other place a parked command is ever written down --
 so once that card is gone, the log is the sole surviving record of what was
-asked for.
+asked for. Commands are logged as repr: a newline in one would otherwise forge
+extra lines in a line-oriented log, in the very record this exists to trust.
 
 The command is scrubbed here, at the emission site, not left to the formatter
 redact.install_logging() wraps. That formatter is installed by the Slack ingest
@@ -38,7 +39,7 @@ def add(command, channel, reason):
     # the delete: scrub() is fail-closed, and a raise after the insert would
     # leave a request parked that no caller ever got an id for -- an orphan
     # nobody can approve, which is the shape of bug this all exists to fix.
-    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, redact.scrub(command))
+    logging.info("approvals: parked [%s] in %s (%s): %s", key, channel, reason, repr(redact.scrub(command)))
     _PENDING[key] = {
         "command": command, "channel": channel, "reason": reason, "surfaced": False,
     }
@@ -71,7 +72,7 @@ def pop(key, channel):
     # when the redactor cannot be loaded, and a raise between the delete and
     # the caller's execute() would consume the request without running it.
     # Failing here instead leaves it parked, which is the retryable direction.
-    logging.info("approvals: claimed [%s] in %s: %s", key, channel, redact.scrub(req["command"]))
+    logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
     del _PENDING[str(key)]
     retval = req
     return retval

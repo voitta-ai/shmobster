@@ -220,15 +220,16 @@ Every command's disposition is logged to `logs/shmobster.err.log` (#97), so a
 parked command survives the loss of its card and "did it try that and get
 blocked, or never try?" has an answer:
 
-    approvals: parked [3] in C0... (mutating): gh issue create ...
-    approvals: claimed [3] in C0...: gh issue create ...
-    run_shell: running: git log --oneline -5
-    run_shell: exit 0: git log --oneline -5
-    run_shell: blocked by policy (repo 'x/y' not in channel whitelist ['a/b']): gh repo view x/y
+    approvals: parked [3] in C0... (mutating): 'gh issue create ...'
+    approvals: claimed [3] in C0...: 'gh issue create ...'
+    run_shell: running: 'git log --oneline -5'
+    run_shell: exit 0: 'git log --oneline -5'
+    run_shell: blocked by policy (repo 'x/y' not in channel whitelist ['a/b']): 'gh repo view x/y'
 
 Commands are scrubbed at the emission site, not by the formatter the Slack
 ingest installs -- `approvals` and `tools` are reachable without it, and a log
-outlives the channel a command was posted to.
+outlives the channel a command was posted to. They are written as `repr`, so a
+command containing a newline cannot forge a line in the record it appears in.
 
 Requests are in-memory and channel-scoped: a restart clears them (re-ask rather
 than run a stale approval), and an approval in one channel cannot release a

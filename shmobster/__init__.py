@@ -7,7 +7,7 @@ Instances run as long-lived services on separate machines, pulling from git, so
 "which build is this?" has to be answerable from the outside. `build()` answers
 it: the release version plus the checkout's short sha, because between tags the
 sha is the only thing that distinguishes two running instances."""
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 
 _BUILD = None

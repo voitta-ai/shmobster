@@ -3,11 +3,19 @@ Iter #4, by the per-channel policy (cwd / aws_profile / github_repos).
 
 Read-only commands run in the channel's cwd (with its AWS_PROFILE) if they pass
 the channel's github/aws scope. A mutating command is parked as a pending
-approval request (#48) and runs only once a trusted user approves it by id."""
+approval request (#48) and runs only once a trusted user approves it by id.
+
+Every disposition is logged (#97): ran, blocked by policy, or -- via approvals
+-- parked. #94 gave the queue a record and left the other two silent, so "did
+it try X and get blocked, or never try?" stayed unanswerable, which is the same
+question that made #94 take an hour. Commands are scrubbed at the emission site
+for the reason approvals gives: argv carries credentials and a log outlives the
+channel it was posted to."""
+import logging
 import os
 import subprocess
 
-from . import approvals, config, policy as policy_mod, yolt_gate
+from . import approvals, config, policy as policy_mod, redact, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -57,10 +65,17 @@ def execute(command, policy):
     """Run a command that has already cleared the YOLT gate or been approved.
     The channel policy is still enforced here -- approval is permission, policy
     is scope, and both must pass."""
+    safe_cmd = redact.scrub(command)
     ok, why = policy_mod.check(command, policy)
     if not ok:
+        logging.info("run_shell: blocked by policy (%s): %s", why, safe_cmd)
         retval = f"BLOCKED by channel policy: {why}"
         return retval
+    # Logged before the subprocess, not only after: a command that hangs to the
+    # timeout, or one running when the watchdog (#66) restarts us, has to leave
+    # a trace too. The exit line repeats the command rather than relying on
+    # adjacency -- Bolt handles events concurrently, so two turns interleave.
+    logging.info("run_shell: running: %s", safe_cmd)
     env = os.environ.copy()
     prof = policy.get("aws_profile")
     if prof:
@@ -80,11 +95,13 @@ def execute(command, policy):
             timeout=config.EXEC_TIMEOUT,
             env=env,
         )
+        logging.info("run_shell: exit %s: %s", proc.returncode, safe_cmd)
         out = (proc.stdout or "") + (proc.stderr or "")
         if len(out) > _MAX_OUTPUT:
             out = out[:_MAX_OUTPUT] + "\n...[truncated]"
         retval = out.strip() or f"(exit {proc.returncode}, no output)"
     except Exception as exc:
+        logging.info("run_shell: failed (%s): %s", exc, safe_cmd)
         retval = f"exec error: {exc}"
     return retval
 

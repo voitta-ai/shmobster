@@ -629,11 +629,20 @@ if True:
     try:
         _akey = approvals.add(f"aws configure --key {_akia}", "C_LOG", "mutating")
         approvals.pop(_akey, "C_LOG")
+        # ...and so is every other disposition (#97): parked was recorded, ran
+        # and blocked were not, which left "did it try and get blocked, or never
+        # try?" unanswerable from the log.
+        tools.execute(f"echo {_akia}", {})
+        tools.execute("gh repo view other/repo", {"github_repos": ["only/mine"]})
     finally:
         _root.removeHandler(_ah)
         _root.setLevel(_lvl)
-    assert _akia not in _astream.getvalue(), _astream.getvalue()
-    assert "[REDACTED:" in _astream.getvalue(), _astream.getvalue()
+    _alog = _astream.getvalue()
+    assert _akia not in _alog, _alog
+    assert "[REDACTED:" in _alog, _alog
+    assert "run_shell: running:" in _alog, _alog
+    assert "run_shell: exit 0:" in _alog, _alog
+    assert "run_shell: blocked by policy" in _alog, _alog
 
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it

@@ -101,7 +101,11 @@ def execute(command, policy):
             out = out[:_MAX_OUTPUT] + "\n...[truncated]"
         retval = out.strip() or f"(exit {proc.returncode}, no output)"
     except Exception as exc:
-        logging.info("run_shell: failed (%s): %s", exc, safe_cmd)
+        # The exception text is scrubbed too, not only the command: a
+        # TimeoutExpired renders as "Command '<cmd>' timed out after Ns", so the
+        # raw argv comes back around through the one field safe_cmd never
+        # covered. Same reason the return value below is scrubbed downstream.
+        logging.info("run_shell: failed (%s): %s", redact.scrub(str(exc)), safe_cmd)
         retval = f"exec error: {exc}"
     return retval
 

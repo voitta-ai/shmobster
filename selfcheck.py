@@ -634,6 +634,14 @@ if True:
         # try?" unanswerable from the log.
         tools.execute(f"echo {_akia}", {})
         tools.execute("gh repo view other/repo", {"github_repos": ["only/mine"]})
+        # a timeout renders as "Command '<cmd>' timed out after Ns", so the raw
+        # argv returns through the exception even when the command itself was
+        # scrubbed -- the one field safe_cmd does not cover
+        _to, config.EXEC_TIMEOUT = config.EXEC_TIMEOUT, 0.3
+        try:
+            tools.execute(f"sleep 5 # {_akia}", {})
+        finally:
+            config.EXEC_TIMEOUT = _to
     finally:
         _root.removeHandler(_ah)
         _root.setLevel(_lvl)
@@ -643,6 +651,8 @@ if True:
     assert "run_shell: running:" in _alog, _alog
     assert "run_shell: exit 0:" in _alog, _alog
     assert "run_shell: blocked by policy" in _alog, _alog
+    assert "run_shell: failed (" in _alog, _alog
+    assert "timed out" in _alog, _alog
 
     # logs: a credential inside an exception traceback is appended by the
     # FORMATTER from exc_info, so a filter on record.msg would never see it

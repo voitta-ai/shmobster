@@ -13,6 +13,11 @@ import tempfile
 import time
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
+# ...and the example POLICIES too. The default path is ./shmobster-policies.json,
+# so on a machine that actually runs shmobster this check was quietly loading the
+# live deployment's policy file -- which since #104 is interpolated, making the
+# result depend on whose shell you ran it from.
+os.environ["SHMOBSTER_POLICIES"] = "examples/shmobster-policies-example.json"
 # The example config references its secrets from the environment (#73), and an
 # unset one is a hard startup failure by design. Offline sanity must not need
 # real keys, so stub every name the example refers to with a placeholder.
@@ -23,6 +28,9 @@ for _var in (
     "GEMINI_API_KEY",
     "REQUESTY_API_KEY",
     "OPENROUTER_API_KEY",
+    # referenced by the example policy file's per-channel env (#104)
+    "VERCEL_TOKEN",
+    "HEROKU_API_KEY",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
@@ -65,6 +73,13 @@ assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), conf
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
 assert _REAL_YOLT.endswith("grammar_classifier.py"), _REAL_YOLT
+
+# 0b) the policy file gets the same ${VAR} expansion as the main config (#104).
+# Per-channel env exists to inject credentials, so without this it is the one
+# place in the deployment where a secret has to be pasted in literally.
+_scoped = config.CHANNEL_POLICIES["C0SCOPEDCHANNEL"]
+assert _scoped["env"]["VERCEL_TOKEN"] == os.environ["VERCEL_TOKEN"], _scoped["env"]
+assert "${" not in json.dumps(_scoped), "a ${VAR} reference survived into a live policy"
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()

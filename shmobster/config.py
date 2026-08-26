@@ -106,18 +106,25 @@ EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 # Unlisted channels fall back to default_policy. This is the capability envelope
 # keyed by channel (where/what), distinct from who (multi-user, later).
 #
-# Policies are machine-specific but NOT secret, so they live in their own
-# gitignored file (SHMOBSTER_POLICIES, default ./shmobster-policies.json), copied
-# from examples/shmobster-policies-example.json. For back-compat, inline
+# Policies live in their own gitignored file (SHMOBSTER_POLICIES, default
+# ./shmobster-policies.json), copied from
+# examples/shmobster-policies-example.json. For back-compat, inline
 # channel_policies/default_policy in the main config are used when no policy file
 # is present.
+#
+# They were once described here as "machine-specific but NOT secret". That
+# stopped being true when per-channel `env` arrived: that key exists precisely
+# to inject credentials into a channel's commands. So the policy file gets the
+# same ${VAR} expansion as the main config (#104) -- otherwise it would be the
+# one place in the deployment where a secret has to be pasted in literally.
 _POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
 
 
 def _load_policies():
     if os.path.exists(_POLICIES_PATH):
         with open(_POLICIES_PATH, "r") as f:
-            retval = json.load(f)
+            raw = json.load(f)
+        retval = _interpolate(raw)
         return retval
     retval = {
         "channel_policies": _cfg.get("channel_policies", {}),
@@ -136,10 +143,21 @@ TRUSTED_USERS = set(_cfg.get("trusted_users", []))
 
 def reload_policies():
     """Re-read the policy source into the module globals so a set_channel_policy
-    write takes effect without a restart."""
+    write takes effect without a restart.
+
+    Interpolation failures are converted here (#104). At boot an unset ${VAR}
+    should stop startup, and _interpolate raises SystemExit to do it -- but this
+    path is reachable from chat, on a Bolt worker thread, where SystemExit is a
+    BaseException the ingest's `except Exception` would not catch. So a bad edit
+    refuses the reload and leaves the policies that were already loaded, instead
+    of half-killing a running agent."""
     global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
-    _cfg = _load()
-    _policies = _load_policies()
+    try:
+        cfg, pols = _load(), _load_policies()
+    except SystemExit as exc:
+        raise RuntimeError(f"policy reload refused, keeping the loaded policies: {exc}") from None
+    _cfg = cfg
+    _policies = pols
     CHANNEL_POLICIES = _policies.get("channel_policies", {})
     DEFAULT_POLICY = _policies.get("default_policy", {})
 

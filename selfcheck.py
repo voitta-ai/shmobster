@@ -324,13 +324,19 @@ approvals.release(_req3)
 assert approvals.acquire("no-such-id", "C1") is None, "a stale click acquires nothing"
 assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
 
-# held and absent both fail to acquire, and the ingest has to tell them apart:
-# peek still finds a held request, so "in flight elsewhere" never gets reported
-# as "gone"
+# held and absent both fail to acquire, and the ingest has to tell them apart.
+# The hold is the only thing that knows: approve pops the request BEFORE the
+# command runs, so for the whole run the queue says nothing and "still pending"
+# would report a running command as gone.
 approvals.acquire(_req3, "C1")
-assert approvals.acquire(_req3, "C1") is None and approvals.peek(_req3, "C1") is not None, "held"
-assert approvals.acquire("no-such-id", "C1") is None and approvals.peek("no-such-id", "C1") is None, "absent"
+assert approvals.held(_req3), "acquired -> held"
+approvals.pop(_req3, "C1")  # what _approve_command does before it executes
+assert approvals.peek(_req3, "C1") is None, "popped, so the queue no longer knows"
+assert approvals.held(_req3), "but it is still in flight, and held says so"
+assert not approvals.held("no-such-id"), "an absent request is not held"
 approvals.release(_req3)
+assert not approvals.held(_req3), "released"
+_req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
 
 _cref = admin_tools.refuse_click(
     _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"

@@ -119,6 +119,19 @@ def acquire(key, channel):
     return retval
 
 
+def held(key):
+    """Whether some surface has this request in flight right now.
+
+    Distinct from pending, and the distinction is the whole point: the approve
+    path pops the request out of the queue and only then runs the command, so
+    for the entire duration of the run _PENDING says nothing and the hold is
+    the only thing that knows (#103). Inferring in-flight from "still pending"
+    reports a running command as gone."""
+    with _LOCK:
+        retval = str(key) in _CLAIMING
+    return retval
+
+
 def release(key):
     """Drop the hold acquire() took. Safe to call for a key never acquired."""
     with _LOCK:

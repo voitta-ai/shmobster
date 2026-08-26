@@ -112,13 +112,14 @@ def _resolve(ack, body, client, action, run):
     req = approvals.acquire(req_id, channel)
     if req is None:
         # Two reasons acquire can fail, and they deserve different answers. If
-        # the request is still pending, another delivery of this press has it
-        # in flight and will update the card -- saying anything here would
-        # claim it is gone while it is running. Only a genuinely absent request
-        # gets a message, and it goes to the thread rather than rewriting the
-        # card, because a click that resolves nothing must not destroy the only
-        # copy of the parked command (#94).
-        if approvals.peek(req_id, channel) is not None:
+        # another delivery of this press has it in flight, that thread will
+        # update the card and saying anything here would claim it is gone while
+        # it is running -- and it IS gone from the queue by then, since approve
+        # pops before it executes, so the hold is the only thing that knows.
+        # Only a genuinely absent request gets a message, and it goes to the
+        # thread rather than rewriting the card, because a click that resolves
+        # nothing must not destroy the only copy of the parked command (#94).
+        if approvals.held(req_id):
             return
         try:
             client.chat_postMessage(

@@ -211,7 +211,9 @@ non-trusted click is refused loudly and tags the trusted users, same as
 `set_policy` -- but the card itself is left alone (#94), because a refusal
 resolves nothing: the buttons stay live for a trusted user, and the command
 stays visible instead of being overwritten by the refusal. The refusal names
-who clicked, which button, and which command it did not run; unlike the
+who clicked, which button, which command it did not run, and says the buttons
+are still there to be used (#107) -- without that it reads as though the click
+consumed the request. Unlike the
 `set_policy` refusal it makes no allowance for the agent having acted on its
 own, because a button press can only have come from a human. Note that a click
 bypasses the model entirely: the command output is posted raw, not summarized.

@@ -399,13 +399,16 @@ assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
 # command runs, so for the whole run the queue says nothing and "still pending"
 # would report a running command as gone.
 approvals.acquire(_req3, "C1")
-assert approvals.held(_req3), "acquired -> held"
+assert approvals.status(_req3, "C1")[0] == "held", "acquired -> held"
 approvals.pop(_req3, "C1")  # what _approve_command does before it executes
 assert approvals.peek(_req3, "C1") is None, "popped, so the queue no longer knows"
-assert approvals.held(_req3), "but it is still in flight, and held says so"
-assert not approvals.held("no-such-id"), "an absent request is not held"
+assert approvals.status(_req3, "C1")[0] == "held", "still in flight, and status says so"
+assert approvals.status("no-such-id", "C1")[0] == "absent", "an absent request is not held"
+# ids are a process counter that restarts at 1 while approval cards outlive the
+# process, so a stale card in one channel can name an id another channel holds
+assert approvals.status(_req3, "C_OTHER")[0] == "absent", "a hold in one channel is not a hold in another"
 approvals.release(_req3)
-assert not approvals.held(_req3), "released"
+assert approvals.status(_req3, "C1")[0] != "held", "released"
 
 # a held request must survive queue overflow: acquire leaves it in _PENDING
 # until the approve path pops it, and evicting it in that window turns a
@@ -441,6 +444,43 @@ assert approvals.ids("C1") == [_req3], approvals.ids("C1")
 assert "<@U_STRANGER>" in _posted["text"], _posted
 assert "Approve" in _posted["text"], _posted
 assert "echo refused_click_321" in _posted["text"], _posted
+# the refusal has to say the request is still actionable, not just quote the
+# rule: the card and its buttons are deliberately left standing (#107)
+assert "still live" in _posted["text"], _posted
+assert "still parked" in _posted["text"], _posted
+
+# ...but pending is not the same as clickable, and the queue goes quiet in the
+# middle of a trusted click: it acquires the request, strips the buttons, and
+# the approve path pops it before running the command. So peek() says "pending"
+# early in that window and "gone" for the whole run, and only the hold spans it
+# (#107). On its own request, so the ids the dedupe checks below depend on stay
+# put.
+_flight = approvals.add("echo in_flight", "C1", "mutating")
+approvals.acquire(_flight, "C1")
+_posted.clear()
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
+assert "already acting on it" in _posted["text"], _posted
+assert "still live" not in _posted["text"], _posted
+
+approvals.pop(_flight, "C1")  # what _approve_command does before it executes
+_posted.clear()
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "client": _FakePost()}, "approve_command")
+assert "already acting on it" in _posted["text"], _posted
+assert "no longer pending" not in _posted["text"], _posted
+approvals.release(_flight)
+
+# the refusal dedupe is keyed by channel too: ids restart at 1 and cards outlive
+# the process, so a stale click on [N] in one channel must not silence the alert
+# for a live [N] in another -- that would hide the unauthorized click trusted
+# users are meant to hear about
+_dup = approvals.add("echo same_id_other_channel", "C_DUP", "mutating")
+_posted.clear()
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "client": _FakePost()}, "approve_command")
+assert "<@U_STRANGER>" in _posted["text"], "first channel alerts"
+_posted.clear()
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "client": _FakePost()}, "approve_command")
+assert "<@U_STRANGER>" in _posted["text"], "same id and user in another channel must still alert"
+approvals.pop(_dup, "C_DUP")
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted

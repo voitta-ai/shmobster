@@ -119,7 +119,7 @@ def _resolve(ack, body, client, action, run):
         # Only a genuinely absent request gets a message, and it goes to the
         # thread rather than rewriting the card, because a click that resolves
         # nothing must not destroy the only copy of the parked command (#94).
-        if approvals.held(req_id):
+        if approvals.status(req_id, channel)[0] == "held":
             return
         try:
             client.chat_postMessage(

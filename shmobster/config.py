@@ -192,8 +192,16 @@ def set_channel_policy(channel_id, updates):
         raise RuntimeError(f"refusing to write a policy that would not load: {exc}") from None
     # Written via a temp file in the same directory and renamed, so a crash
     # mid-write cannot truncate the live policy file. os.replace is atomic.
+    #
+    # The temp file is created with the original's mode rather than the process
+    # umask: this file holds per-channel `env` credentials and is meant to be
+    # chmod 600, and a rename carries the temp file's permissions with it -- so
+    # a plain open() here would quietly widen a secret-bearing file to whatever
+    # the umask allows, on the first set_policy after this shipped.
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    mode = os.stat(path).st_mode & 0o777
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
     reload_policies()

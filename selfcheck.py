@@ -109,6 +109,19 @@ with open(_pf) as _f:
     assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/original", "disk was mutated"
 assert not os.path.exists(_pf + ".tmp"), "temp file left behind"
 
+# ...and a successful write must not widen the file. It holds per-channel env
+# credentials and is meant to be chmod 600; a rename carries the temp file's
+# mode, so creating that temp under the umask would quietly publish it.
+os.chmod(_pf, 0o600)
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, _pf
+try:
+    config.set_channel_policy("C_KEEP", {"cwd": "/tmp/updated"})
+finally:
+    config._POLICIES_PATH = _saved_pp
+assert oct(os.stat(_pf).st_mode & 0o777) == "0o600", oct(os.stat(_pf).st_mode & 0o777)
+with open(_pf) as _f:
+    assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/updated", "write did not land"
+
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
 

@@ -8,6 +8,12 @@ is the safe direction -- a stale approval is worse than being asked again.
 This module is ingest-agnostic: it holds the queue, and each ingest renders its
 own approval surface over it (Slack posts Approve/Deny buttons -- #50).
 
+Every read and write of the queue is under one lock (#103). Bolt serves mention
+handlers and button handlers on different threads, so surfacing cards, parking,
+acquiring and popping all overlap; unsynchronized, the cheapest symptom is a
+RuntimeError from iterating a dict another thread is mutating, and the most
+expensive is an approved command that never runs.
+
 Approval answers *may this run at all*; the channel policy (policy.check) still
 answers *is this in scope* at exec time. The two are separate gates.
 
@@ -25,12 +31,15 @@ run that bootstrap. A log file is durable in a way an approval card is not, so
 the one place that must not depend on who booted us is this one."""
 import itertools
 import logging
+import threading
 
 from . import redact
 
 _PENDING = {}
 _ids = itertools.count(1)
 _MAX = 50
+_CLAIMING = set()
+_LOCK = threading.Lock()
 
 
 def add(command, channel, reason):
@@ -44,11 +53,25 @@ def add(command, channel, reason):
     # the classifier's argv -- which is the command, again, by another route.
     logging.info("approvals: parked [%s] in %s (%s): %s", key, channel,
                  repr(redact.scrub(reason)), repr(redact.scrub(command)))
-    _PENDING[key] = {
-        "command": command, "channel": channel, "reason": reason, "surfaced": False,
-    }
-    while len(_PENDING) > _MAX:
-        del _PENDING[next(iter(_PENDING))]
+    with _LOCK:
+        _PENDING[key] = {
+            "command": command, "channel": channel, "reason": reason, "surfaced": False,
+        }
+        # Overflow never evicts a held request (#103). acquire() leaves it in
+        # the queue until the approve path pops it, so an oldest-first eviction
+        # during that window turns a trusted click into "no pending request"
+        # and the command a human approved simply never runs.
+        #
+        # Nor the request being parked right now, which is otherwise its own
+        # victim once everything older is held: add() would hand back an id for
+        # a request it had just deleted. When there is nothing evictable the cap
+        # is exceeded instead -- it is a safety valve on a 50-deep queue, and
+        # going one over beats returning a dead id.
+        while len(_PENDING) > _MAX:
+            victim = next((k for k in _PENDING if k not in _CLAIMING and k != key), None)
+            if victim is None:
+                break
+            del _PENDING[victim]
     retval = key
     return retval
 
@@ -56,30 +79,90 @@ def add(command, channel, reason):
 def claim_unsurfaced(channel):
     """Requests in this channel that no ingest has rendered yet, marked as
     surfaced so a second call (or a second reply in the same thread) doesn't
-    post duplicate buttons. Returns [(id, request), ...]."""
+    post duplicate buttons. Returns [(id, request), ...].
+
+    Locked like the rest: this runs on the mention thread while button handlers
+    add and pop on theirs, and iterating _PENDING unsynchronized raises
+    RuntimeError: dictionary changed size during iteration -- which would take
+    out the reply that was about to show the buttons. The snapshot is built and
+    marked under the lock, then posted outside it."""
     out = []
-    for key, req in _PENDING.items():
-        if req.get("channel") == channel and not req.get("surfaced"):
-            req["surfaced"] = True
-            out.append((key, req))
+    with _LOCK:
+        for key, req in list(_PENDING.items()):
+            if req.get("channel") == channel and not req.get("surfaced"):
+                req["surfaced"] = True
+                out.append((key, req))
     retval = out
     return retval
 
 
 def pop(key, channel):
     """Claim a request -- only from the channel it was raised in, so an approval
-    in one channel can't release a command parked in another."""
-    req = _PENDING.get(str(key))
-    if req is None or req.get("channel") != channel:
-        return None
-    # Logged before the delete, not after: scrub() is fail-closed and raises
-    # when the redactor cannot be loaded, and a raise between the delete and
-    # the caller's execute() would consume the request without running it.
-    # Failing here instead leaves it parked, which is the retryable direction.
-    logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
-    del _PENDING[str(key)]
-    retval = req
+    in one channel can't release a command parked in another.
+
+    Under the lock, because the lookup and the delete are two steps and the
+    button surface and the text surface reach here on different threads (#103).
+    Unlocked, both callers pass the guard, one deletes, and the other raises
+    KeyError out of a button handler -- so the request that a human approved is
+    consumed by one path and reported as a crash by the other."""
+    with _LOCK:
+        k = str(key)
+        req = _PENDING.get(k)
+        if req is None or req.get("channel") != channel:
+            return None
+        # Logged before the delete, not after: scrub() is fail-closed and raises
+        # when the redactor cannot be loaded, and a raise between the delete and
+        # the caller's execute() would consume the request without running it.
+        # Failing here instead leaves it parked, which is the retryable direction.
+        logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
+        del _PENDING[k]
+        retval = req
     return retval
+
+
+def acquire(key, channel):
+    """Take exclusive hold of a request before acting on it, or return None.
+
+    Two Slack deliveries of the same button press land on two Bolt threads
+    (#103). Without this, both see a pending request, both proceed, and the
+    loser -- the one whose pop finds nothing -- overwrites the winner's output
+    with "no pending request" for a command that did run. Hiding the buttons
+    does not prevent that; only a state transition ahead of the work does.
+
+    Returns None for a stale request too, which is the other half: a surface
+    that did not acquire must not rewrite the card, because that card holds the
+    only copy of the command (#94).
+
+    Held until release(), which the caller owes in a finally. In-memory, so a
+    restart clears it -- the same direction the queue itself takes."""
+    with _LOCK:
+        k = str(key)
+        req = _PENDING.get(k)
+        if req is None or req.get("channel") != channel or k in _CLAIMING:
+            retval = None
+        else:
+            _CLAIMING.add(k)
+            retval = req
+    return retval
+
+
+def held(key):
+    """Whether some surface has this request in flight right now.
+
+    Distinct from pending, and the distinction is the whole point: the approve
+    path pops the request out of the queue and only then runs the command, so
+    for the entire duration of the run _PENDING says nothing and the hold is
+    the only thing that knows (#103). Inferring in-flight from "still pending"
+    reports a running command as gone."""
+    with _LOCK:
+        retval = str(key) in _CLAIMING
+    return retval
+
+
+def release(key):
+    """Drop the hold acquire() took. Safe to call for a key never acquired."""
+    with _LOCK:
+        _CLAIMING.discard(str(key))
 
 
 def peek(key, channel):
@@ -87,18 +170,20 @@ def peek(key, channel):
     the same reason. A surface that has to *name* a command -- a refused click
     saying which command it did not run (#94) -- needs this; popping there would
     be the very bug the refusal exists to prevent."""
-    req = _PENDING.get(str(key))
-    if req is None or req.get("channel") != channel:
-        retval = None
-    else:
-        retval = req
+    with _LOCK:
+        req = _PENDING.get(str(key))
+        if req is None or req.get("channel") != channel:
+            retval = None
+        else:
+            retval = req
     return retval
 
 
 def ids(channel=None):
     """Outstanding request ids, optionally only this channel's."""
-    retval = [
-        k for k, v in _PENDING.items()
-        if channel is None or v.get("channel") == channel
-    ]
+    with _LOCK:
+        retval = [
+            k for k, v in list(_PENDING.items())
+            if channel is None or v.get("channel") == channel
+        ]
     return retval

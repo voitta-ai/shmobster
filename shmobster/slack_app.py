@@ -10,7 +10,10 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, redact, skills, slack_blocks, watchdog
 
-logging.basicConfig(level=logging.INFO)
+# asctime is not in the default format (#102). Without it the disposition log
+# (#97) records order but not time, and "how long did that take" / "did this run
+# before or after the click" are exactly the questions it exists to answer.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
 # request details attached -- so there must be no window in which an exception is
@@ -101,7 +104,48 @@ def _resolve(ack, body, client, action, run):
     if not admin_tools.is_trusted(ctx["user_id"]):
         admin_tools.refuse_click(action["value"], ctx, action.get("action_id"))
         return
-    result = redact.scrub(run(action["value"], ctx))
+    req_id = action["value"]
+    # Take the request before touching the card. Two deliveries of one press
+    # land on two Bolt threads, and the loser -- whose pop finds nothing --
+    # would otherwise overwrite the winner's output with "no pending request"
+    # for a command that did run. Hiding the buttons does not prevent that.
+    req = approvals.acquire(req_id, channel)
+    if req is None:
+        # Two reasons acquire can fail, and they deserve different answers. If
+        # another delivery of this press has it in flight, that thread will
+        # update the card and saying anything here would claim it is gone while
+        # it is running -- and it IS gone from the queue by then, since approve
+        # pops before it executes, so the hold is the only thing that knows.
+        # Only a genuinely absent request gets a message, and it goes to the
+        # thread rather than rewriting the card, because a click that resolves
+        # nothing must not destroy the only copy of the parked command (#94).
+        if approvals.held(req_id):
+            return
+        try:
+            client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f":information_source: [{req_id}] is not pending here -- nothing to act on.",
+            )
+        except Exception:
+            logging.exception("could not report a stale approval click")
+        return
+    try:
+        # Acknowledge the click before doing the work (#101), not after. The
+        # final update can be seconds away -- this one ran a network call -- and
+        # until it lands the card is unchanged with its buttons still live,
+        # which reads as a click that went nowhere.
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                text=f"Working on [{req_id}] for <@{ctx['user_id']}>",
+                blocks=slack_blocks.claimed(action.get("action_id"), req_id, ctx["user_id"], req),
+            )
+        except Exception:
+            logging.exception("could not mark approval message as claimed")
+        result = redact.scrub(run(req_id, ctx))
+    finally:
+        approvals.release(req_id)
     try:
         client.chat_update(
             channel=channel,

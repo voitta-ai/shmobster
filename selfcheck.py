@@ -313,6 +313,56 @@ _req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
 assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
 assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
 
+# two deliveries of one button press land on two threads (#103): the second
+# must get nothing, so it cannot overwrite the first one's result
+assert approvals.acquire(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.acquire(_req3, "C1") is None, "a second click must not acquire a held request"
+assert approvals.acquire(_req3, "C_OTHER") is None, "acquire is channel-scoped, like pop"
+approvals.release(_req3)
+assert approvals.acquire(_req3, "C1") is not None, "release hands it back"
+approvals.release(_req3)
+assert approvals.acquire("no-such-id", "C1") is None, "a stale click acquires nothing"
+assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
+
+# held and absent both fail to acquire, and the ingest has to tell them apart.
+# The hold is the only thing that knows: approve pops the request BEFORE the
+# command runs, so for the whole run the queue says nothing and "still pending"
+# would report a running command as gone.
+approvals.acquire(_req3, "C1")
+assert approvals.held(_req3), "acquired -> held"
+approvals.pop(_req3, "C1")  # what _approve_command does before it executes
+assert approvals.peek(_req3, "C1") is None, "popped, so the queue no longer knows"
+assert approvals.held(_req3), "but it is still in flight, and held says so"
+assert not approvals.held("no-such-id"), "an absent request is not held"
+approvals.release(_req3)
+assert not approvals.held(_req3), "released"
+
+# a held request must survive queue overflow: acquire leaves it in _PENDING
+# until the approve path pops it, and evicting it in that window turns a
+# trusted click into "no pending request" for a command a human approved
+_held = approvals.add("echo survives_overflow", "C_OVF", "mutating")
+approvals.acquire(_held, "C_OVF")
+for _i in range(60):
+    approvals.add(f"echo filler_{_i}", "C_OVF", "mutating")
+assert approvals.peek(_held, "C_OVF") is not None, "overflow evicted a held request"
+approvals.release(_held)
+for _k in approvals.ids("C_OVF"):
+    approvals.pop(_k, "C_OVF")
+
+# ...and a request must never be its own eviction victim. With everything older
+# held there is no other candidate, and an add() that evicts what it just
+# inserted hands back an id for a request that is not in the queue.
+_all_held = [approvals.add(f"echo held_{_i}", "C_FULL", "mutating") for _i in range(55)]
+for _k in _all_held:
+    approvals.acquire(_k, "C_FULL")
+_fresh = approvals.add("echo fresh", "C_FULL", "mutating")
+assert approvals.peek(_fresh, "C_FULL") is not None, "add() returned an id it had just evicted"
+for _k in _all_held:
+    approvals.release(_k)
+for _k in approvals.ids("C_FULL"):
+    approvals.pop(_k, "C_FULL")
+_req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
+
 _cref = admin_tools.refuse_click(
     _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
 )
@@ -614,6 +664,17 @@ if True:
     assert _akia not in _rendered, _rendered
     assert "[REDACTED:" in _rendered, _rendered
     assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
+
+    # the interim card a click leaves behind (#101) shows the same command, so
+    # it needs the same scrub -- and no buttons, which is what closes the
+    # double-click race while the command runs
+    _claim = slack_blocks.claimed("approve_command", "7", "U_TRUSTED", {"command": f"aws configure --key {_akia}"})
+    _cj = json.dumps(_claim)
+    assert _akia not in _cj, _cj
+    assert "[REDACTED:" in _cj, _cj
+    assert "<@U_TRUSTED>" in _cj, _cj
+    assert "actions" not in _cj, "the interim card must not keep the buttons"
+    assert slack_blocks.claimed("deny_command", "7", "U_TRUSTED", None), "a stale request still renders"
 
     # the approval LOG is durable in a way the card is not, and approvals is
     # ingest-agnostic -- so it scrubs at the emission site rather than trusting

@@ -138,27 +138,32 @@ def _refuse(ctx, what):
 
 
 _CLICK_LABELS = {"approve_command": "Approve", "deny_command": "Deny"}
-_CLICK_ALERTED = {}  # (request_id, user_id) -> None; one alert per pair
+_CLICK_ALERTED = {}  # (request_id, channel, user_id) -> None; one alert each
 _CLICK_ALERT_MAX = 200
 
 
-def _alerted(request_id, user_id):
-    """Whether this user's click on this request has already been alerted on.
+def _alerted(request_id, channel, user_id):
+    """Whether this user's click on this request here has already been alerted.
 
     Leaving the card standing (#94) also leaves its buttons re-clickable, and
     the alert tags every trusted user -- so without this, one stranger holding
     down a button is an unbounded ping. The destructive chat_update used to
     swallow the second click by accident; this does it on purpose. In-memory
-    and capped, like the queue it shadows."""
-    retval = (str(request_id), user_id) in _CLICK_ALERTED
+    and capped, like the queue it shadows.
+
+    Keyed by channel too (#107): ids are a process counter that restarts at 1
+    and cards outlive the process, so without it a stale click on [1] in one
+    channel silences the alert for a live [1] in another -- hiding exactly the
+    unauthorized click trusted users are meant to hear about."""
+    retval = (str(request_id), channel, user_id) in _CLICK_ALERTED
     return retval
 
 
-def _mark_alerted(request_id, user_id):
+def _mark_alerted(request_id, channel, user_id):
     """Record a *delivered* alert. Only delivery counts: a swallowed Slack
     failure on the one alert a user gets would otherwise mean the trusted users
     are never told and every retry is suppressed as already-told."""
-    _CLICK_ALERTED[(str(request_id), user_id)] = None
+    _CLICK_ALERTED[(str(request_id), channel, user_id)] = None
     while len(_CLICK_ALERTED) > _CLICK_ALERT_MAX:
         del _CLICK_ALERTED[next(iter(_CLICK_ALERTED))]
 
@@ -179,10 +184,11 @@ def refuse_click(request_id, ctx, action_id):
     label = _CLICK_LABELS.get(action_id, "a button")
     user_id = ctx.get("user_id")
     who = f"<@{user_id}>"
-    if _alerted(request_id, user_id):
+    channel = ctx.get("channel")
+    if _alerted(request_id, channel, user_id):
         retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
         return retval
-    _state, req = approvals.status(str(request_id).lstrip("#"), ctx.get("channel"))
+    _state, req = approvals.status(str(request_id).lstrip("#"), channel)
     if _state == "held":
         # Asked FIRST, because the queue goes quiet in the middle of this: a
         # trusted click acquires the request, rewrites the card to the claimed
@@ -224,7 +230,7 @@ def refuse_click(request_id, ctx, action_id):
             "\n" + redact.scrub(f"```{req['command']}```")
         )
     if _post_alert(ctx, alert):
-        _mark_alerted(request_id, user_id)
+        _mark_alerted(request_id, channel, user_id)
     retval = _REFUSED
     return retval
 

@@ -398,6 +398,19 @@ admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1",
 assert "already acting on it" in _posted["text"], _posted
 assert "no longer pending" not in _posted["text"], _posted
 approvals.release(_flight)
+
+# the refusal dedupe is keyed by channel too: ids restart at 1 and cards outlive
+# the process, so a stale click on [N] in one channel must not silence the alert
+# for a live [N] in another -- that would hide the unauthorized click trusted
+# users are meant to hear about
+_dup = approvals.add("echo same_id_other_channel", "C_DUP", "mutating")
+_posted.clear()
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "client": _FakePost()}, "approve_command")
+assert "<@U_STRANGER>" in _posted["text"], "first channel alerts"
+_posted.clear()
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "client": _FakePost()}, "approve_command")
+assert "<@U_STRANGER>" in _posted["text"], "same id and user in another channel must still alert"
+approvals.pop(_dup, "C_DUP")
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted

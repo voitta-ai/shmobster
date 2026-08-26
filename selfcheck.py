@@ -313,6 +313,17 @@ _req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
 assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
 assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
 
+# two deliveries of one button press land on two threads (#103): the second
+# must get nothing, so it cannot overwrite the first one's result
+assert approvals.acquire(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.acquire(_req3, "C1") is None, "a second click must not acquire a held request"
+assert approvals.acquire(_req3, "C_OTHER") is None, "acquire is channel-scoped, like pop"
+approvals.release(_req3)
+assert approvals.acquire(_req3, "C1") is not None, "release hands it back"
+approvals.release(_req3)
+assert approvals.acquire("no-such-id", "C1") is None, "a stale click acquires nothing"
+assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
+
 _cref = admin_tools.refuse_click(
     _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
 )

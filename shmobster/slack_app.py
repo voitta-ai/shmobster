@@ -104,25 +104,41 @@ def _resolve(ack, body, client, action, run):
     if not admin_tools.is_trusted(ctx["user_id"]):
         admin_tools.refuse_click(action["value"], ctx, action.get("action_id"))
         return
-    # Acknowledge the click before doing the work (#101), not after. The final
-    # update below can be seconds away -- this one ran a network call -- and
-    # until it lands the card is unchanged with its buttons still live, which
-    # reads as a click that went nowhere. It also takes the buttons away now,
-    # which is what stops a second click from popping nothing and overwriting
-    # the real output with "no pending request".
+    req_id = action["value"]
+    # Take the request before touching the card. Two deliveries of one press
+    # land on two Bolt threads, and the loser -- whose pop finds nothing --
+    # would otherwise overwrite the winner's output with "no pending request"
+    # for a command that did run. Hiding the buttons does not prevent that.
+    req = approvals.acquire(req_id, channel)
+    if req is None:
+        # Stale, or another click has it. Say so in the thread rather than
+        # rewriting the card: a click that resolves nothing must not destroy
+        # the only copy of the parked command (#94).
+        try:
+            client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=f":information_source: [{req_id}] is not pending here -- nothing to act on.",
+            )
+        except Exception:
+            logging.exception("could not report a stale approval click")
+        return
     try:
-        client.chat_update(
-            channel=channel,
-            ts=message_ts,
-            text=f"Working on [{action['value']}] for <@{ctx['user_id']}>",
-            blocks=slack_blocks.claimed(
-                action.get("action_id"), action["value"], ctx["user_id"],
-                approvals.peek(action["value"], channel),
-            ),
-        )
-    except Exception:
-        logging.exception("could not mark approval message as claimed")
-    result = redact.scrub(run(action["value"], ctx))
+        # Acknowledge the click before doing the work (#101), not after. The
+        # final update can be seconds away -- this one ran a network call -- and
+        # until it lands the card is unchanged with its buttons still live,
+        # which reads as a click that went nowhere.
+        try:
+            client.chat_update(
+                channel=channel,
+                ts=message_ts,
+                text=f"Working on [{req_id}] for <@{ctx['user_id']}>",
+                blocks=slack_blocks.claimed(action.get("action_id"), req_id, ctx["user_id"], req),
+            )
+        except Exception:
+            logging.exception("could not mark approval message as claimed")
+        result = redact.scrub(run(req_id, ctx))
+    finally:
+        approvals.release(req_id)
     try:
         client.chat_update(
             channel=channel,

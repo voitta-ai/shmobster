@@ -25,12 +25,15 @@ run that bootstrap. A log file is durable in a way an approval card is not, so
 the one place that must not depend on who booted us is this one."""
 import itertools
 import logging
+import threading
 
 from . import redact
 
 _PENDING = {}
 _ids = itertools.count(1)
 _MAX = 50
+_CLAIMING = set()
+_LOCK = threading.Lock()
 
 
 def add(command, channel, reason):
@@ -80,6 +83,38 @@ def pop(key, channel):
     del _PENDING[str(key)]
     retval = req
     return retval
+
+
+def acquire(key, channel):
+    """Take exclusive hold of a request before acting on it, or return None.
+
+    Two Slack deliveries of the same button press land on two Bolt threads
+    (#103). Without this, both see a pending request, both proceed, and the
+    loser -- the one whose pop finds nothing -- overwrites the winner's output
+    with "no pending request" for a command that did run. Hiding the buttons
+    does not prevent that; only a state transition ahead of the work does.
+
+    Returns None for a stale request too, which is the other half: a surface
+    that did not acquire must not rewrite the card, because that card holds the
+    only copy of the command (#94).
+
+    Held until release(), which the caller owes in a finally. In-memory, so a
+    restart clears it -- the same direction the queue itself takes."""
+    with _LOCK:
+        k = str(key)
+        req = _PENDING.get(k)
+        if req is None or req.get("channel") != channel or k in _CLAIMING:
+            retval = None
+        else:
+            _CLAIMING.add(k)
+            retval = req
+    return retval
+
+
+def release(key):
+    """Drop the hold acquire() took. Safe to call for a key never acquired."""
+    with _LOCK:
+        _CLAIMING.discard(str(key))
 
 
 def peek(key, channel):

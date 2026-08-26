@@ -61,8 +61,14 @@ def add(command, channel, reason):
         # the queue until the approve path pops it, so an oldest-first eviction
         # during that window turns a trusted click into "no pending request"
         # and the command a human approved simply never runs.
+        #
+        # Nor the request being parked right now, which is otherwise its own
+        # victim once everything older is held: add() would hand back an id for
+        # a request it had just deleted. When there is nothing evictable the cap
+        # is exceeded instead -- it is a safety valve on a 50-deep queue, and
+        # going one over beats returning a dead id.
         while len(_PENDING) > _MAX:
-            victim = next((k for k in _PENDING if k not in _CLAIMING), None)
+            victim = next((k for k in _PENDING if k not in _CLAIMING and k != key), None)
             if victim is None:
                 break
             del _PENDING[victim]

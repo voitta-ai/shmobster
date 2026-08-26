@@ -348,6 +348,19 @@ assert approvals.peek(_held, "C_OVF") is not None, "overflow evicted a held requ
 approvals.release(_held)
 for _k in approvals.ids("C_OVF"):
     approvals.pop(_k, "C_OVF")
+
+# ...and a request must never be its own eviction victim. With everything older
+# held there is no other candidate, and an add() that evicts what it just
+# inserted hands back an id for a request that is not in the queue.
+_all_held = [approvals.add(f"echo held_{_i}", "C_FULL", "mutating") for _i in range(55)]
+for _k in _all_held:
+    approvals.acquire(_k, "C_FULL")
+_fresh = approvals.add("echo fresh", "C_FULL", "mutating")
+assert approvals.peek(_fresh, "C_FULL") is not None, "add() returned an id it had just evicted"
+for _k in _all_held:
+    approvals.release(_k)
+for _k in approvals.ids("C_FULL"):
+    approvals.pop(_k, "C_FULL")
 _req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
 
 _cref = admin_tools.refuse_click(

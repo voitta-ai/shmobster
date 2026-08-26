@@ -15,6 +15,8 @@ sees ${VAR} if the variable is in the launchctl environment (export it via
 import json
 import os
 import re
+import tempfile
+import threading
 from typing import Any
 
 _PATH = os.getenv("SHMOBSTER_CONFIG", "shmobster-config.json")
@@ -118,6 +120,12 @@ EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 # same ${VAR} expansion as the main config (#104) -- otherwise it would be the
 # one place in the deployment where a secret has to be pasted in literally.
 _POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
+# Reentrant: set_channel_policy holds it across its read-modify-write and then
+# calls reload_policies, which takes it too. Bolt serves set_policy on worker
+# threads, so two trusted updates can otherwise read the same file, and the
+# second write silently drops the first -- on the file that defines what each
+# channel is allowed to do.
+_WRITE_LOCK = threading.RLock()
 
 
 def _load_policies(cfg=None):
@@ -159,6 +167,12 @@ def reload_policies():
     refuses the reload and leaves the policies that were already loaded, instead
     of half-killing a running agent."""
     global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
+    with _WRITE_LOCK:
+        _reload_locked()
+
+
+def _reload_locked():
+    global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
     try:
         cfg = _load()
         pols = _load_policies(cfg)
@@ -174,6 +188,12 @@ def set_channel_policy(channel_id, updates):
     """Merge `updates` (non-None values) into a channel's policy and persist to
     the active policy source (the separate file if present, else the main
     config), then reload. Returns the new policy. Never touches trusted_users."""
+    with _WRITE_LOCK:
+        retval = _set_channel_policy_locked(channel_id, updates)
+    return retval
+
+
+def _set_channel_policy_locked(channel_id, updates):
     path = _POLICIES_PATH if os.path.exists(_POLICIES_PATH) else _PATH
     with open(path, "r") as f:
         data = json.load(f)
@@ -198,12 +218,21 @@ def set_channel_policy(channel_id, updates):
     # chmod 600, and a rename carries the temp file's permissions with it -- so
     # a plain open() here would quietly widen a secret-bearing file to whatever
     # the umask allows, on the first set_policy after this shipped.
-    tmp = path + ".tmp"
+    # mkstemp, not a fixed "<path>.tmp": two writers sharing one temp name
+    # clobber each other's half-written file. It creates 0600, so the
+    # credentials are never briefly world-readable on the way to the mode the
+    # original had.
     mode = os.stat(path).st_mode & 0o777
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".policy-")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     reload_policies()
     return pol
 

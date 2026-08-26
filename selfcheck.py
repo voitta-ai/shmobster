@@ -5,6 +5,7 @@ handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
 import ast
 import io
+import glob
 import json
 import logging
 import datetime
@@ -107,7 +108,7 @@ finally:
     config._POLICIES_PATH = _saved_pp
 with open(_pf) as _f:
     assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/original", "disk was mutated"
-assert not os.path.exists(_pf + ".tmp"), "temp file left behind"
+assert not glob.glob(os.path.join(os.path.dirname(_pf), ".policy-*")), "temp file left behind"
 
 # ...and a successful write must not widen the file. It holds per-channel env
 # credentials and is meant to be chmod 600; a rename carries the temp file's

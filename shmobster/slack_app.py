@@ -111,9 +111,15 @@ def _resolve(ack, body, client, action, run):
     # for a command that did run. Hiding the buttons does not prevent that.
     req = approvals.acquire(req_id, channel)
     if req is None:
-        # Stale, or another click has it. Say so in the thread rather than
-        # rewriting the card: a click that resolves nothing must not destroy
-        # the only copy of the parked command (#94).
+        # Two reasons acquire can fail, and they deserve different answers. If
+        # the request is still pending, another delivery of this press has it
+        # in flight and will update the card -- saying anything here would
+        # claim it is gone while it is running. Only a genuinely absent request
+        # gets a message, and it goes to the thread rather than rewriting the
+        # card, because a click that resolves nothing must not destroy the only
+        # copy of the parked command (#94).
+        if approvals.peek(req_id, channel) is not None:
+            return
         try:
             client.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,

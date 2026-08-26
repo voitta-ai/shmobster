@@ -324,6 +324,14 @@ approvals.release(_req3)
 assert approvals.acquire("no-such-id", "C1") is None, "a stale click acquires nothing"
 assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
 
+# held and absent both fail to acquire, and the ingest has to tell them apart:
+# peek still finds a held request, so "in flight elsewhere" never gets reported
+# as "gone"
+approvals.acquire(_req3, "C1")
+assert approvals.acquire(_req3, "C1") is None and approvals.peek(_req3, "C1") is not None, "held"
+assert approvals.acquire("no-such-id", "C1") is None and approvals.peek("no-such-id", "C1") is None, "absent"
+approvals.release(_req3)
+
 _cref = admin_tools.refuse_click(
     _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
 )

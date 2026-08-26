@@ -71,17 +71,25 @@ def claim_unsurfaced(channel):
 
 def pop(key, channel):
     """Claim a request -- only from the channel it was raised in, so an approval
-    in one channel can't release a command parked in another."""
-    req = _PENDING.get(str(key))
-    if req is None or req.get("channel") != channel:
-        return None
-    # Logged before the delete, not after: scrub() is fail-closed and raises
-    # when the redactor cannot be loaded, and a raise between the delete and
-    # the caller's execute() would consume the request without running it.
-    # Failing here instead leaves it parked, which is the retryable direction.
-    logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
-    del _PENDING[str(key)]
-    retval = req
+    in one channel can't release a command parked in another.
+
+    Under the lock, because the lookup and the delete are two steps and the
+    button surface and the text surface reach here on different threads (#103).
+    Unlocked, both callers pass the guard, one deletes, and the other raises
+    KeyError out of a button handler -- so the request that a human approved is
+    consumed by one path and reported as a crash by the other."""
+    with _LOCK:
+        k = str(key)
+        req = _PENDING.get(k)
+        if req is None or req.get("channel") != channel:
+            return None
+        # Logged before the delete, not after: scrub() is fail-closed and raises
+        # when the redactor cannot be loaded, and a raise between the delete and
+        # the caller's execute() would consume the request without running it.
+        # Failing here instead leaves it parked, which is the retryable direction.
+        logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
+        del _PENDING[k]
+        retval = req
     return retval
 
 

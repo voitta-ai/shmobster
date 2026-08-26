@@ -371,6 +371,10 @@ assert approvals.ids("C1") == [_req3], approvals.ids("C1")
 assert "<@U_STRANGER>" in _posted["text"], _posted
 assert "Approve" in _posted["text"], _posted
 assert "echo refused_click_321" in _posted["text"], _posted
+# the refusal has to say the request is still actionable, not just quote the
+# rule: the card and its buttons are deliberately left standing (#107)
+assert "still live" in _posted["text"], _posted
+assert "still parked" in _posted["text"], _posted
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted

@@ -193,10 +193,16 @@ def refuse_click(request_id, ctx, action_id):
             f"may act on a parked command. {_trusted_tags()} for visibility."
         )
     else:
+        # Says what happens next, not just what the rule is (#107). The card
+        # and its buttons are deliberately left standing, and without being
+        # told so the thread reads this as the click having consumed something
+        # -- which sent one straight to asking the agent to re-raise a request
+        # that was sitting right there, still clickable.
         alert = (
             f":warning: {who} clicked *{label}* on request [{request_id}], but only "
-            f"trusted users may act on a parked command -- nothing ran and it is "
-            f"still parked. {_trusted_tags()} for visibility."
+            f"trusted users may act on a parked command -- nothing ran. The request "
+            f"is still parked and the *Approve* / *Deny* buttons on the card above "
+            f"are still live, so {_trusted_tags()} can act on it there."
             # Scrubbed like every other rendering of a parked command (#72): a
             # credential rides argv routinely, and this is a fresh channel post.
             "\n" + redact.scrub(f"```{req['command']}```")

@@ -146,22 +146,33 @@ def acquire(key, channel):
     return retval
 
 
-def held(key, channel):
-    """Whether this channel has this request in flight right now.
+def status(key, channel):
+    """One locked snapshot of a request: ("held"|"pending"|"absent", req|None).
 
-    Distinct from pending, and the distinction is the whole point: the approve
-    path pops the request out of the queue and only then runs the command, so
+    Read in a single acquisition rather than peek() and then held(), so a
+    surface can never render a state that never existed -- pending according to
+    one call and not held according to the next, because a click landed in
+    between. It can still go stale on the way to Slack; nothing about a live
+    queue is instantaneously true. What it must not be is self-contradictory.
+
+    "held" is asked first because the queue goes quiet in the middle of a
+    click: the approve path pops the request and only then runs the command, so
     for the entire duration of the run _PENDING says nothing and the hold is
-    the only thing that knows (#103). Inferring in-flight from "still pending"
-    reports a running command as gone.
-
-    Channel-scoped like everything else here (#107). Request ids are a process
-    counter that restarts at 1, and approval cards outlive the process, so a
-    stale card in one channel can name an id another channel is holding right
-    now -- and answering from a global set would tell the first channel that
-    someone is acting on a request that is not theirs."""
+    the only thing that knows (#103). Channel-scoped throughout: request ids
+    are a process counter that restarts at 1 and approval cards outlive the
+    process, so an id in one channel can name a live request in another (#107).
+    """
     with _LOCK:
-        retval = _CLAIMING.get(str(key)) == channel
+        k = str(key)
+        req = _PENDING.get(k)
+        if req is not None and req.get("channel") != channel:
+            req = None
+        if _CLAIMING.get(k) == channel:
+            retval = ("held", req)
+        elif req is not None:
+            retval = ("pending", req)
+        else:
+            retval = ("absent", None)
     return retval
 
 

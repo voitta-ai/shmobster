@@ -329,16 +329,16 @@ assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
 # command runs, so for the whole run the queue says nothing and "still pending"
 # would report a running command as gone.
 approvals.acquire(_req3, "C1")
-assert approvals.held(_req3, "C1"), "acquired -> held"
+assert approvals.status(_req3, "C1")[0] == "held", "acquired -> held"
 approvals.pop(_req3, "C1")  # what _approve_command does before it executes
 assert approvals.peek(_req3, "C1") is None, "popped, so the queue no longer knows"
-assert approvals.held(_req3, "C1"), "but it is still in flight, and held says so"
-assert not approvals.held("no-such-id", "C1"), "an absent request is not held"
+assert approvals.status(_req3, "C1")[0] == "held", "still in flight, and status says so"
+assert approvals.status("no-such-id", "C1")[0] == "absent", "an absent request is not held"
 # ids are a process counter that restarts at 1 while approval cards outlive the
 # process, so a stale card in one channel can name an id another channel holds
-assert not approvals.held(_req3, "C_OTHER"), "a hold in one channel is not a hold in another"
+assert approvals.status(_req3, "C_OTHER")[0] == "absent", "a hold in one channel is not a hold in another"
 approvals.release(_req3)
-assert not approvals.held(_req3, "C1"), "released"
+assert approvals.status(_req3, "C1")[0] != "held", "released"
 
 # a held request must survive queue overflow: acquire leaves it in _PENDING
 # until the approve path pops it, and evicting it in that window turns a

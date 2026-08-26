@@ -8,6 +8,12 @@ is the safe direction -- a stale approval is worse than being asked again.
 This module is ingest-agnostic: it holds the queue, and each ingest renders its
 own approval surface over it (Slack posts Approve/Deny buttons -- #50).
 
+Every read and write of the queue is under one lock (#103). Bolt serves mention
+handlers and button handlers on different threads, so surfacing cards, parking,
+acquiring and popping all overlap; unsynchronized, the cheapest symptom is a
+RuntimeError from iterating a dict another thread is mutating, and the most
+expensive is an approved command that never runs.
+
 Approval answers *may this run at all*; the channel policy (policy.check) still
 answers *is this in scope* at exec time. The two are separate gates.
 
@@ -47,11 +53,19 @@ def add(command, channel, reason):
     # the classifier's argv -- which is the command, again, by another route.
     logging.info("approvals: parked [%s] in %s (%s): %s", key, channel,
                  repr(redact.scrub(reason)), repr(redact.scrub(command)))
-    _PENDING[key] = {
-        "command": command, "channel": channel, "reason": reason, "surfaced": False,
-    }
-    while len(_PENDING) > _MAX:
-        del _PENDING[next(iter(_PENDING))]
+    with _LOCK:
+        _PENDING[key] = {
+            "command": command, "channel": channel, "reason": reason, "surfaced": False,
+        }
+        # Overflow never evicts a held request (#103). acquire() leaves it in
+        # the queue until the approve path pops it, so an oldest-first eviction
+        # during that window turns a trusted click into "no pending request"
+        # and the command a human approved simply never runs.
+        while len(_PENDING) > _MAX:
+            victim = next((k for k in _PENDING if k not in _CLAIMING), None)
+            if victim is None:
+                break
+            del _PENDING[victim]
     retval = key
     return retval
 
@@ -59,12 +73,19 @@ def add(command, channel, reason):
 def claim_unsurfaced(channel):
     """Requests in this channel that no ingest has rendered yet, marked as
     surfaced so a second call (or a second reply in the same thread) doesn't
-    post duplicate buttons. Returns [(id, request), ...]."""
+    post duplicate buttons. Returns [(id, request), ...].
+
+    Locked like the rest: this runs on the mention thread while button handlers
+    add and pop on theirs, and iterating _PENDING unsynchronized raises
+    RuntimeError: dictionary changed size during iteration -- which would take
+    out the reply that was about to show the buttons. The snapshot is built and
+    marked under the lock, then posted outside it."""
     out = []
-    for key, req in _PENDING.items():
-        if req.get("channel") == channel and not req.get("surfaced"):
-            req["surfaced"] = True
-            out.append((key, req))
+    with _LOCK:
+        for key, req in list(_PENDING.items()):
+            if req.get("channel") == channel and not req.get("surfaced"):
+                req["surfaced"] = True
+                out.append((key, req))
     retval = out
     return retval
 
@@ -143,18 +164,20 @@ def peek(key, channel):
     the same reason. A surface that has to *name* a command -- a refused click
     saying which command it did not run (#94) -- needs this; popping there would
     be the very bug the refusal exists to prevent."""
-    req = _PENDING.get(str(key))
-    if req is None or req.get("channel") != channel:
-        retval = None
-    else:
-        retval = req
+    with _LOCK:
+        req = _PENDING.get(str(key))
+        if req is None or req.get("channel") != channel:
+            retval = None
+        else:
+            retval = req
     return retval
 
 
 def ids(channel=None):
     """Outstanding request ids, optionally only this channel's."""
-    retval = [
-        k for k, v in _PENDING.items()
-        if channel is None or v.get("channel") == channel
-    ]
+    with _LOCK:
+        retval = [
+            k for k, v in list(_PENDING.items())
+            if channel is None or v.get("channel") == channel
+        ]
     return retval

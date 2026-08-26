@@ -336,6 +336,18 @@ assert approvals.held(_req3), "but it is still in flight, and held says so"
 assert not approvals.held("no-such-id"), "an absent request is not held"
 approvals.release(_req3)
 assert not approvals.held(_req3), "released"
+
+# a held request must survive queue overflow: acquire leaves it in _PENDING
+# until the approve path pops it, and evicting it in that window turns a
+# trusted click into "no pending request" for a command a human approved
+_held = approvals.add("echo survives_overflow", "C_OVF", "mutating")
+approvals.acquire(_held, "C_OVF")
+for _i in range(60):
+    approvals.add(f"echo filler_{_i}", "C_OVF", "mutating")
+assert approvals.peek(_held, "C_OVF") is not None, "overflow evicted a held request"
+approvals.release(_held)
+for _k in approvals.ids("C_OVF"):
+    approvals.pop(_k, "C_OVF")
 _req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
 
 _cref = admin_tools.refuse_click(

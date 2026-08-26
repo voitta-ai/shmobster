@@ -5,6 +5,7 @@ handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 """
 import ast
 import io
+import glob
 import json
 import logging
 import datetime
@@ -13,6 +14,11 @@ import tempfile
 import time
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
+# ...and the example POLICIES too. The default path is ./shmobster-policies.json,
+# so on a machine that actually runs shmobster this check was quietly loading the
+# live deployment's policy file -- which since #104 is interpolated, making the
+# result depend on whose shell you ran it from.
+os.environ["SHMOBSTER_POLICIES"] = "examples/shmobster-policies-example.json"
 # The example config references its secrets from the environment (#73), and an
 # unset one is a hard startup failure by design. Offline sanity must not need
 # real keys, so stub every name the example refers to with a placeholder.
@@ -23,6 +29,9 @@ for _var in (
     "GEMINI_API_KEY",
     "REQUESTY_API_KEY",
     "OPENROUTER_API_KEY",
+    # referenced by the example policy file's per-channel env (#104)
+    "VERCEL_TOKEN",
+    "HEROKU_API_KEY",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
@@ -65,6 +74,67 @@ assert len({v["name"] for v in config.WATERFALL}) == len(config.WATERFALL), conf
 assert len(config.CHANNELS) == 1, config.CHANNELS
 _ex_ch = next(iter(config.CHANNELS))  # the example config's placeholder channel id
 assert _REAL_YOLT.endswith("grammar_classifier.py"), _REAL_YOLT
+
+# 0b) the policy file gets the same ${VAR} expansion as the main config (#104).
+# Per-channel env exists to inject credentials, so without this it is the one
+# place in the deployment where a secret has to be pasted in literally.
+_scoped = config.CHANNEL_POLICIES["C0SCOPEDCHANNEL"]
+assert _scoped["env"]["VERCEL_TOKEN"] == os.environ["VERCEL_TOKEN"], _scoped["env"]
+assert "${" not in json.dumps(_scoped), "a ${VAR} reference survived into a live policy"
+
+# the back-compat inline path (no policy file) must read the config it was just
+# handed, not the stale module global -- otherwise a set_policy write to the
+# inline location reports success while the agent keeps the old envelope
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, "does-not-exist.json"
+try:
+    _fresh = {"channel_policies": {"C_NEW": {"cwd": "/tmp/after"}}}
+    assert config._load_policies(_fresh)["channel_policies"] == _fresh["channel_policies"]
+finally:
+    config._POLICIES_PATH = _saved_pp
+
+# a set_policy that would not load must not reach disk (#104): the file can hold
+# ${VAR} now, and a write whose reload is then rejected leaves the agent
+# enforcing one envelope while the next boot dies on the file it just wrote
+_pf = os.path.join(tempfile.mkdtemp(), "policies.json")
+with open(_pf, "w") as _f:
+    json.dump({"channel_policies": {"C_KEEP": {"cwd": "/tmp/original"}}}, _f)
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, _pf
+try:
+    config.set_channel_policy("C_KEEP", {"cwd": "${SELFCHECK_DEFINITELY_UNSET}"})
+    raise AssertionError("an unloadable policy was accepted")
+except RuntimeError as _e:
+    assert "would not load" in str(_e), _e
+finally:
+    config._POLICIES_PATH = _saved_pp
+with open(_pf) as _f:
+    assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/original", "disk was mutated"
+assert not glob.glob(os.path.join(os.path.dirname(_pf), ".policy-*")), "temp file left behind"
+
+# ...and a successful write must not widen the file. It holds per-channel env
+# credentials and is meant to be chmod 600; a rename carries the temp file's
+# mode, so creating that temp under the umask would quietly publish it.
+os.chmod(_pf, 0o600)
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, _pf
+try:
+    config.set_channel_policy("C_KEEP", {"cwd": "/tmp/updated"})
+finally:
+    config._POLICIES_PATH = _saved_pp
+assert oct(os.stat(_pf).st_mode & 0o777) == "0o600", oct(os.stat(_pf).st_mode & 0o777)
+with open(_pf) as _f:
+    assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/updated", "write did not land"
+# those swaps ran reload_policies() against a temp file, so the module globals
+# now describe it -- put the example back before anything below reads them
+config.reload_policies()
+
+# ...and a name one channel scopes must not leak to another (#106). Since #104 a
+# policy env value has to be in the process environment to expand, and every
+# subprocess starts from a copy of that environment.
+assert "VERCEL_TOKEN" in config.SCOPED_ENV_NAMES, config.SCOPED_ENV_NAMES
+assert "VERCEL_TOKEN" in os.environ, "the premise: it is in the process env to be expanded"
+_leak = tools.execute("printenv VERCEL_TOKEN || echo ABSENT", {})
+assert _leak.strip() == "ABSENT", f"another channel's scoped credential was readable: {_leak!r}"
+_mine = tools.execute("printenv VERCEL_TOKEN", {"env": {"VERCEL_TOKEN": "mine-only"}})
+assert _mine.strip() == "mine-only", _mine
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()

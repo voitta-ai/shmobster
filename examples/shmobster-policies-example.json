@@ -5,12 +5,16 @@
     },
     "C0SCOPEDCHANNEL": {
       "cwd": "/path/to/project",
-      "github_repos": ["your-org/your-repo"],
+      "github_repos": [
+        "your-org/your-repo"
+      ],
       "aws_profile": "your-aws-profile",
-      "exclude": ["~/g/OneDrive"],
+      "exclude": [
+        "~/g/OneDrive"
+      ],
       "env": {
-        "VERCEL_TOKEN": "REPLACE-with-vercel-token",
-        "HEROKU_API_KEY": "REPLACE-with-heroku-key"
+        "VERCEL_TOKEN": "${VERCEL_TOKEN}",
+        "HEROKU_API_KEY": "${HEROKU_API_KEY}"
       }
     }
   },

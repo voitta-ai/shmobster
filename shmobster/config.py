@@ -15,6 +15,8 @@ sees ${VAR} if the variable is in the launchctl environment (export it via
 import json
 import os
 import re
+import tempfile
+import threading
 from typing import Any
 
 _PATH = os.getenv("SHMOBSTER_CONFIG", "shmobster-config.json")
@@ -106,22 +108,42 @@ EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 # Unlisted channels fall back to default_policy. This is the capability envelope
 # keyed by channel (where/what), distinct from who (multi-user, later).
 #
-# Policies are machine-specific but NOT secret, so they live in their own
-# gitignored file (SHMOBSTER_POLICIES, default ./shmobster-policies.json), copied
-# from examples/shmobster-policies-example.json. For back-compat, inline
+# Policies live in their own gitignored file (SHMOBSTER_POLICIES, default
+# ./shmobster-policies.json), copied from
+# examples/shmobster-policies-example.json. For back-compat, inline
 # channel_policies/default_policy in the main config are used when no policy file
 # is present.
+#
+# They were once described here as "machine-specific but NOT secret". That
+# stopped being true when per-channel `env` arrived: that key exists precisely
+# to inject credentials into a channel's commands. So the policy file gets the
+# same ${VAR} expansion as the main config (#104) -- otherwise it would be the
+# one place in the deployment where a secret has to be pasted in literally.
 _POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
+# Reentrant: set_channel_policy holds it across its read-modify-write and then
+# calls reload_policies, which takes it too. Bolt serves set_policy on worker
+# threads, so two trusted updates can otherwise read the same file, and the
+# second write silently drops the first -- on the file that defines what each
+# channel is allowed to do.
+_WRITE_LOCK = threading.RLock()
 
 
-def _load_policies():
+def _load_policies(cfg=None):
+    """Load the policy source. `cfg` is the main config to fall back to when no
+    policy file exists -- passed explicitly rather than read from the global,
+    because reload_policies() has a freshly loaded one and the global is still
+    the old one at that point. Reading the global there left a set_policy write
+    to the inline (back-compat) location reporting success while the agent kept
+    running on the previous capability envelope."""
     if os.path.exists(_POLICIES_PATH):
         with open(_POLICIES_PATH, "r") as f:
-            retval = json.load(f)
+            raw = json.load(f)
+        retval = _interpolate(raw)
         return retval
+    src = _cfg if cfg is None else cfg
     retval = {
-        "channel_policies": _cfg.get("channel_policies", {}),
-        "default_policy": _cfg.get("default_policy", {}),
+        "channel_policies": src.get("channel_policies", {}),
+        "default_policy": src.get("default_policy", {}),
     }
     return retval
 
@@ -130,24 +152,69 @@ _policies = _load_policies()
 CHANNEL_POLICIES = _policies.get("channel_policies", {})
 DEFAULT_POLICY = _policies.get("default_policy", {})
 
+
+def _scoped_env_names(policies):
+    """Every variable name some channel claims through its policy `env`.
+
+    Those names are channel-scoped by intent, so no channel that does not
+    declare one should inherit it (#106). This matters more since ${VAR}
+    expansion (#104): a policy env value now has to exist in the process
+    environment to be expanded, and every subprocess starts from a copy of that
+    environment -- so without this, moving a token from a literal to a
+    reference would quietly publish it to every other channel, which is the
+    opposite of what per-channel env is for."""
+    names = set()
+    for pol in list(policies.get("channel_policies", {}).values()) + [policies.get("default_policy", {})]:
+        names.update((pol or {}).get("env") or {})
+    retval = names
+    return retval
+
+
+SCOPED_ENV_NAMES = _scoped_env_names(_policies)
+
 # Trusted users (Slack user IDs) who may change my restrictions via chat (#36).
 TRUSTED_USERS = set(_cfg.get("trusted_users", []))
 
 
 def reload_policies():
     """Re-read the policy source into the module globals so a set_channel_policy
-    write takes effect without a restart."""
+    write takes effect without a restart.
+
+    Interpolation failures are converted here (#104). At boot an unset ${VAR}
+    should stop startup, and _interpolate raises SystemExit to do it -- but this
+    path is reachable from chat, on a Bolt worker thread, where SystemExit is a
+    BaseException the ingest's `except Exception` would not catch. So a bad edit
+    refuses the reload and leaves the policies that were already loaded, instead
+    of half-killing a running agent."""
     global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
-    _cfg = _load()
-    _policies = _load_policies()
+    with _WRITE_LOCK:
+        _reload_locked()
+
+
+def _reload_locked():
+    global CHANNEL_POLICIES, DEFAULT_POLICY, SCOPED_ENV_NAMES, _cfg, _policies
+    try:
+        cfg = _load()
+        pols = _load_policies(cfg)
+    except SystemExit as exc:
+        raise RuntimeError(f"policy reload refused, keeping the loaded policies: {exc}") from None
+    _cfg = cfg
+    _policies = pols
     CHANNEL_POLICIES = _policies.get("channel_policies", {})
     DEFAULT_POLICY = _policies.get("default_policy", {})
+    SCOPED_ENV_NAMES = _scoped_env_names(_policies)
 
 
 def set_channel_policy(channel_id, updates):
     """Merge `updates` (non-None values) into a channel's policy and persist to
     the active policy source (the separate file if present, else the main
     config), then reload. Returns the new policy. Never touches trusted_users."""
+    with _WRITE_LOCK:
+        retval = _set_channel_policy_locked(channel_id, updates)
+    return retval
+
+
+def _set_channel_policy_locked(channel_id, updates):
     path = _POLICIES_PATH if os.path.exists(_POLICIES_PATH) else _PATH
     with open(path, "r") as f:
         data = json.load(f)
@@ -155,8 +222,38 @@ def set_channel_policy(channel_id, updates):
     pol = dict(cps.get(channel_id, {}))
     pol.update({k: v for k, v in updates.items() if v is not None})
     cps[channel_id] = pol
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    # Check it loads BEFORE it is persisted. Since #104 the file may hold ${VAR}
+    # references, so a write followed by a rejected reload leaves disk ahead of
+    # memory: the agent goes on enforcing the old envelope and the next boot
+    # dies on a file this agent wrote. Nothing here should be able to produce an
+    # unbootable deployment from a chat message.
+    try:
+        _interpolate(data)
+    except SystemExit as exc:
+        raise RuntimeError(f"refusing to write a policy that would not load: {exc}") from None
+    # Written via a temp file in the same directory and renamed, so a crash
+    # mid-write cannot truncate the live policy file. os.replace is atomic.
+    #
+    # The temp file is created with the original's mode rather than the process
+    # umask: this file holds per-channel `env` credentials and is meant to be
+    # chmod 600, and a rename carries the temp file's permissions with it -- so
+    # a plain open() here would quietly widen a secret-bearing file to whatever
+    # the umask allows, on the first set_policy after this shipped.
+    # mkstemp, not a fixed "<path>.tmp": two writers sharing one temp name
+    # clobber each other's half-written file. It creates 0600, so the
+    # credentials are never briefly world-readable on the way to the mode the
+    # original had.
+    mode = os.stat(path).st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), prefix=".policy-")
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     reload_policies()
     return pol
 

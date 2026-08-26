@@ -291,9 +291,8 @@ Otherwise `${VAR}` expansion fails loudly at boot.
   `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
-Per-channel policy lives in its own file, not in `shmobster-config.json` --
-policies are machine-specific but not secret, so they are versioned separately
-from the token/key config:
+Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
+machine's channel layout is versioned separately from the token/key config:
 
     cp examples/shmobster-policies-example.json shmobster-policies.json
 
@@ -318,9 +317,20 @@ from the token/key config:
     bar; true containment needs OS-level sandboxing (a separate, larger change).
     Omit for no exclusions.
   - `env` -- extra environment variables injected only for this channel's
-    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. These are
-    **secrets**: they live only in the gitignored `shmobster-policies.json`
-    (keep it `chmod 600`); the example file carries placeholders only.
+    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
+    as `${VAR}` references like everything else (#104), not literals:
+
+        "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" }
+
+    This is also how you give one channel an API token *without* handing it to
+    every channel. A name that appears in any channel's `env` is treated as
+    channel-scoped: it is stripped from the environment every command inherits,
+    and added back only for the channel that declares it. So the `${VAR}` the
+    process needs in order to expand the reference is not readable from another
+    channel with a plain `printenv`. And a
+    command that can read the credential it needs from its environment is a
+    plain read-only command -- no `source`, so nothing trips the mutating gate
+    and nothing needs approving.
 
 Because `env` may hold secrets, treat `shmobster-policies.json` like the main
 config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /

@@ -87,6 +87,14 @@ def execute(command, policy):
     prof = policy.get("aws_profile")
     if prof:
         env["AWS_PROFILE"] = prof
+    # A name any channel scopes through its policy env is not a global (#106).
+    # Drop every such name from the inherited copy first, then add back only
+    # this channel's -- otherwise a token another channel declares is readable
+    # here with a plain `printenv`, since a ${VAR} policy value has to be in the
+    # process environment to expand and every subprocess starts from a copy of
+    # it. Scoping that only holds while nobody looks is not scoping.
+    for _name in config.SCOPED_ENV_NAMES:
+        env.pop(_name, None)
     # Per-channel extra credentials (e.g. VERCEL_TOKEN, HEROKU_API_KEY). Values
     # live in the gitignored shmobster-policies.json; injected only for this
     # channel's commands.

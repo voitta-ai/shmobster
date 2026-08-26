@@ -181,8 +181,21 @@ def set_channel_policy(channel_id, updates):
     pol = dict(cps.get(channel_id, {}))
     pol.update({k: v for k, v in updates.items() if v is not None})
     cps[channel_id] = pol
-    with open(path, "w") as f:
+    # Check it loads BEFORE it is persisted. Since #104 the file may hold ${VAR}
+    # references, so a write followed by a rejected reload leaves disk ahead of
+    # memory: the agent goes on enforcing the old envelope and the next boot
+    # dies on a file this agent wrote. Nothing here should be able to produce an
+    # unbootable deployment from a chat message.
+    try:
+        _interpolate(data)
+    except SystemExit as exc:
+        raise RuntimeError(f"refusing to write a policy that would not load: {exc}") from None
+    # Written via a temp file in the same directory and renamed, so a crash
+    # mid-write cannot truncate the live policy file. os.replace is atomic.
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, path)
     reload_policies()
     return pol
 

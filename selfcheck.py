@@ -91,6 +91,24 @@ try:
 finally:
     config._POLICIES_PATH = _saved_pp
 
+# a set_policy that would not load must not reach disk (#104): the file can hold
+# ${VAR} now, and a write whose reload is then rejected leaves the agent
+# enforcing one envelope while the next boot dies on the file it just wrote
+_pf = os.path.join(tempfile.mkdtemp(), "policies.json")
+with open(_pf, "w") as _f:
+    json.dump({"channel_policies": {"C_KEEP": {"cwd": "/tmp/original"}}}, _f)
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, _pf
+try:
+    config.set_channel_policy("C_KEEP", {"cwd": "${SELFCHECK_DEFINITELY_UNSET}"})
+    raise AssertionError("an unloadable policy was accepted")
+except RuntimeError as _e:
+    assert "would not load" in str(_e), _e
+finally:
+    config._POLICIES_PATH = _saved_pp
+with open(_pf) as _f:
+    assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/original", "disk was mutated"
+assert not os.path.exists(_pf + ".tmp"), "temp file left behind"
+
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
 

@@ -192,6 +192,18 @@ def refuse_click(request_id, ctx, action_id):
             f"no longer pending in this channel -- nothing ran. Only trusted users "
             f"may act on a parked command. {_trusted_tags()} for visibility."
         )
+    elif approvals.held(request_id):
+        # Pending is not the same as clickable. A trusted click acquires the
+        # request and rewrites the card to the claimed, button-less state before
+        # the approve path pops it, so through that whole window peek() still
+        # finds it -- and promising live buttons then would be misinformation in
+        # the one message whose job is to say what to do next.
+        alert = (
+            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
+            f"trusted users may act on a parked command -- nothing ran. A trusted "
+            f"user is already acting on it. {_trusted_tags()} for visibility."
+            "\n" + redact.scrub(f"```{req['command']}```")
+        )
     else:
         # Says what happens next, not just what the rule is (#107). The card
         # and its buttons are deliberately left standing, and without being

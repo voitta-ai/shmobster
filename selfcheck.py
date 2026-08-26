@@ -375,6 +375,16 @@ assert "echo refused_click_321" in _posted["text"], _posted
 # rule: the card and its buttons are deliberately left standing (#107)
 assert "still live" in _posted["text"], _posted
 assert "still parked" in _posted["text"], _posted
+
+# ...but pending is not the same as clickable. A trusted click acquires the
+# request and strips the buttons before the approve path pops it, so promising
+# live buttons on a held request is misinformation (#107).
+approvals.acquire(_req3, "C1")
+_posted.clear()
+admin_tools.refuse_click(_req3, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
+assert "already acting on it" in _posted["text"], _posted
+assert "still live" not in _posted["text"], _posted
+approvals.release(_req3)
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted

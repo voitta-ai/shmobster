@@ -183,7 +183,7 @@ def refuse_click(request_id, ctx, action_id):
         retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
         return retval
     req = approvals.peek(str(request_id).lstrip("#"), ctx.get("channel"))
-    if approvals.held(request_id):
+    if approvals.held(request_id, ctx.get("channel")):
         # Asked FIRST, because the queue goes quiet in the middle of this: a
         # trusted click acquires the request, rewrites the card to the claimed
         # button-less state, and the approve path pops it before running the

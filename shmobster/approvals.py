@@ -38,7 +38,7 @@ from . import redact
 _PENDING = {}
 _ids = itertools.count(1)
 _MAX = 50
-_CLAIMING = set()
+_CLAIMING = {}  # request id -> the channel holding it
 _LOCK = threading.Lock()
 
 
@@ -141,28 +141,34 @@ def acquire(key, channel):
         if req is None or req.get("channel") != channel or k in _CLAIMING:
             retval = None
         else:
-            _CLAIMING.add(k)
+            _CLAIMING[k] = channel
             retval = req
     return retval
 
 
-def held(key):
-    """Whether some surface has this request in flight right now.
+def held(key, channel):
+    """Whether this channel has this request in flight right now.
 
     Distinct from pending, and the distinction is the whole point: the approve
     path pops the request out of the queue and only then runs the command, so
     for the entire duration of the run _PENDING says nothing and the hold is
     the only thing that knows (#103). Inferring in-flight from "still pending"
-    reports a running command as gone."""
+    reports a running command as gone.
+
+    Channel-scoped like everything else here (#107). Request ids are a process
+    counter that restarts at 1, and approval cards outlive the process, so a
+    stale card in one channel can name an id another channel is holding right
+    now -- and answering from a global set would tell the first channel that
+    someone is acting on a request that is not theirs."""
     with _LOCK:
-        retval = str(key) in _CLAIMING
+        retval = _CLAIMING.get(str(key)) == channel
     return retval
 
 
 def release(key):
     """Drop the hold acquire() took. Safe to call for a key never acquired."""
     with _LOCK:
-        _CLAIMING.discard(str(key))
+        _CLAIMING.pop(str(key), None)
 
 
 def peek(key, channel):

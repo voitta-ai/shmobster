@@ -81,6 +81,16 @@ _scoped = config.CHANNEL_POLICIES["C0SCOPEDCHANNEL"]
 assert _scoped["env"]["VERCEL_TOKEN"] == os.environ["VERCEL_TOKEN"], _scoped["env"]
 assert "${" not in json.dumps(_scoped), "a ${VAR} reference survived into a live policy"
 
+# the back-compat inline path (no policy file) must read the config it was just
+# handed, not the stale module global -- otherwise a set_policy write to the
+# inline location reports success while the agent keeps the old envelope
+_saved_pp, config._POLICIES_PATH = config._POLICIES_PATH, "does-not-exist.json"
+try:
+    _fresh = {"channel_policies": {"C_NEW": {"cwd": "/tmp/after"}}}
+    assert config._load_policies(_fresh)["channel_policies"] == _fresh["channel_policies"]
+finally:
+    config._POLICIES_PATH = _saved_pp
+
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
 

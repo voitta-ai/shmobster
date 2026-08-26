@@ -120,15 +120,22 @@ EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 _POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
 
 
-def _load_policies():
+def _load_policies(cfg=None):
+    """Load the policy source. `cfg` is the main config to fall back to when no
+    policy file exists -- passed explicitly rather than read from the global,
+    because reload_policies() has a freshly loaded one and the global is still
+    the old one at that point. Reading the global there left a set_policy write
+    to the inline (back-compat) location reporting success while the agent kept
+    running on the previous capability envelope."""
     if os.path.exists(_POLICIES_PATH):
         with open(_POLICIES_PATH, "r") as f:
             raw = json.load(f)
         retval = _interpolate(raw)
         return retval
+    src = _cfg if cfg is None else cfg
     retval = {
-        "channel_policies": _cfg.get("channel_policies", {}),
-        "default_policy": _cfg.get("default_policy", {}),
+        "channel_policies": src.get("channel_policies", {}),
+        "default_policy": src.get("default_policy", {}),
     }
     return retval
 
@@ -153,7 +160,8 @@ def reload_policies():
     of half-killing a running agent."""
     global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
     try:
-        cfg, pols = _load(), _load_policies()
+        cfg = _load()
+        pols = _load_policies(cfg)
     except SystemExit as exc:
         raise RuntimeError(f"policy reload refused, keeping the loaded policies: {exc}") from None
     _cfg = cfg

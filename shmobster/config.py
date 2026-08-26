@@ -152,6 +152,26 @@ _policies = _load_policies()
 CHANNEL_POLICIES = _policies.get("channel_policies", {})
 DEFAULT_POLICY = _policies.get("default_policy", {})
 
+
+def _scoped_env_names(policies):
+    """Every variable name some channel claims through its policy `env`.
+
+    Those names are channel-scoped by intent, so no channel that does not
+    declare one should inherit it (#106). This matters more since ${VAR}
+    expansion (#104): a policy env value now has to exist in the process
+    environment to be expanded, and every subprocess starts from a copy of that
+    environment -- so without this, moving a token from a literal to a
+    reference would quietly publish it to every other channel, which is the
+    opposite of what per-channel env is for."""
+    names = set()
+    for pol in list(policies.get("channel_policies", {}).values()) + [policies.get("default_policy", {})]:
+        names.update((pol or {}).get("env") or {})
+    retval = names
+    return retval
+
+
+SCOPED_ENV_NAMES = _scoped_env_names(_policies)
+
 # Trusted users (Slack user IDs) who may change my restrictions via chat (#36).
 TRUSTED_USERS = set(_cfg.get("trusted_users", []))
 
@@ -172,7 +192,7 @@ def reload_policies():
 
 
 def _reload_locked():
-    global CHANNEL_POLICIES, DEFAULT_POLICY, _cfg, _policies
+    global CHANNEL_POLICIES, DEFAULT_POLICY, SCOPED_ENV_NAMES, _cfg, _policies
     try:
         cfg = _load()
         pols = _load_policies(cfg)
@@ -182,6 +202,7 @@ def _reload_locked():
     _policies = pols
     CHANNEL_POLICIES = _policies.get("channel_policies", {})
     DEFAULT_POLICY = _policies.get("default_policy", {})
+    SCOPED_ENV_NAMES = _scoped_env_names(_policies)
 
 
 def set_channel_policy(channel_id, updates):

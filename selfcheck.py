@@ -122,6 +122,19 @@ finally:
 assert oct(os.stat(_pf).st_mode & 0o777) == "0o600", oct(os.stat(_pf).st_mode & 0o777)
 with open(_pf) as _f:
     assert json.load(_f)["channel_policies"]["C_KEEP"]["cwd"] == "/tmp/updated", "write did not land"
+# those swaps ran reload_policies() against a temp file, so the module globals
+# now describe it -- put the example back before anything below reads them
+config.reload_policies()
+
+# ...and a name one channel scopes must not leak to another (#106). Since #104 a
+# policy env value has to be in the process environment to expand, and every
+# subprocess starts from a copy of that environment.
+assert "VERCEL_TOKEN" in config.SCOPED_ENV_NAMES, config.SCOPED_ENV_NAMES
+assert "VERCEL_TOKEN" in os.environ, "the premise: it is in the process env to be expanded"
+_leak = tools.execute("printenv VERCEL_TOKEN || echo ABSENT", {})
+assert _leak.strip() == "ABSENT", f"another channel's scoped credential was readable: {_leak!r}"
+_mine = tools.execute("printenv VERCEL_TOKEN", {"env": {"VERCEL_TOKEN": "mine-only"}})
+assert _mine.strip() == "mine-only", _mine
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()

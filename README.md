@@ -323,8 +323,11 @@ machine's channel layout is versioned separately from the token/key config:
         "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" }
 
     This is also how you give one channel an API token *without* handing it to
-    every channel. A variable in the process environment reaches every command
-    shmobster runs anywhere; an `env` entry reaches only this channel's. And a
+    every channel. A name that appears in any channel's `env` is treated as
+    channel-scoped: it is stripped from the environment every command inherits,
+    and added back only for the channel that declares it. So the `${VAR}` the
+    process needs in order to expand the reference is not readable from another
+    channel with a plain `printenv`. And a
     command that can read the credential it needs from its environment is a
     plain read-only command -- no `source`, so nothing trips the mutating gate
     and nothing needs approving.

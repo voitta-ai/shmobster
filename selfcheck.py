@@ -376,15 +376,25 @@ assert "echo refused_click_321" in _posted["text"], _posted
 assert "still live" in _posted["text"], _posted
 assert "still parked" in _posted["text"], _posted
 
-# ...but pending is not the same as clickable. A trusted click acquires the
-# request and strips the buttons before the approve path pops it, so promising
-# live buttons on a held request is misinformation (#107).
-approvals.acquire(_req3, "C1")
+# ...but pending is not the same as clickable, and the queue goes quiet in the
+# middle of a trusted click: it acquires the request, strips the buttons, and
+# the approve path pops it before running the command. So peek() says "pending"
+# early in that window and "gone" for the whole run, and only the hold spans it
+# (#107). On its own request, so the ids the dedupe checks below depend on stay
+# put.
+_flight = approvals.add("echo in_flight", "C1", "mutating")
+approvals.acquire(_flight, "C1")
 _posted.clear()
-admin_tools.refuse_click(_req3, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
 assert "already acting on it" in _posted["text"], _posted
 assert "still live" not in _posted["text"], _posted
-approvals.release(_req3)
+
+approvals.pop(_flight, "C1")  # what _approve_command does before it executes
+_posted.clear()
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "client": _FakePost()}, "approve_command")
+assert "already acting on it" in _posted["text"], _posted
+assert "no longer pending" not in _posted["text"], _posted
+approvals.release(_flight)
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted

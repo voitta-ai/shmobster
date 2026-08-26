@@ -183,7 +183,23 @@ def refuse_click(request_id, ctx, action_id):
         retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
         return retval
     req = approvals.peek(str(request_id).lstrip("#"), ctx.get("channel"))
-    if req is None:
+    if approvals.held(request_id):
+        # Asked FIRST, because the queue goes quiet in the middle of this: a
+        # trusted click acquires the request, rewrites the card to the claimed
+        # button-less state, and the approve path pops it before running the
+        # command -- so peek() says "pending" early in that window and "gone"
+        # for the whole run, while neither is the useful answer. Only the hold
+        # spans it. Promising live buttons here would send someone to press
+        # buttons that are no longer there; calling it gone is worse still,
+        # since the command is executing as the message is written.
+        alert = (
+            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
+            f"trusted users may act on a parked command -- nothing ran. A trusted "
+            f"user is already acting on it. {_trusted_tags()} for visibility."
+        )
+        if req is not None:
+            alert += "\n" + redact.scrub(f"```{req['command']}```")
+    elif req is None:
         # A stale card -- already claimed, denied, evicted, or cleared by a
         # restart. Saying "still parked" here would be the same kind of
         # confident falsehood this whole change exists to stop telling.
@@ -191,18 +207,6 @@ def refuse_click(request_id, ctx, action_id):
             f":warning: {who} clicked *{label}* on request [{request_id}], which is "
             f"no longer pending in this channel -- nothing ran. Only trusted users "
             f"may act on a parked command. {_trusted_tags()} for visibility."
-        )
-    elif approvals.held(request_id):
-        # Pending is not the same as clickable. A trusted click acquires the
-        # request and rewrites the card to the claimed, button-less state before
-        # the approve path pops it, so through that whole window peek() still
-        # finds it -- and promising live buttons then would be misinformation in
-        # the one message whose job is to say what to do next.
-        alert = (
-            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
-            f"trusted users may act on a parked command -- nothing ran. A trusted "
-            f"user is already acting on it. {_trusted_tags()} for visibility."
-            "\n" + redact.scrub(f"```{req['command']}```")
         )
     else:
         # Says what happens next, not just what the rule is (#107). The card

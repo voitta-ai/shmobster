@@ -10,7 +10,10 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, redact, skills, slack_blocks, watchdog
 
-logging.basicConfig(level=logging.INFO)
+# asctime is not in the default format (#102). Without it the disposition log
+# (#97) records order but not time, and "how long did that take" / "did this run
+# before or after the click" are exactly the questions it exists to answer.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
 # request details attached -- so there must be no window in which an exception is
@@ -101,6 +104,24 @@ def _resolve(ack, body, client, action, run):
     if not admin_tools.is_trusted(ctx["user_id"]):
         admin_tools.refuse_click(action["value"], ctx, action.get("action_id"))
         return
+    # Acknowledge the click before doing the work (#101), not after. The final
+    # update below can be seconds away -- this one ran a network call -- and
+    # until it lands the card is unchanged with its buttons still live, which
+    # reads as a click that went nowhere. It also takes the buttons away now,
+    # which is what stops a second click from popping nothing and overwriting
+    # the real output with "no pending request".
+    try:
+        client.chat_update(
+            channel=channel,
+            ts=message_ts,
+            text=f"Working on [{action['value']}] for <@{ctx['user_id']}>",
+            blocks=slack_blocks.claimed(
+                action.get("action_id"), action["value"], ctx["user_id"],
+                approvals.peek(action["value"], channel),
+            ),
+        )
+    except Exception:
+        logging.exception("could not mark approval message as claimed")
     result = redact.scrub(run(action["value"], ctx))
     try:
         client.chat_update(

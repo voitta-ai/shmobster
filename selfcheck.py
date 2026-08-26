@@ -615,6 +615,17 @@ if True:
     assert "[REDACTED:" in _rendered, _rendered
     assert slack_blocks.approval("7", {"command": "ls -la", "reason": "mutating"}), "ordinary command still renders"
 
+    # the interim card a click leaves behind (#101) shows the same command, so
+    # it needs the same scrub -- and no buttons, which is what closes the
+    # double-click race while the command runs
+    _claim = slack_blocks.claimed("approve_command", "7", "U_TRUSTED", {"command": f"aws configure --key {_akia}"})
+    _cj = json.dumps(_claim)
+    assert _akia not in _cj, _cj
+    assert "[REDACTED:" in _cj, _cj
+    assert "<@U_TRUSTED>" in _cj, _cj
+    assert "actions" not in _cj, "the interim card must not keep the buttons"
+    assert slack_blocks.claimed("deny_command", "7", "U_TRUSTED", None), "a stale request still renders"
+
     # the approval LOG is durable in a way the card is not, and approvals is
     # ingest-agnostic -- so it scrubs at the emission site rather than trusting
     # that whoever booted us installed the redacting formatter (#94). Asserted

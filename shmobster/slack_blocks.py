@@ -48,3 +48,28 @@ def approval(req_id, req):
         },
     ]
     return retval
+
+
+_CLAIMED_VERB = {"approve_command": "Approving", "deny_command": "Denying"}
+
+
+def claimed(action_id, req_id, user_id, req):
+    """The card a click leaves behind while it is being acted on (#101).
+
+    Posted before the command runs, not after. `chat_update` is silent -- no
+    notification, no unread marker -- so a card that only changes once the
+    command finishes leaves the clicker with a live button and no sign their
+    click landed, which reads as a lost click. It also takes the buttons away
+    inside Slack's ack window, which is what closes the double-click race:
+    approve pops the request and then executes, so a second click during a slow
+    run finds nothing pending and overwrites the real output with an error.
+
+    The command stays visible, because this replaces the only place it is
+    shown and the operator still wants to read it while it runs.
+    """
+    text = f":hourglass_flowing_sand: *{_CLAIMED_VERB.get(action_id, 'Working on')}* [{req_id}] -- <@{user_id}>"
+    if req:
+        # Scrubbed for the reason approval() gives: a credential rides argv.
+        text += "\n" + redact.scrub(f"```{req['command']}```")
+    retval = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    return retval

@@ -12,7 +12,12 @@ from . import redact
 def approval(req_id, req):
     """Approve/Deny buttons for one parked command (#50). The command goes in a
     code block so a long one stays readable; the request id rides in the button
-    value, which is what the action handler acts on."""
+    value, which is what the action handler acts on.
+
+    The id is boot-unique and shown in full (#109). This card is a Slack
+    message that outlives the process, and both ways of acting on it -- the
+    button and a human typing the id -- must resolve to nothing after a restart
+    rather than to whichever request inherited its number."""
     retval = [
         {
             "type": "section",

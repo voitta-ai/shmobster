@@ -195,15 +195,34 @@ Two independent gates, deliberately separate:
 When the agent hits a mutating command it parks it and posts **Approve / Deny**
 buttons in the thread (#50):
 
-    :lock: Needs approval [3] (mutating)
+    :lock: Needs approval [a1b2c3d4e5f60718-3] (mutating)
     ```gh issue create ...```
     [ Approve ]  [ Deny ]
 
 A trusted user clicks; the command runs under the channel's policy and the
 message is rewritten in place with the outcome, so the buttons can't be
-re-clicked. Talking works too -- `@agent approve 3` calls the same
+re-clicked. Talking works too -- `@agent approve a1b2c3d4e5f60718-3` calls the same
 `approve_command` tool -- which is the fallback when the buttons aren't
 available.
+
+The id is unique per boot (#109): a counter, prefixed with a nonce drawn fresh
+at every start. A card is a Slack message and outlives the process -- and
+restarts are routine, since the #66 watchdog exits on a wedged socket and the
+supervisor brings it straight back -- while the counter alone restarts at 1. So
+without the nonce, acting on an old card after a restart would release whichever
+command had since inherited its number: the human approves what the card shows
+them and something else runs, with both the channel scope and the trust check
+satisfied.
+
+The nonce is on the id the card *prints*, not only on the value its button
+carries, because a card that has gone stale still shows its number and still
+invites someone to type it. Both routes have to fail, so a bare `approve 3` is
+not completed into this boot's request 3 -- it resolves to nothing, and says so.
+
+The refusal says how many requests are parked here, never which. That reply is
+another turn in the model's tool loop, so an id in it is an id the agent can
+approve on its own initiative, for a command no human quoted -- the same
+boundary from the other side. The id lives on the card, where the human is.
 
 The click is authorized by the Slack user id on the interaction, never by
 anything the model says, so the agent cannot approve its own request. A
@@ -222,8 +241,8 @@ Every command's disposition is logged to `logs/shmobster.err.log` (#97), so a
 parked command survives the loss of its card and "did it try that and get
 blocked, or never try?" has an answer:
 
-    approvals: parked [3] in C0... (mutating): 'gh issue create ...'
-    approvals: claimed [3] in C0...: 'gh issue create ...'
+    approvals: parked [a1b2c3d4e5f60718-3] in C0... (mutating): 'gh issue create ...'
+    approvals: claimed [a1b2c3d4e5f60718-3] in C0...: 'gh issue create ...'
     run_shell: running: 'git log --oneline -5'
     run_shell: exit 0: 'git log --oneline -5'
     run_shell: blocked by policy (repo 'x/y' not in channel whitelist ['a/b']): 'gh repo view x/y'

@@ -6,6 +6,7 @@ handler tool-calling loop (llm stubbed). Run from repo root: python selfcheck.py
 import ast
 import io
 import glob
+import itertools
 import json
 import logging
 import datetime
@@ -332,7 +333,10 @@ policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
 _parked = tools.run_shell("echo approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
 _req = _parked.split("[", 1)[1].split("]", 1)[0]
-assert approvals.ids("C1") == [_req], approvals.ids("C1")
+# What run_shell shows a human is the queue key itself, nonce and all (#109)
+_key = approvals.canonical(_req)
+assert _key == _req, "the id a human is shown is the id the queue holds"
+assert approvals.ids("C1") == [_key], approvals.ids("C1")
 
 # non-trusted approval is refused, and the request stays parked
 _ref = admin_tools.dispatch(
@@ -340,7 +344,7 @@ _ref = admin_tools.dispatch(
     {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
 )
 assert _ref.startswith("REFUSED"), _ref
-assert approvals.ids("C1") == [_req], approvals.ids("C1")
+assert approvals.ids("C1") == [_key], approvals.ids("C1")
 
 # wrong channel can't release another channel's request
 _other = admin_tools.dispatch(
@@ -361,13 +365,14 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # exactly once, and Deny drops it unrun -- trust-gated like approve
 _parked2 = tools.run_shell("echo never_runs_789", {}, "C1")
 _req2 = _parked2.split("[", 1)[1].split("]", 1)[0]
+_key2 = approvals.canonical(_req2)
 _surfaced = approvals.claim_unsurfaced("C1")
-assert [k for k, _ in _surfaced] == [_req2], _surfaced
+assert [k for k, _ in _surfaced] == [_key2], _surfaced
 assert approvals.claim_unsurfaced("C1") == [], "already surfaced -> no duplicate buttons"
 
 _dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
 assert _dref.startswith("REFUSED"), _dref
-assert approvals.ids("C1") == [_req2], approvals.ids("C1")
+assert approvals.ids("C1") == [_key2], approvals.ids("C1")
 
 _den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
 assert _den.startswith("DENIED"), _den
@@ -380,6 +385,7 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # did not run.
 _parked3 = tools.run_shell("echo refused_click_321", {}, "C1")
 _req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
+_key3 = approvals.canonical(_req3)
 assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
 assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
 
@@ -392,7 +398,7 @@ approvals.release(_req3)
 assert approvals.acquire(_req3, "C1") is not None, "release hands it back"
 approvals.release(_req3)
 assert approvals.acquire("no-such-id", "C1") is None, "a stale click acquires nothing"
-assert approvals.ids("C1") == [_req3], "acquiring does not consume the request"
+assert approvals.ids("C1") == [_key3], "acquiring does not consume the request"
 
 # held and absent both fail to acquire, and the ingest has to tell them apart.
 # The hold is the only thing that knows: approve pops the request BEFORE the
@@ -435,12 +441,13 @@ for _k in _all_held:
 for _k in approvals.ids("C_FULL"):
     approvals.pop(_k, "C_FULL")
 _req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
+_key3 = approvals.canonical(_req3)
 
 _cref = admin_tools.refuse_click(
     _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
 )
 assert _cref.startswith("REFUSED"), _cref
-assert approvals.ids("C1") == [_req3], approvals.ids("C1")
+assert approvals.ids("C1") == [_key3], approvals.ids("C1")
 assert "<@U_STRANGER>" in _posted["text"], _posted
 assert "Approve" in _posted["text"], _posted
 assert "echo refused_click_321" in _posted["text"], _posted
@@ -525,6 +532,73 @@ assert _posted == {}, _posted
 _ctx_flaky["client"] = _FakePost()
 assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
 assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the alert"
+
+# 12c) an approval card outlives the process, so its id has to outlive it too
+# (#109). The counter restarts at 1 on every boot while the card keeps its
+# buttons and its printed id -- so without a per-boot identity, acting on an old
+# card releases whichever command inherited its number. The card is what a human
+# read; the command that runs must be the one they read.
+approvals._NONCE, approvals._ids = "b" * 8, itertools.count(1)  # boot 1
+_before = approvals.add("echo from_previous_boot", "C_BOOT", "mutating")
+_card = slack_blocks.approval(_before, approvals.peek(_before, "C_BOOT"))
+_card_value = _card[1]["elements"][0]["value"]
+assert _card_value == _before, "the button carries the queue key"
+assert f"[{_before}]" in _card[0]["text"]["text"], "and so does the id the card prints"
+
+# The process exits and the queue goes with it -- the card does not: it is a
+# Slack message, still posted, with its buttons still live and its id still
+# readable.
+approvals.pop(_before, "C_BOOT")
+approvals._NONCE, approvals._ids = "c" * 8, itertools.count(1)  # boot 2
+_after = approvals.add("echo different_command", "C_BOOT", "mutating")
+assert _after != _card_value, "boot 2 must not reissue boot 1's id"
+assert _before.endswith("-1") and _after.endswith("-1"), "the counter alone does repeat"
+
+# the button path -- a click on the stale card resolves nothing, on every path a
+# surface can take
+assert approvals.pop(_card_value, "C_BOOT") is None, "the old card must resolve to nothing"
+assert approvals.acquire(_card_value, "C_BOOT") is None, "including on the click path"
+assert approvals.status(_card_value, "C_BOOT")[0] == "absent", "so the click is told it is stale"
+
+# ...and the typed path, which is the one that survives when the buttons are
+# not available: a bare number read off the stale card must not be completed
+# into this boot's request. Both surfaces have to fail, or the human still
+# approves one command by reading another.
+assert approvals.peek("1", "C_BOOT") is None, "a bare number is not this boot's id"
+assert admin_tools.dispatch(
+    "approve_command", {"request_id": "1"},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+).startswith("no pending request"), "typing the short number must not approve anything"
+assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None}) \
+    .startswith("no pending request"), "nor deny anything"
+# the refusal says the queue is not empty without naming what is in it: this
+# answer goes back into the tool loop, and a live id there is an approvable id
+# the human never quoted (#109)
+_stale = admin_tools.dispatch(
+    "approve_command", {"request_id": _card_value},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+)
+assert _after not in _stale, "a stale id must not be answered with the live ones"
+assert "1 other request(s) are parked here" in _stale, _stale
+assert "Do not guess" in _stale, _stale
+assert approvals.peek(_after, "C_BOOT")["command"] == "echo different_command", \
+    "and the live request is left parked"
+
+# every surface prints the id inside brackets, and a human quoting a card types
+# what they see -- so one layer of them comes off before the lookup, without
+# that making a bare number resolve
+assert approvals.peek(f"[{_after}]", "C_BOOT") is not None, "a quoted id still resolves"
+assert approvals.peek("[1]", "C_BOOT") is None, "brackets do not complete a bare number"
+_bracketed = admin_tools.dispatch(
+    "approve_command", {"request_id": f"[{_after}]"},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+)
+assert "different_command" in _bracketed, _bracketed
+_denyable = approvals.add("echo never_runs_at_all", "C_BOOT", "mutating")
+assert admin_tools.deny(
+    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+).startswith("DENIED"), "deny takes a quoted id too"
+assert approvals.ids("C_BOOT") == [], approvals.ids("C_BOOT")
 
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an
 # absolute path, not the literal string that makes subprocess raise ENOENT

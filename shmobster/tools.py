@@ -50,11 +50,14 @@ def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command)
     if decision != "safe":
         req_id = approvals.add(command, channel, reason)
+        # The whole id, nonce and all (#109). It is what a human types back, and
+        # a shortened one would mean a different request after the next restart
+        # while reading identically on the card they typed it from.
         retval = (
             f"NOT RUN -- pending approval [{req_id}] ({reason}): {command}\n"
             f"Tell the user: a trusted user can approve it by asking you to "
-            f"approve request {req_id} (approve_command). Do not retry the "
-            f"command; it will run on approval."
+            f"approve request {req_id} (approve_command), quoting the id exactly. "
+            f"Do not retry the command; it will run on approval."
         )
         return retval
     retval = execute(command, policy)

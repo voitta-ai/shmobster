@@ -583,7 +583,21 @@ assert "1 other request(s) are parked here" in _stale, _stale
 assert "Do not guess" in _stale, _stale
 assert approvals.peek(_after, "C_BOOT")["command"] == "echo different_command", \
     "and the live request is left parked"
-approvals.pop(_after, "C_BOOT")
+
+# every surface prints the id inside brackets, and a human quoting a card types
+# what they see -- so one layer of them comes off before the lookup, without
+# that making a bare number resolve
+assert approvals.peek(f"[{_after}]", "C_BOOT") is not None, "a quoted id still resolves"
+assert approvals.peek("[1]", "C_BOOT") is None, "brackets do not complete a bare number"
+_bracketed = admin_tools.dispatch(
+    "approve_command", {"request_id": f"[{_after}]"},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+)
+assert "different_command" in _bracketed, _bracketed
+_denyable = approvals.add("echo never_runs_at_all", "C_BOOT", "mutating")
+assert admin_tools.deny(
+    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+).startswith("DENIED"), "deny takes a quoted id too"
 assert approvals.ids("C_BOOT") == [], approvals.ids("C_BOOT")
 
 # 13) cwd tilde/var expansion (#54): a policy cwd of "~/..." resolves to an

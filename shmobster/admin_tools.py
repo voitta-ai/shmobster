@@ -55,7 +55,7 @@ TOOLS = [
             "description": (
                 "Approve and run a mutating command that run_shell parked for "
                 "approval. ONLY trusted users may -- use when a trusted user okays "
-                "a pending request id (e.g. 'approve a1b2c3d4-3', 'go ahead')."
+                "a pending request id (e.g. 'approve a1b2c3d4e5f60718-3', 'go ahead')."
             ),
             "parameters": {
                 "type": "object",

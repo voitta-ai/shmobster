@@ -61,7 +61,13 @@ _ids = itertools.count(1)
 # Drawn fresh on every start and mixed into every id (#109). Nothing persists
 # it, deliberately: the whole point is that a previous boot's ids resolve to
 # nothing rather than to whatever has since reused their number.
-_NONCE = secrets.token_hex(4)
+#
+# 64 bits, not the 32 that would also read as "random enough". A repeat is not a
+# cosmetic clash here -- it is a card from a dead boot resolving to a live
+# request again, which is the failure this exists to end, and it would be
+# guarding a Slack message that can outlive many restarts. The cost of the extra
+# bytes is eight more characters for whoever types an id by hand.
+_NONCE = secrets.token_hex(8)
 _MAX = 50
 _CLAIMING = {}  # request id -> the channel holding it
 _LOCK = threading.Lock()
@@ -69,14 +75,17 @@ _LOCK = threading.Lock()
 
 def canonical(key):
     """The queue key for an id arriving from anywhere: a button value, a human
-    typing `approve a1b2c3d4-4`, a model relaying either.
+    typing `approve [a1b2c3d4e5f60718-4]`, a model relaying either.
 
-    Normalization only -- a leading `#` and stray whitespace, both of which come
-    off a human. Deliberately not a place where a partial id is completed: a
-    bare number is not treated as this boot's, because the surface a human reads
-    it off may be a card from a dead one, and expanding it here is exactly how
-    the id they read and the request that runs come apart again."""
-    retval = str(key).strip().lstrip("#")
+    Normalization only, and only of what a human puts around an id they are
+    copying: surrounding brackets, because every surface prints the id as
+    `[<id>]` and quoting a card verbatim is the obvious thing to do; a leading
+    `#`; stray whitespace. Deliberately not a place where a partial id is
+    completed -- a bare number is not treated as this boot's, because the
+    surface it was read off may be a card from a dead one, and expanding it here
+    is exactly how the id a human read and the request that runs come apart
+    again. Brackets around a bare number still leave a bare number."""
+    retval = str(key).strip().strip("[]").strip().lstrip("#").strip()
     return retval
 
 

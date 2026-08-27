@@ -195,13 +195,13 @@ Two independent gates, deliberately separate:
 When the agent hits a mutating command it parks it and posts **Approve / Deny**
 buttons in the thread (#50):
 
-    :lock: Needs approval [a1b2c3d4-3] (mutating)
+    :lock: Needs approval [a1b2c3d4e5f60718-3] (mutating)
     ```gh issue create ...```
     [ Approve ]  [ Deny ]
 
 A trusted user clicks; the command runs under the channel's policy and the
 message is rewritten in place with the outcome, so the buttons can't be
-re-clicked. Talking works too -- `@agent approve a1b2c3d4-3` calls the same
+re-clicked. Talking works too -- `@agent approve a1b2c3d4e5f60718-3` calls the same
 `approve_command` tool -- which is the fallback when the buttons aren't
 available.
 
@@ -241,8 +241,8 @@ Every command's disposition is logged to `logs/shmobster.err.log` (#97), so a
 parked command survives the loss of its card and "did it try that and get
 blocked, or never try?" has an answer:
 
-    approvals: parked [a1b2c3d4-3] in C0... (mutating): 'gh issue create ...'
-    approvals: claimed [a1b2c3d4-3] in C0...: 'gh issue create ...'
+    approvals: parked [a1b2c3d4e5f60718-3] in C0... (mutating): 'gh issue create ...'
+    approvals: claimed [a1b2c3d4e5f60718-3] in C0...: 'gh issue create ...'
     run_shell: running: 'git log --oneline -5'
     run_shell: exit 0: 'git log --oneline -5'
     run_shell: blocked by policy (repo 'x/y' not in channel whitelist ['a/b']): 'gh repo view x/y'

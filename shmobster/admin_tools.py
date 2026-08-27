@@ -55,12 +55,12 @@ TOOLS = [
             "description": (
                 "Approve and run a mutating command that run_shell parked for "
                 "approval. ONLY trusted users may -- use when a trusted user okays "
-                "a pending request id (e.g. 'approve 3', 'go ahead')."
+                "a pending request id (e.g. 'approve a1b2c3d4-3', 'go ahead')."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "request_id": {"type": "string", "description": "The id from the 'pending approval [id]' message."},
+                    "request_id": {"type": "string", "description": "The id from the 'pending approval [id]' message, in full -- ids are unique per boot and a bare number resolves to nothing."},
                 },
                 "required": ["request_id"],
             },
@@ -86,7 +86,7 @@ def deny(request_id, ctx):
     channel = ctx.get("channel")
     req = approvals.pop(request_id, channel)
     if req is None:
-        retval = f"no pending request '{approvals.short(request_id)}' in this channel."
+        retval = f"no pending request '{approvals.canonical(request_id)}' in this channel."
         return retval
     retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
     return retval
@@ -186,13 +186,10 @@ def refuse_click(request_id, ctx, action_id):
     user_id = ctx.get("user_id")
     who = f"<@{user_id}>"
     channel = ctx.get("channel")
-    # The queue key for the dedupe and the lookup, the short form for what the
-    # alert says (#109). A button value carries the boot nonce and a typed id
-    # does not, so keying the dedupe on the raw string would let one user's two
-    # routes to the same request each spend an alert -- and, worse, would let a
-    # previous boot's [4] and this boot's [4] share one.
+    # Keyed on the canonical id, so a `#4` and a `4` are one request and one
+    # alert -- and so a previous boot's id and this boot's cannot share an entry
+    # (#109), which is what let a stale click silence the alert for a live one.
     key = approvals.canonical(request_id)
-    label_id = approvals.short(request_id)
     if _alerted(key, channel, user_id):
         retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
         return retval
@@ -207,7 +204,7 @@ def refuse_click(request_id, ctx, action_id):
         # buttons that are no longer there; calling it gone is worse still,
         # since the command is executing as the message is written.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{label_id}], but only "
+            f":warning: {who} clicked *{label}* on request [{key}], but only "
             f"trusted users may act on a parked command -- nothing ran. A trusted "
             f"user is already acting on it. {_trusted_tags()} for visibility."
         )
@@ -218,7 +215,7 @@ def refuse_click(request_id, ctx, action_id):
         # restart. Saying "still parked" here would be the same kind of
         # confident falsehood this whole change exists to stop telling.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{label_id}], which is "
+            f":warning: {who} clicked *{label}* on request [{key}], which is "
             f"no longer pending in this channel -- nothing ran. Only trusted users "
             f"may act on a parked command. {_trusted_tags()} for visibility."
         )
@@ -229,7 +226,7 @@ def refuse_click(request_id, ctx, action_id):
         # -- which sent one straight to asking the agent to re-raise a request
         # that was sitting right there, still clickable.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{label_id}], but only "
+            f":warning: {who} clicked *{label}* on request [{key}], but only "
             f"trusted users may act on a parked command -- nothing ran. The request "
             f"is still parked and the *Approve* / *Deny* buttons on the card above "
             f"are still live, so {_trusted_tags()} can act on it there."
@@ -257,14 +254,16 @@ def _reload_skills():
 
 def _approve_command(args, ctx):
     channel = ctx.get("channel")
-    req_id = args.get("request_id", "")
+    req_id = approvals.canonical(args.get("request_id", ""))
     req = approvals.pop(req_id, channel)
     if req is None:
-        # Short ids throughout, because this text goes back to the model to
-        # relay and then to a human to type (#109).
-        outstanding = [approvals.short(k) for k in approvals.ids(channel)] or ["(none)"]
+        # The outstanding ids come back with the answer, because the likeliest
+        # way to get here is quoting an id off a card from before a restart
+        # (#109) -- and without them "no pending request" reads as the request
+        # having been consumed rather than as a stale id.
+        outstanding = approvals.ids(channel) or ["(none)"]
         return (
-            f"no pending request '{approvals.short(req_id)}' in this channel. "
+            f"no pending request '{req_id}' in this channel. "
             f"Outstanding here: {', '.join(outstanding)}"
         )
     policy = policy_mod.resolve(channel)

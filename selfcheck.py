@@ -333,9 +333,9 @@ policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
 _parked = tools.run_shell("echo approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
 _req = _parked.split("[", 1)[1].split("]", 1)[0]
-# What run_shell shows a human is the short id; the queue keys on the
-# boot-unique one (#109), and canonical() is what puts the nonce back on.
+# What run_shell shows a human is the queue key itself, nonce and all (#109)
 _key = approvals.canonical(_req)
+assert _key == _req, "the id a human is shown is the id the queue holds"
 assert approvals.ids("C1") == [_key], approvals.ids("C1")
 
 # non-trusted approval is refused, and the request stays parked
@@ -367,7 +367,6 @@ _parked2 = tools.run_shell("echo never_runs_789", {}, "C1")
 _req2 = _parked2.split("[", 1)[1].split("]", 1)[0]
 _key2 = approvals.canonical(_req2)
 _surfaced = approvals.claim_unsurfaced("C1")
-# Full keys, because this is what an ingest puts in a button value (#109)
 assert [k for k, _ in _surfaced] == [_key2], _surfaced
 assert approvals.claim_unsurfaced("C1") == [], "already surfaced -> no duplicate buttons"
 
@@ -536,28 +535,50 @@ assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the a
 
 # 12c) an approval card outlives the process, so its id has to outlive it too
 # (#109). The counter restarts at 1 on every boot while the card keeps its
-# buttons -- so without a per-boot identity, clicking an old card approves
-# whichever command inherited its number. The card is what a human read; the
-# command that runs must be the one they read.
+# buttons and its printed id -- so without a per-boot identity, acting on an old
+# card releases whichever command inherited its number. The card is what a human
+# read; the command that runs must be the one they read.
 approvals._NONCE, approvals._ids = "b" * 8, itertools.count(1)  # boot 1
 _before = approvals.add("echo from_previous_boot", "C_BOOT", "mutating")
 _card = slack_blocks.approval(_before, approvals.peek(_before, "C_BOOT"))
 _card_value = _card[1]["elements"][0]["value"]
-assert _card_value == _before, "the button carries the queue key, not the short id"
-assert f"[{approvals.short(_before)}]" in _card[0]["text"]["text"], "the card shows the short id"
+assert _card_value == _before, "the button carries the queue key"
+assert f"[{_before}]" in _card[0]["text"]["text"], "and so does the id the card prints"
 
 # The process exits and the queue goes with it -- the card does not: it is a
-# Slack message, still posted, with its buttons still live.
+# Slack message, still posted, with its buttons still live and its id still
+# readable.
 approvals.pop(_before, "C_BOOT")
 approvals._NONCE, approvals._ids = "c" * 8, itertools.count(1)  # boot 2
 _after = approvals.add("echo different_command", "C_BOOT", "mutating")
-assert approvals.short(_after) == "1", "the id a human types does restart at 1..."
-assert _after != _card_value, "...but the id the card carries never repeats"
+assert _after != _card_value, "boot 2 must not reissue boot 1's id"
+assert _before.endswith("-1") and _after.endswith("-1"), "the counter alone does repeat"
+
+# the button path -- a click on the stale card resolves nothing, on every path a
+# surface can take
 assert approvals.pop(_card_value, "C_BOOT") is None, "the old card must resolve to nothing"
 assert approvals.acquire(_card_value, "C_BOOT") is None, "including on the click path"
 assert approvals.status(_card_value, "C_BOOT")[0] == "absent", "so the click is told it is stale"
-assert approvals.peek("1", "C_BOOT")["command"] == "echo different_command", \
-    "a short id typed now means this boot's request"
+
+# ...and the typed path, which is the one that survives when the buttons are
+# not available: a bare number read off the stale card must not be completed
+# into this boot's request. Both surfaces have to fail, or the human still
+# approves one command by reading another.
+assert approvals.peek("1", "C_BOOT") is None, "a bare number is not this boot's id"
+assert admin_tools.dispatch(
+    "approve_command", {"request_id": "1"},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+).startswith("no pending request"), "typing the short number must not approve anything"
+assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None}) \
+    .startswith("no pending request"), "nor deny anything"
+# the refusal hands back what IS outstanding, since quoting a dead id is the
+# likeliest way to get here
+assert _after in admin_tools.dispatch(
+    "approve_command", {"request_id": _card_value},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+), "a stale id is answered with the live ones"
+assert approvals.peek(_after, "C_BOOT")["command"] == "echo different_command", \
+    "and the live request is left parked"
 approvals.pop(_after, "C_BOOT")
 assert approvals.ids("C_BOOT") == [], approvals.ids("C_BOOT")
 

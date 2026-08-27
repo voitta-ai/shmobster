@@ -16,9 +16,16 @@ round, and a human clicking Approve on what they read would release something
 else. That is the one property the gate exists to provide, and neither the
 channel scope nor the trust check catches it, since both are satisfied. So the
 key is `<boot nonce>-<n>` with a nonce drawn fresh at every start: a card from a
-previous boot matches nothing and is reported as no longer pending. The bare
-`<n>` stays what humans read and type; canonical() expands it against the
-current nonce, because a short id typed now can only mean this boot's request.
+previous boot matches nothing and is reported as no longer pending.
+
+The nonce is on the id every surface prints, not only on the value the button
+carries. A stale card still shows its id, and typing that id is the documented
+fallback for when the buttons are not available -- so a bare `<n>` completed
+into "this boot's <n>" would walk straight back into the same failure by the
+typed route, the human reading one command while another one runs. A bare number
+therefore resolves to nothing: what a human types is the id exactly as the card
+shows it, and one from a dead boot is answered with the ids that really are
+outstanding.
 
 Every read and write of the queue is under one lock (#103). Bolt serves mention
 handlers and button handlers on different threads, so surfacing cards, parking,
@@ -61,30 +68,14 @@ _LOCK = threading.Lock()
 
 def canonical(key):
     """The queue key for an id arriving from anywhere: a button value, a human
-    typing `approve 4`, a model relaying either.
+    typing `approve a1b2c3d4-4`, a model relaying either.
 
-    A bare number is this boot's. It can only have been read off a card or a
-    message belonging to the queue that is still this one, so it takes the
-    current nonce. Anything already carrying a nonce is left as it is, which is
-    what makes a stale card resolve to nothing instead of to whichever request
-    inherited its number."""
-    k = str(key).strip().lstrip("#")
-    if k.isdigit():
-        k = f"{_NONCE}-{k}"
-    retval = k
-    return retval
-
-
-def short(key):
-    """What a human reads and types: the bare counter for one of this boot's
-    ids, and the whole string for anything else.
-
-    A foreign id has no short form, and inventing one would print an id that
-    means a different request now than it did on the card it came from -- which
-    is the confusion the nonce exists to end, reintroduced at the surface."""
-    k = str(key).strip().lstrip("#")
-    prefix = f"{_NONCE}-"
-    retval = k[len(prefix):] if k.startswith(prefix) else k
+    Normalization only -- a leading `#` and stray whitespace, both of which come
+    off a human. Deliberately not a place where a partial id is completed: a
+    bare number is not treated as this boot's, because the surface a human reads
+    it off may be a card from a dead one, and expanding it here is exactly how
+    the id they read and the request that runs come apart again."""
+    retval = str(key).strip().lstrip("#")
     return retval
 
 
@@ -244,9 +235,9 @@ def peek(key, channel):
 
 
 def ids(channel=None):
-    """Outstanding request keys, optionally only this channel's. Full keys, not
-    the short form: a caller that renders them for a human owes short(), and a
-    caller that puts one in a button value needs exactly what is returned."""
+    """Outstanding request keys, optionally only this channel's. The keys as
+    they are, which is also what every surface shows a human (#109) -- there is
+    no second, shorter form of an id to render or to type."""
     with _LOCK:
         retval = [
             k for k, v in list(_PENDING.items())

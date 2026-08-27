@@ -8,6 +8,18 @@ is the safe direction -- a stale approval is worse than being asked again.
 This module is ingest-agnostic: it holds the queue, and each ingest renders its
 own approval surface over it (Slack posts Approve/Deny buttons -- #50).
 
+An id is unique to this boot, not merely to this process's counter (#109). The
+counter alone restarts at 1, while an approval card is a Slack message that
+outlives the process and carries the id in its button value -- so after a
+restart an old card could name whatever request was handed 1 the next time
+round, and a human clicking Approve on what they read would release something
+else. That is the one property the gate exists to provide, and neither the
+channel scope nor the trust check catches it, since both are satisfied. So the
+key is `<boot nonce>-<n>` with a nonce drawn fresh at every start: a card from a
+previous boot matches nothing and is reported as no longer pending. The bare
+`<n>` stays what humans read and type; canonical() expands it against the
+current nonce, because a short id typed now can only mean this boot's request.
+
 Every read and write of the queue is under one lock (#103). Bolt serves mention
 handlers and button handlers on different threads, so surfacing cards, parking,
 acquiring and popping all overlap; unsynchronized, the cheapest symptom is a
@@ -31,19 +43,53 @@ run that bootstrap. A log file is durable in a way an approval card is not, so
 the one place that must not depend on who booted us is this one."""
 import itertools
 import logging
+import secrets
 import threading
 
 from . import redact
 
 _PENDING = {}
 _ids = itertools.count(1)
+# Drawn fresh on every start and mixed into every id (#109). Nothing persists
+# it, deliberately: the whole point is that a previous boot's ids resolve to
+# nothing rather than to whatever has since reused their number.
+_NONCE = secrets.token_hex(4)
 _MAX = 50
 _CLAIMING = {}  # request id -> the channel holding it
 _LOCK = threading.Lock()
 
 
+def canonical(key):
+    """The queue key for an id arriving from anywhere: a button value, a human
+    typing `approve 4`, a model relaying either.
+
+    A bare number is this boot's. It can only have been read off a card or a
+    message belonging to the queue that is still this one, so it takes the
+    current nonce. Anything already carrying a nonce is left as it is, which is
+    what makes a stale card resolve to nothing instead of to whichever request
+    inherited its number."""
+    k = str(key).strip().lstrip("#")
+    if k.isdigit():
+        k = f"{_NONCE}-{k}"
+    retval = k
+    return retval
+
+
+def short(key):
+    """What a human reads and types: the bare counter for one of this boot's
+    ids, and the whole string for anything else.
+
+    A foreign id has no short form, and inventing one would print an id that
+    means a different request now than it did on the card it came from -- which
+    is the confusion the nonce exists to end, reintroduced at the surface."""
+    k = str(key).strip().lstrip("#")
+    prefix = f"{_NONCE}-"
+    retval = k[len(prefix):] if k.startswith(prefix) else k
+    return retval
+
+
 def add(command, channel, reason):
-    key = str(next(_ids))
+    key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before
     # the delete: scrub() is fail-closed, and a raise after the insert would
     # leave a request parked that no caller ever got an id for -- an orphan
@@ -106,7 +152,7 @@ def pop(key, channel):
     KeyError out of a button handler -- so the request that a human approved is
     consumed by one path and reported as a crash by the other."""
     with _LOCK:
-        k = str(key)
+        k = canonical(key)
         req = _PENDING.get(k)
         if req is None or req.get("channel") != channel:
             return None
@@ -114,7 +160,7 @@ def pop(key, channel):
         # when the redactor cannot be loaded, and a raise between the delete and
         # the caller's execute() would consume the request without running it.
         # Failing here instead leaves it parked, which is the retryable direction.
-        logging.info("approvals: claimed [%s] in %s: %s", key, channel, repr(redact.scrub(req["command"])))
+        logging.info("approvals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(req["command"])))
         del _PENDING[k]
         retval = req
     return retval
@@ -136,7 +182,7 @@ def acquire(key, channel):
     Held until release(), which the caller owes in a finally. In-memory, so a
     restart clears it -- the same direction the queue itself takes."""
     with _LOCK:
-        k = str(key)
+        k = canonical(key)
         req = _PENDING.get(k)
         if req is None or req.get("channel") != channel or k in _CLAIMING:
             retval = None
@@ -158,12 +204,13 @@ def status(key, channel):
     "held" is asked first because the queue goes quiet in the middle of a
     click: the approve path pops the request and only then runs the command, so
     for the entire duration of the run _PENDING says nothing and the hold is
-    the only thing that knows (#103). Channel-scoped throughout: request ids
-    are a process counter that restarts at 1 and approval cards outlive the
-    process, so an id in one channel can name a live request in another (#107).
+    the only thing that knows (#103). Channel-scoped throughout, like pop and
+    peek: an id is unique per boot now (#109), so the scope is no longer what
+    keeps two channels' requests apart -- it is the separate guarantee that an
+    approval raised in one channel is answerable only there (#107).
     """
     with _LOCK:
-        k = str(key)
+        k = canonical(key)
         req = _PENDING.get(k)
         if req is not None and req.get("channel") != channel:
             req = None
@@ -179,7 +226,7 @@ def status(key, channel):
 def release(key):
     """Drop the hold acquire() took. Safe to call for a key never acquired."""
     with _LOCK:
-        _CLAIMING.pop(str(key), None)
+        _CLAIMING.pop(canonical(key), None)
 
 
 def peek(key, channel):
@@ -188,7 +235,7 @@ def peek(key, channel):
     saying which command it did not run (#94) -- needs this; popping there would
     be the very bug the refusal exists to prevent."""
     with _LOCK:
-        req = _PENDING.get(str(key))
+        req = _PENDING.get(canonical(key))
         if req is None or req.get("channel") != channel:
             retval = None
         else:
@@ -197,7 +244,9 @@ def peek(key, channel):
 
 
 def ids(channel=None):
-    """Outstanding request ids, optionally only this channel's."""
+    """Outstanding request keys, optionally only this channel's. Full keys, not
+    the short form: a caller that renders them for a human owes short(), and a
+    caller that puts one in a button value needs exactly what is returned."""
     with _LOCK:
         retval = [
             k for k, v in list(_PENDING.items())

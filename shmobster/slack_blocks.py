@@ -6,13 +6,20 @@ offline -- and rendering an approval card is exactly the kind of thing that
 needs a regression test, since it is one of the surfaces a credential can reach
 (#72). Separate from `approvals` because that module is deliberately
 ingest-agnostic: it owns the queue, each ingest renders its own surface."""
-from . import redact
+from . import approvals, redact
 
 
 def approval(req_id, req):
     """Approve/Deny buttons for one parked command (#50). The command goes in a
     code block so a long one stays readable; the request id rides in the button
-    value, which is what the action handler acts on."""
+    value, which is what the action handler acts on.
+
+    The two ids differ on purpose (#109). The button carries the full key,
+    because this card is a Slack message that outlives the process and a click
+    on it after a restart must resolve to nothing rather than to whichever
+    request inherited its number. The text shows the short one, because that is
+    what a human types when the buttons are not available."""
+    short_id = approvals.short(req_id)
     retval = [
         {
             "type": "section",
@@ -21,7 +28,7 @@ def approval(req_id, req):
                 # Scrubbed here, not only in the fallback `text`: the command
                 # is rendered twice and a credential rides argv routinely (#72).
                 "text": redact.scrub(
-                    f":lock: *Needs approval* [{req_id}] ({req['reason']})\n"
+                    f":lock: *Needs approval* [{short_id}] ({req['reason']})\n"
                     f"```{req['command']}```"
                 ),
             },
@@ -67,7 +74,8 @@ def claimed(action_id, req_id, user_id, req):
     The command stays visible, because this replaces the only place it is
     shown and the operator still wants to read it while it runs.
     """
-    text = f":hourglass_flowing_sand: *{_CLAIMED_VERB.get(action_id, 'Working on')}* [{req_id}] -- <@{user_id}>"
+    text = (f":hourglass_flowing_sand: *{_CLAIMED_VERB.get(action_id, 'Working on')}* "
+            f"[{approvals.short(req_id)}] -- <@{user_id}>")
     if req:
         # Scrubbed for the reason approval() gives: a credential rides argv.
         text += "\n" + redact.scrub(f"```{req['command']}```")

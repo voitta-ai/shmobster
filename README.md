@@ -205,6 +205,18 @@ re-clicked. Talking works too -- `@agent approve 3` calls the same
 `approve_command` tool -- which is the fallback when the buttons aren't
 available.
 
+The `[3]` on the card is short so it can be typed, and the id underneath it is
+unique per boot so it cannot be confused (#109). The visible counter restarts at
+1 every time the process starts; the value the button carries, and the key the
+queue uses, also carries a nonce drawn fresh at each start. A card is a Slack
+message and outlives the process -- and restarts are routine, since the #66
+watchdog exits on a wedged socket and the supervisor brings it straight back --
+so without that, an old card clicked after a restart would release whichever
+command had since inherited its number. The human approves what the card shows
+them and something else runs, with both the channel scope and the trust check
+satisfied. A click on a card from a previous boot now matches nothing and is
+answered with "no longer pending in this channel".
+
 The click is authorized by the Slack user id on the interaction, never by
 anything the model says, so the agent cannot approve its own request. A
 non-trusted click is refused loudly and tags the trusted users, same as

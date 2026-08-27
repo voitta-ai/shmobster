@@ -50,10 +50,14 @@ def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command)
     if decision != "safe":
         req_id = approvals.add(command, channel, reason)
+        # The short form here, not the queue key: this text is what a human
+        # reads and types back as `approve 4`, and approvals.canonical() puts
+        # the boot nonce back on before any lookup (#109).
+        short_id = approvals.short(req_id)
         retval = (
-            f"NOT RUN -- pending approval [{req_id}] ({reason}): {command}\n"
+            f"NOT RUN -- pending approval [{short_id}] ({reason}): {command}\n"
             f"Tell the user: a trusted user can approve it by asking you to "
-            f"approve request {req_id} (approve_command). Do not retry the "
+            f"approve request {short_id} (approve_command). Do not retry the "
             f"command; it will run on approval."
         )
         return retval

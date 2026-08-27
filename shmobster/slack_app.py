@@ -75,7 +75,7 @@ def _post_pending(client, channel, thread_ts):
                 thread_ts=thread_ts,
                 # A parked command is echoed verbatim, and a credential rides
                 # command lines routinely -- that is the YOLT lesson (#72).
-                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
+                text=redact.scrub(f"Needs approval [{approvals.short(req_id)}]: {req['command']}"),
                 blocks=slack_blocks.approval(req_id, req),
             )
         except Exception:
@@ -124,7 +124,7 @@ def _resolve(ack, body, client, action, run):
         try:
             client.chat_postMessage(
                 channel=channel, thread_ts=thread_ts,
-                text=f":information_source: [{req_id}] is not pending here -- nothing to act on.",
+                text=f":information_source: [{approvals.short(req_id)}] is not pending here -- nothing to act on.",
             )
         except Exception:
             logging.exception("could not report a stale approval click")
@@ -138,7 +138,7 @@ def _resolve(ack, body, client, action, run):
             client.chat_update(
                 channel=channel,
                 ts=message_ts,
-                text=f"Working on [{req_id}] for <@{ctx['user_id']}>",
+                text=f"Working on [{approvals.short(req_id)}] for <@{ctx['user_id']}>",
                 blocks=slack_blocks.claimed(action.get("action_id"), req_id, ctx["user_id"], req),
             )
         except Exception:

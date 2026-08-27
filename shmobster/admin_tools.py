@@ -84,9 +84,9 @@ def deny(request_id, ctx):
         retval = _refuse(ctx, "deny a mutating command")
         return retval
     channel = ctx.get("channel")
-    req = approvals.pop(str(request_id).lstrip("#"), channel)
+    req = approvals.pop(request_id, channel)
     if req is None:
-        retval = f"no pending request '{request_id}' in this channel."
+        retval = f"no pending request '{approvals.short(request_id)}' in this channel."
         return retval
     retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
     return retval
@@ -151,10 +151,11 @@ def _alerted(request_id, channel, user_id):
     swallow the second click by accident; this does it on purpose. In-memory
     and capped, like the queue it shadows.
 
-    Keyed by channel too (#107): ids are a process counter that restarts at 1
-    and cards outlive the process, so without it a stale click on [1] in one
-    channel silences the alert for a live [1] in another -- hiding exactly the
-    unauthorized click trusted users are meant to hear about."""
+    Keyed by channel too (#107), and on the boot-unique queue key rather than
+    the short id (#109): without either, a stale click on [1] silences the
+    alert for a live [1] -- in another channel, or after a restart in the same
+    one -- hiding exactly the unauthorized click trusted users are meant to
+    hear about."""
     retval = (str(request_id), channel, user_id) in _CLICK_ALERTED
     return retval
 
@@ -185,10 +186,17 @@ def refuse_click(request_id, ctx, action_id):
     user_id = ctx.get("user_id")
     who = f"<@{user_id}>"
     channel = ctx.get("channel")
-    if _alerted(request_id, channel, user_id):
+    # The queue key for the dedupe and the lookup, the short form for what the
+    # alert says (#109). A button value carries the boot nonce and a typed id
+    # does not, so keying the dedupe on the raw string would let one user's two
+    # routes to the same request each spend an alert -- and, worse, would let a
+    # previous boot's [4] and this boot's [4] share one.
+    key = approvals.canonical(request_id)
+    label_id = approvals.short(request_id)
+    if _alerted(key, channel, user_id):
         retval = "REFUSED: requester is not a trusted user. Trusted users have already been notified."
         return retval
-    _state, req = approvals.status(str(request_id).lstrip("#"), channel)
+    _state, req = approvals.status(key, channel)
     if _state == "held":
         # Asked FIRST, because the queue goes quiet in the middle of this: a
         # trusted click acquires the request, rewrites the card to the claimed
@@ -199,7 +207,7 @@ def refuse_click(request_id, ctx, action_id):
         # buttons that are no longer there; calling it gone is worse still,
         # since the command is executing as the message is written.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
+            f":warning: {who} clicked *{label}* on request [{label_id}], but only "
             f"trusted users may act on a parked command -- nothing ran. A trusted "
             f"user is already acting on it. {_trusted_tags()} for visibility."
         )
@@ -210,7 +218,7 @@ def refuse_click(request_id, ctx, action_id):
         # restart. Saying "still parked" here would be the same kind of
         # confident falsehood this whole change exists to stop telling.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{request_id}], which is "
+            f":warning: {who} clicked *{label}* on request [{label_id}], which is "
             f"no longer pending in this channel -- nothing ran. Only trusted users "
             f"may act on a parked command. {_trusted_tags()} for visibility."
         )
@@ -221,7 +229,7 @@ def refuse_click(request_id, ctx, action_id):
         # -- which sent one straight to asking the agent to re-raise a request
         # that was sitting right there, still clickable.
         alert = (
-            f":warning: {who} clicked *{label}* on request [{request_id}], but only "
+            f":warning: {who} clicked *{label}* on request [{label_id}], but only "
             f"trusted users may act on a parked command -- nothing ran. The request "
             f"is still parked and the *Approve* / *Deny* buttons on the card above "
             f"are still live, so {_trusted_tags()} can act on it there."
@@ -230,7 +238,7 @@ def refuse_click(request_id, ctx, action_id):
             "\n" + redact.scrub(f"```{req['command']}```")
         )
     if _post_alert(ctx, alert):
-        _mark_alerted(request_id, channel, user_id)
+        _mark_alerted(key, channel, user_id)
     retval = _REFUSED
     return retval
 
@@ -249,12 +257,14 @@ def _reload_skills():
 
 def _approve_command(args, ctx):
     channel = ctx.get("channel")
-    req_id = str(args.get("request_id", "")).lstrip("#")
+    req_id = args.get("request_id", "")
     req = approvals.pop(req_id, channel)
     if req is None:
-        outstanding = approvals.ids(channel) or ["(none)"]
+        # Short ids throughout, because this text goes back to the model to
+        # relay and then to a human to type (#109).
+        outstanding = [approvals.short(k) for k in approvals.ids(channel)] or ["(none)"]
         return (
-            f"no pending request '{req_id}' in this channel. "
+            f"no pending request '{approvals.short(req_id)}' in this channel. "
             f"Outstanding here: {', '.join(outstanding)}"
         )
     policy = policy_mod.resolve(channel)

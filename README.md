@@ -282,10 +282,29 @@ is pinned to non-verbose + WARNING so it can't dump request params (which carry
 for why that matters.
 
 **macOS launchd caveat:** launchd does **not** read `~/.bash_profile`, so a
-service-run shmobster won't see your shell's exports. Put the vars in the
-launchctl environment (`launchctl setenv VAR value`, or osx-env-sync, which syncs
-`~/.bash_profile` -> launchctl) or in the plist's `EnvironmentVariables`.
-Otherwise `${VAR}` expansion fails loudly at boot.
+service-run shmobster won't see your shell's exports and `${VAR}` expansion fails
+loudly at boot. Put the vars in the launchctl environment (`launchctl setenv VAR
+value`, or a sync tool such as osx-env-sync) or in the plist's
+`EnvironmentVariables`. Three things about that are easy to get wrong, and each
+one looks like a missing variable:
+
+- **A running service does not see a later `setenv`.** Its environment is a
+  snapshot taken when the service was bootstrapped, and `launchctl kickstart -k`
+  (what `deploy/service.sh restart` uses) reuses the loaded definition. A new
+  variable needs `bootout` + `bootstrap` -- `deploy/service.sh update` -- before
+  the process can see it. Check what the service actually has:
+
+      launchctl print gui/$(id -u)/ai.shmobster.agent | sed -n '/environment/,/}/p'
+
+- **`launchctl getenv` exits 0 whether or not the variable is set**, so
+  `getenv X && echo present` always says present. Measure the output instead:
+  `launchctl getenv X | wc -c` -- 0 bytes means unset.
+
+- **A sync tool that greps `^export` out of one profile misses sourced files.**
+  If `~/.bash_profile` does `. ~/.bash_profile_extra.sh`, a text scan never sees
+  what that file defines, and those variables silently never sync. Compare
+  `grep -c '^export' ~/.bash_profile` against `bash -lc 'compgen -e' | wc -l`; if
+  they differ, deriving the list from the live login environment is the fix.
 - `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones

@@ -24,8 +24,9 @@ fallback for when the buttons are not available -- so a bare `<n>` completed
 into "this boot's <n>" would walk straight back into the same failure by the
 typed route, the human reading one command while another one runs. A bare number
 therefore resolves to nothing: what a human types is the id exactly as the card
-shows it, and one from a dead boot is answered with the ids that really are
-outstanding.
+shows it. An id that resolves to nothing is answered with how many requests are
+parked, never with which -- that answer goes back into the model's tool loop,
+where a live id is an id it can approve without a human ever having quoted it.
 
 Every read and write of the queue is under one lock (#103). Bolt serves mention
 handlers and button handlers on different threads, so surfacing cards, parking,

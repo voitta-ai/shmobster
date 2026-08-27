@@ -217,9 +217,12 @@ satisfied.
 The nonce is on the id the card *prints*, not only on the value its button
 carries, because a card that has gone stale still shows its number and still
 invites someone to type it. Both routes have to fail, so a bare `approve 3` is
-not completed into this boot's request 3 -- it is answered with the ids that are
-actually outstanding. Quote the id exactly as the card shows it; one from a dead
-boot resolves to nothing, and says so.
+not completed into this boot's request 3 -- it resolves to nothing, and says so.
+
+The refusal says how many requests are parked here, never which. That reply is
+another turn in the model's tool loop, so an id in it is an id the agent can
+approve on its own initiative, for a command no human quoted -- the same
+boundary from the other side. The id lives on the card, where the human is.
 
 The click is authorized by the Slack user id on the interaction, never by
 anything the model says, so the agent cannot approve its own request. A

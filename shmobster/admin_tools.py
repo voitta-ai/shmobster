@@ -257,15 +257,22 @@ def _approve_command(args, ctx):
     req_id = approvals.canonical(args.get("request_id", ""))
     req = approvals.pop(req_id, channel)
     if req is None:
-        # The outstanding ids come back with the answer, because the likeliest
-        # way to get here is quoting an id off a card from before a restart
-        # (#109) -- and without them "no pending request" reads as the request
-        # having been consumed rather than as a stale id.
-        outstanding = approvals.ids(channel) or ["(none)"]
-        return (
-            f"no pending request '{req_id}' in this channel. "
-            f"Outstanding here: {', '.join(outstanding)}"
+        # How many are parked, never which (#109). The likeliest way to reach
+        # here is a trusted user quoting an id off a card from before a restart,
+        # and this answer goes back into the tool loop as another turn the model
+        # may act on -- so listing the live ids hands it an approvable id the
+        # human never named, and "helpfully" retrying with one runs a command
+        # nobody quoted. The count still says the queue is not empty, which is
+        # what stops "no pending request" reading as "your request was
+        # consumed" (#107); the id itself is on the card, where the human is.
+        parked = len(approvals.ids(channel))
+        also = f" {parked} other request(s) are parked here." if parked else ""
+        retval = (
+            f"no pending request '{req_id}' in this channel.{also} Do not guess "
+            f"another id: ask the user to quote the id from the card they mean, "
+            f"or to use its Approve button."
         )
+        return retval
     policy = policy_mod.resolve(channel)
     out = tools.execute(req["command"], policy)
     return f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"

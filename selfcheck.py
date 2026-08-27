@@ -571,12 +571,16 @@ assert admin_tools.dispatch(
 ).startswith("no pending request"), "typing the short number must not approve anything"
 assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None}) \
     .startswith("no pending request"), "nor deny anything"
-# the refusal hands back what IS outstanding, since quoting a dead id is the
-# likeliest way to get here
-assert _after in admin_tools.dispatch(
+# the refusal says the queue is not empty without naming what is in it: this
+# answer goes back into the tool loop, and a live id there is an approvable id
+# the human never quoted (#109)
+_stale = admin_tools.dispatch(
     "approve_command", {"request_id": _card_value},
     {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
-), "a stale id is answered with the live ones"
+)
+assert _after not in _stale, "a stale id must not be answered with the live ones"
+assert "1 other request(s) are parked here" in _stale, _stale
+assert "Do not guess" in _stale, _stale
 assert approvals.peek(_after, "C_BOOT")["command"] == "echo different_command", \
     "and the live request is left parked"
 approvals.pop(_after, "C_BOOT")

@@ -12,6 +12,10 @@
       "exclude": [
         "~/g/OneDrive"
       ],
+      "allow_read": [
+        "~/.ssh"
+      ],
+      "allow_write": [],
       "env": {
         "VERCEL_TOKEN": "${VERCEL_TOKEN}",
         "HEROKU_API_KEY": "${HEROKU_API_KEY}"

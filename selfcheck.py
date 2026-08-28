@@ -38,7 +38,7 @@ for _var in (
 
 import litellm  # noqa: E402
 
-from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, redact, skills, slack_blocks, slack_tools, spine, state, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, policy, redact, sandbox, skills, slack_blocks, slack_tools, spine, state, tools, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
 # config points at a placeholder path (CI has no yolt checkout). Stand up a stub
@@ -62,6 +62,15 @@ with open(os.path.join(_yolt_dir, "secret_redact.py"), "w") as _f:
 _REAL_COMPLETE = llm.complete
 _REAL_YOLT = config.YOLT_CLASSIFIER
 config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
+# The sandbox (#116) is macOS sandbox-exec and fails closed without it, which
+# on ubuntu CI would fail every exec below for a reason unrelated to what the
+# section checks. Stub the wrapper there to a bare shell; section 22 still
+# asserts profile generation everywhere and the real confinement on a mac.
+import shutil  # noqa: E402
+_REAL_WRAP = sandbox.wrap
+_HAVE_SANDBOX = bool(shutil.which("sandbox-exec"))
+if not _HAVE_SANDBOX:
+    sandbox.wrap = lambda command, pol: ["/bin/sh", "-c", command]
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == [
@@ -1085,5 +1094,69 @@ assert sum(1 for cb in litellm.callbacks if isinstance(cb, llm._BudgetWatch)) ==
 
 state.put("parked_vendors", {})
 llm._invalidate()
+
+# 22) sandbox (#116): every command is confined to the channel's tree. The
+# profile is pure text and is checked everywhere; the kernel's answer is checked
+# where the kernel is macOS.
+_sb_root = tempfile.mkdtemp()
+_sb_tree = os.path.join(_sb_root, "tree")
+os.makedirs(os.path.join(_sb_tree, "secret"))
+with open(os.path.join(_sb_tree, "secret", "x"), "w") as _f:
+    _f.write("hidden\n")
+_sb_pol = {"cwd": _sb_tree, "exclude": [os.path.join(_sb_tree, "secret")]}
+_prof = sandbox.profile(_sb_pol)
+_real_tree = os.path.realpath(_sb_tree)
+_home = os.path.realpath(os.path.expanduser("~"))
+assert _prof.startswith("(version 1)\n(allow default)\n(deny file-write*)\n"), _prof
+assert f'(subpath "{_real_tree}")' in _prof, _prof
+assert f'(subpath "{_real_tree}.worktrees")' in _prof, "the sibling worktrees dir is part of the tree"
+assert '(deny file-read* (subpath "/Users") (subpath "/Volumes"))' in _prof, _prof
+# excludes are the last rule, so they win over every allow above them
+assert _prof.rstrip().splitlines()[-1].startswith("(deny file-read* file-write* "), _prof
+assert f'(subpath "{_real_tree}/secret")' in _prof.rstrip().splitlines()[-1], _prof
+# a relative exclude is the channel cwd's, not the process's
+_rel = sandbox.profile({"cwd": _sb_tree, "exclude": ["secret"]}).rstrip().splitlines()[-1]
+assert f'(subpath "{_real_tree}/secret")' in _rel, _rel
+# ~/.ssh is readable only where the channel's own policy says so -- another
+# channel's profile never carries it
+assert '.ssh' not in _prof, _prof
+_ssh = sandbox.profile({"cwd": _sb_tree, "allow_read": ["~/.ssh"]})
+assert f'(subpath "{_home}/.ssh")' in _ssh, _ssh
+assert '.ssh' not in sandbox.profile({"cwd": _sb_tree}), "an allowance is per channel"
+# allow_write grants read too, and a relative entry is under cwd
+_aw = sandbox.profile({"cwd": _sb_tree, "allow_write": ["scratch"]})
+assert _aw.count(f'(subpath "{_real_tree}/scratch")') == 2, _aw
+# a quote in a path cannot break out of the profile's string literal
+assert sandbox._quote('/a/b"c') == '"/a/b\\"c"'
+# no sandbox-exec -> no run, never an unconfined fallback
+_real_which = shutil.which
+shutil.which = lambda name: None
+try:
+    _REAL_WRAP("echo x", _sb_pol)
+    raise AssertionError("wrap must refuse without sandbox-exec")
+except RuntimeError as _exc:
+    assert "refusing to run unconfined" in str(_exc), _exc
+finally:
+    shutil.which = _real_which
+if _HAVE_SANDBOX:
+    _sb_run = lambda cmd: tools.execute(cmd, _sb_pol)  # noqa: E731
+    assert "in-tree" in _sb_run("echo in-tree > f && cat f"), "a write inside the tree"
+    assert "Operation not permitted" in _sb_run(f"touch {_home}/.shmobster_selfcheck_probe"), "a write outside"
+    assert not os.path.exists(os.path.join(_home, ".shmobster_selfcheck_probe"))
+    os.symlink(_home, os.path.join(_sb_tree, "link"))
+    assert "Operation not permitted" in _sb_run("touch link/.shmobster_selfcheck_probe"), "a symlink out of the tree"
+    assert "Operation not permitted" in _sb_run(f"ls {_home}"), "$HOME is not readable"
+    assert "Operation not permitted" in _sb_run("ls /Users/Shared"), "nor another home"
+    assert "Operation not permitted" in _sb_run("ls /Volumes"), "nor a mounted drive"
+    _rel_out = tools.execute("d=secret; cat $d/x", {"cwd": _sb_tree, "exclude": ["secret"]})
+    assert "hidden" not in _rel_out and "Operation not permitted" in _rel_out, _rel_out
+    # the textual guard (#55) already blocks `cat secret/x`; this is the case
+    # its docstring concedes -- a path the shell resolves at runtime
+    _ex = _sb_run("d=secret; cat $d/x")
+    assert "hidden" not in _ex and "Operation not permitted" in _ex, _ex
+    assert "git version" in _sb_run("git --version"), "the toolchain still runs"
+    _wt = os.path.join(_sb_root, "tree.worktrees", "b")
+    os.makedirs(_wt)
+    assert "sibling" in _sb_run(f"echo sibling > {_wt}/f && cat {_wt}/f"), "the worktrees sibling is writable"
 
 print(f"selfcheck OK -- shmobster {_b}")

@@ -12,9 +12,11 @@ that knows the channel's tree.
 A YOLT-unsafe command is granted when EVERY segment is one of:
 
 - YOLT-safe on its own (`cd`, `diff`, `git status`, `git log`, ...);
-- a filesystem verb (cp, mv, mkdir, touch, tee, ln, chmod, sed) -- sound
-  only because the sandbox (#116) confines the write to the tree at the
-  kernel; without it this module must not grant;
+- a filesystem verb (cp, mv, mkdir, touch, tee, ln, chmod, sed) -- granted
+  on the verb, not the operands, so the boundary is exactly the sandbox's
+  write roots (#116): the tree, its worktrees sibling, the temp dir and the
+  toolchain caches. A write to /tmp runs without a card; a write anywhere
+  else fails in the kernel. Without the sandbox this module must not grant;
 - a local git write: `git add`, `git mv`, `git stash`, `git checkout -b`,
   `git switch -c`, and `git commit` when the tracked directory is a linked
   worktree on a non-default branch whose commits are all the user's own
@@ -178,12 +180,12 @@ class _Walker:
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")
-        # The allowlisted verbs are granted on the verb alone, so an argument
-        # that runs something (`cp $(rm -rf x) b`) must not ride along; YOLT
-        # only sees the segments below that fall through to it.
-        if verb in FS_VERBS or verb == "git":
-            if not all(_static(a) or _no_substitution(a) for a in args):
-                return (False, f"{verb}: command substitution in arguments")
+        # Nothing granted here may carry an argument that runs something:
+        # `cp $(rm -rf x) b`, `cd $(curl ... | sh)`. The allowlisted verbs
+        # and `cd` are judged on the verb alone, and YOLT only sees the
+        # segments that fall through to it, so the check is unconditional.
+        if not all(_no_substitution(a) for a in args):
+            return (False, f"{verb}: command substitution in arguments")
         if verb == "cd":
             retval = self.cd(args)
         elif verb in FS_VERBS:
@@ -251,9 +253,11 @@ class _Walker:
             i += 1
         if sub in GIT_LOCAL:
             retval = (True, f"git {sub}: local")
-        elif sub == "checkout" and any(w in ("-b", "-B") for w in rest if w):
+        # Lowercase only: -B / -C reset an existing branch to HEAD, which is
+        # a rewrite, not a creation.
+        elif sub == "checkout" and "-b" in rest:
             retval = (True, "git checkout -b: new branch")
-        elif sub == "switch" and any(w in ("-c", "-C") for w in rest if w):
+        elif sub == "switch" and "-c" in rest:
             retval = (True, "git switch -c: new branch")
         elif sub == "commit":
             if directory is None:

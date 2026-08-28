@@ -279,7 +279,10 @@ A mutating command runs without a card when **every** segment is one of:
 
 - **YOLT-safe on its own** -- `cd`, `diff`, `git status`, `git log`.
 - **A filesystem verb** -- `cp`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod`,
-  `sed`. Sound only because the sandbox keeps the write in the tree.
+  `sed`. Granted on the verb, not the operands, so the boundary is exactly
+  the sandbox's write roots: the tree, its worktrees sibling, the temp dir,
+  the toolchain caches. A write to `/tmp` runs without a card; a write
+  anywhere else fails in the kernel.
 - **A local git write** -- `git add`, `git mv`, `git stash`, `git checkout -b`,
   `git switch -c`; and `git commit` when the directory is a *linked worktree*
   on a *non-default branch* whose commits so far are all yours (the three

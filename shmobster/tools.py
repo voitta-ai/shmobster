@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, grant, policy as policy_mod, redact, sandbox, yolt_gate
+from . import approvals, config, gitcfg, grant, policy as policy_mod, redact, sandbox, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -108,6 +108,9 @@ def execute(command, policy):
     # adjacency -- Bolt handles events concurrently, so two turns interleave.
     logging.info("run_shell: running: %s", safe_cmd)
     env = os.environ.copy()
+    # Git over https with gh's keychain token, so no channel ever needs to
+    # read ~/.ssh (gitcfg.py). Per process: the operator's config is untouched.
+    env.update(gitcfg.env())
     prof = policy.get("aws_profile")
     if prof:
         env["AWS_PROFILE"] = prof

@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, handler, identity, redact, skills, slack_blocks, watchdog
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, redact, sandbox, skills, slack_blocks, watchdog
 
 # asctime is not in the default format (#102). Without it the disposition log
 # (#97) records order but not time, and "how long did that take" / "did this run
@@ -280,6 +280,15 @@ def main():
             raise RuntimeError("no configured channel accepted the announcement")
 
     announce.check(_post)
+    # Git runs over https with gh's token in every channel (gitcfg.py). Say
+    # so now if this host cannot do that, instead of at the first push.
+    for warning in gitcfg.preflight():
+        logging.warning("git preflight: %s", warning)
+    if sandbox.gh_file_backed():
+        logging.warning(
+            "gh keeps its token in %s, not the keychain; the file is denied to every "
+            "channel, so gh runs unauthenticated there. Re-run `gh auth login` on a host "
+            "with a working keychain.", sandbox._GH_HOSTS)
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
     # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
     # the connection ourselves and exit when it stops hearing Slack.

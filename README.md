@@ -344,10 +344,19 @@ symlink, read of `$HOME`, `/Users/Shared` and `/Volumes` -- all `Operation not
 permitted`; `git`, `gh`, `node` run normally.
 
 Allowances are **per channel**, in the policy (`allow_read` / `allow_write`),
-never global. `~/.ssh` is the one you will hit first: a channel that pushes
-over ssh lists it in its own `allow_read`, and it is deliberately not a
-default, because a read-only `cat ~/.ssh/id_*` would auto-run without a card
--- in every channel, if the allowance were global.
+never global. The rule behind the built-in list: **a secret never enters a
+channel through a readable file** -- it comes from the keychain, an agent, or
+the channel's own `env`. So `~/.ssh` is never granted, and does not need to
+be: every channel's git talks to GitHub over https with `gh`'s keychain token,
+through four config entries injected into the command's environment
+(`GIT_CONFIG_KEY_n`, per process, your own `~/.gitconfig` and remotes
+untouched -- see `gitcfg.py`). A remote written as `git@github.com:` is used
+over https, and only `gh auth git-credential` is consulted, because the
+system-wide `osxkeychain` helper Homebrew configures hangs inside the sandbox
+on a keychain prompt. Verified: `git push` works with `~/.ssh` fully denied.
+The same rule is why `~/.aws` is not in the list: give an `aws_profile`
+channel its keys through `env` (`AWS_ACCESS_KEY_ID: "${...}"`), not a read of
+`~/.aws/credentials`, which holds every profile's keys.
 
 Fail closed: no `sandbox-exec`, no command -- never a fallback to running
 unconfined. Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST`
@@ -464,10 +473,11 @@ machine's channel layout is versioned separately from the token/key config:
     resolves at runtime. Omit for no exclusions.
   - `allow_read` / `allow_write` -- paths under `/Users` or `/Volumes` this
     channel's commands may reach beyond the tree and the built-in toolchain
-    allowlist (see **Sandbox**). `["~/.ssh"]` in `allow_read` is the one a
-    channel that pushes over ssh needs; it is per channel on purpose, so no
-    other channel's read-only `cat ~/.ssh/id_*` gets it. `allow_write` grants
-    read too. Relative entries resolve against `cwd`.
+    allowlist (see **Sandbox**), e.g. a data directory next to the project.
+    Not for credentials: a file a channel can read, a read-only `cat` posts
+    into Slack without a card. Git needs no `~/.ssh` (it runs over https),
+    and AWS keys belong in `env`. `allow_write` grants read too. Relative
+    entries resolve against `cwd`.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:
@@ -777,6 +787,22 @@ Then:
     deploy/service.sh status        # pid / state
     deploy/service.sh logs          # tail logs/shmobster.err.log
     deploy/service.sh uninstall     # stop + remove
+
+**Upgrading pulls three checkouts, not one.** shmobster reads two sibling
+repos at runtime -- voitta-yolt's classifier and redactor
+(`exec.yolt_classifier`) and the skills directories in `skills.paths` (skillz,
+and any private catalog) -- so the code that actually runs after a restart is
+whatever those checkouts hold, and a release note that says "needs yolt >=
+X" means their `git pull`, not this repo's. In that order:
+
+    git -C /path/to/voitta-yolt pull
+    git -C /path/to/skillz pull            # and each other skills.paths entry
+    git pull && .venv/bin/pip install -r requirements.txt
+    .venv/bin/python selfcheck.py
+    deploy/service.sh restart
+
+Same order for a reinstall on a fresh machine: yolt and skillz first, then
+this repo, then the config.
 
 The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
 `deploy/ai.shmobster.plist.sample` is the committed template. The plist sets

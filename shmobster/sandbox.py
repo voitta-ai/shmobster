@@ -21,10 +21,12 @@ per channel from its policy:
   toolchain lives there and is the same for every channel;
 - the policy's `exclude` paths are denied last, so they win.
 
-Allowances are per channel, in the policy, never global: a channel that
-pushes over ssh lists `~/.ssh` in its own `allow_read`, and no other channel
-can read it. Relative entries in `exclude`, `allow_read` and `allow_write`
-resolve against the channel cwd, the way policy._norm_path does.
+Allowances are per channel, in the policy, never global, and never for a
+credential: a file a channel can read, a read-only `cat` posts into Slack
+without a card. Secrets reach a channel through the keychain (gh), the
+channel's own `env`, or not at all -- git runs over https so ~/.ssh is never
+granted (gitcfg.py). Relative entries in `exclude`, `allow_read` and
+`allow_write` resolve against the channel cwd, the way policy._norm_path does.
 
 Seatbelt matches on the resolved vnode path, which is what makes symlinks
 unable to escape and why every path here goes through realpath first (`/tmp`
@@ -47,9 +49,9 @@ import tempfile
 from . import policy
 
 # Under $HOME, readable by default: what git and gh read on every invocation,
-# and the toolchain roots. ~/.ssh is deliberately absent -- a read-only
-# `cat ~/.ssh/id_*` would auto-run without a card. A channel that pushes over
-# ssh lists it in its own allow_read.
+# and the toolchain roots. Nothing here holds a secret: gh's token is in the
+# keychain (hosts.yml carries only the login), git never touches ~/.ssh
+# (gitcfg.py), and ~/.aws is absent because credentials there are file-borne.
 _HOME_READ = (
     "~/.gitconfig",
     "~/.gitignore_global",
@@ -79,6 +81,25 @@ _DENY_READ = (
     "/Users",
     "/Volumes",
 )
+
+# gh keeps its token in the keychain, and then hosts.yml holds only the
+# login. Where the keychain is unavailable gh writes the token into this
+# file instead -- and a read-only cat of it would post the token into Slack.
+# When that is the case the file is denied to every channel: gh is then
+# unauthenticated in the sandbox rather than a leak. Fixed by `gh auth login`
+# on a host with a working keychain.
+_GH_HOSTS = "~/.config/gh/hosts.yml"
+
+
+def gh_file_backed():
+    """True when gh's hosts.yml carries a token."""
+    retval = False
+    try:
+        with open(os.path.expanduser(_GH_HOSTS), "r") as f:
+            retval = "oauth_token:" in f.read()
+    except OSError:
+        retval = False
+    return retval
 
 
 def _real(path, base=None):
@@ -138,6 +159,8 @@ def profile(pol):
     writes, reads, deny = roots(pol)
     cwd = _real(policy.cwd_for(pol))
     excludes = [_real(p, cwd) for p in (pol.get("exclude") or [])]
+    if gh_file_backed():
+        excludes.append(_real(_GH_HOSTS))
     meta = set()
     for p in writes + reads:
         for root in deny:

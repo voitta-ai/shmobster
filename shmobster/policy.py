@@ -106,12 +106,13 @@ def _norm_path(p, base):
 
 
 def _check_exclude(command, policy):
-    """Best-effort guard against a command touching an excluded subtree (#55).
+    """Textual guard against a command touching an excluded subtree (#55).
 
-    NOTE: this is NOT a sandbox. cwd only sets the working dir; nothing stops an
-    absolute path elsewhere, a symlink, or a shell resolving paths at runtime.
-    This blocks the obvious textual cases (`cat ~/g/OneDrive/x`, `cd <excluded>`)
-    to raise the bar; real containment needs OS-level sandboxing (see README)."""
+    Not the containment -- that is the sandbox (#116, sandbox.py), which denies
+    the same paths in the kernel and so also catches a symlink or a path the
+    shell resolves at runtime. This runs first to block the obvious textual
+    cases (`cat ~/g/OneDrive/x`, `cd <excluded>`) with a reason the agent can
+    read, instead of a bare "Operation not permitted" from the shell."""
     excludes = policy.get("exclude") or []
     if not excludes:
         return (True, "")

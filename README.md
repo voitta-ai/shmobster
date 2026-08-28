@@ -14,6 +14,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Create the Slack app](#create-the-slack-app)
 - [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
+- [Sandbox (#116)](#sandbox-116)
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
 - [When a vendor runs out of budget (#80)](#when-a-vendor-runs-out-of-budget-80)
@@ -261,6 +262,47 @@ current [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) get i
 an older app needs **Interactivity & Shortcuts** -> toggle on -> reinstall.
 Over Socket Mode there is no request URL to fill in and no extra OAuth scope.
 
+## Sandbox (#116)
+
+Every command that runs -- read-only, approved, whichever -- runs under macOS
+`sandbox-exec`, confined to the channel's tree. Three gates, each on every
+command:
+
+- **Approval** -- *may this run at all* (YOLT verdict + trusted user).
+- **Channel policy** -- *is this in scope* (github repos, aws profile).
+- **Sandbox** -- *where may it reach*. A seatbelt profile built per channel
+  from its policy.
+
+What the profile says:
+
+- **Writes** only to the channel `cwd`, its sibling `<cwd>.worktrees/` (a branch
+  worktree lives next to the repo, not under it), the temp dir, `/dev`, and
+  three caches the toolchain fails without (`~/.npm`, `~/.cache`,
+  `~/Library/Caches`).
+- **Reads** anywhere outside `$HOME` (the toolchain lives in `/usr`,
+  `/opt/homebrew`, `/Library`). Under `$HOME`: the tree, those caches, and what
+  git and gh read on every call (`~/.gitconfig`, `~/.gitignore_global`,
+  `~/.config/gh`, `~/.nvm`, `~/.local`). Nothing else -- `ls ~` is
+  "Operation not permitted".
+- The policy's `exclude` paths are denied last, so they win over everything
+  above.
+
+Seatbelt decides on the resolved path, so a symlink inside the tree that points
+outside it is denied at the target, and a path the shell resolves at runtime
+(`d=../elsewhere; cat $d/x`) is caught where the textual `exclude` guard never
+could. Verified on Darwin 25: write outside the tree, write through an escaping
+symlink, read of `$HOME` -- all `Operation not permitted`; `git`, `gh`, `node`
+run normally.
+
+Per-machine additions go in `exec.sandbox` (see **Config & run**). `~/.ssh` is
+the one you will hit first: a channel that pushes over ssh needs it readable,
+and it is deliberately not a default, because a read-only `cat ~/.ssh/id_*`
+would auto-run without a card.
+
+Fail closed: no `sandbox-exec`, no command -- never a fallback to running
+unconfined. Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST`
+are external effects and stay behind the approval card.
+
 ## Config & run
 
 One JSON config, no `.env`. Copy the example and fill it in:
@@ -330,7 +372,10 @@ one looks like a missing variable:
   park for a trusted user's approval (see **Approving mutating commands**).
   `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
-  are in requirements.txt.)
+  are in requirements.txt.) `sandbox.read` / `sandbox.write`: paths under
+  `$HOME` this machine's tooling needs beyond the built-in allowlist (see
+  **Sandbox**), e.g. `"read": ["~/.ssh"]` for channels that push over ssh;
+  `write` grants read too.
 Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
 machine's channel layout is versioned separately from the token/key config:
 
@@ -365,13 +410,11 @@ machine's channel layout is versioned separately from the token/key config:
   - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
     overriding to another profile is blocked. Omit for no AWS.
   - `exclude` -- paths under `cwd` to keep off-limits, e.g.
-    `["~/g/OneDrive"]`. A command whose (expanded) tokens resolve under an
-    excluded path is blocked. **Best-effort only, not a sandbox:** `cwd` just
-    sets the working dir, so an absolute path elsewhere, a symlink, or a shell
-    resolving paths at runtime can still reach an excluded tree. It stops the
-    obvious textual cases (`cat ~/g/OneDrive/x`, `cd <excluded>`) to raise the
-    bar; true containment needs OS-level sandboxing (a separate, larger change).
-    Omit for no exclusions.
+    `["~/g/OneDrive"]`. Enforced twice: a command whose (expanded) tokens
+    resolve under an excluded path is blocked before it runs, with a reason
+    the agent can read; and the path is denied in the channel's sandbox
+    profile (#116), which is what catches a symlink or a path the shell
+    resolves at runtime. Omit for no exclusions.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:

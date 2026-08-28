@@ -104,6 +104,16 @@ YOLT_CLASSIFIER = _exec.get("yolt_classifier", "")
 EXEC_CWD = _exec.get("cwd", ".")
 EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 
+# Sandbox (#116): every command runs under sandbox-exec, confined to the
+# channel's tree. These are the operator's additions to the built-in
+# allowlists in sandbox.py -- paths under $HOME the tooling on this machine
+# needs beyond the defaults (e.g. "~/.ssh" for a channel that pushes over ssh,
+# which is deliberately not a default: a read-only `cat ~/.ssh/id_*` would
+# auto-run). `read` grants read; `write` grants read and write.
+_sandbox = _exec.get("sandbox", {})
+SANDBOX_READ = _sandbox.get("read", [])
+SANDBOX_WRITE = _sandbox.get("write", [])
+
 # Per-channel policy (Iter #4): channel_id -> {cwd, aws_profile, github_repos}.
 # Unlisted channels fall back to default_policy. This is the capability envelope
 # keyed by channel (where/what), distinct from who (multi-user, later).

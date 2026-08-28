@@ -10,12 +10,16 @@ Every disposition is logged (#97): ran, blocked by policy, or -- via approvals
 it try X and get blocked, or never try?" stayed unanswerable, which is the same
 question that made #94 take an hour. Commands are scrubbed at the emission site
 for the reason approvals gives: argv carries credentials and a log outlives the
-channel it was posted to."""
+channel it was posted to.
+
+Every command that does run, runs under sandbox-exec confined to the channel's
+tree (#116, sandbox.py): approval says whether, policy says what scope, the
+sandbox says where."""
 import logging
 import os
 import subprocess
 
-from . import approvals, config, policy as policy_mod, redact, yolt_gate
+from . import approvals, config, policy as policy_mod, redact, sandbox, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -104,9 +108,11 @@ def execute(command, policy):
     for _k, _v in (policy.get("env") or {}).items():
         env[_k] = _v
     try:
+        # Confined to the channel's tree at the kernel (#116). sandbox.wrap
+        # raises when the sandbox is unavailable; that lands in the except
+        # below as "exec error" -- never a fallback to running unconfined.
         proc = subprocess.run(
-            command,
-            shell=True,
+            sandbox.wrap(command, policy),
             capture_output=True,
             text=True,
             cwd=policy_mod.cwd_for(policy),
@@ -118,11 +124,17 @@ def execute(command, policy):
         if len(out) > _MAX_OUTPUT:
             out = out[:_MAX_OUTPUT] + "\n...[truncated]"
         retval = out.strip() or f"(exit {proc.returncode}, no output)"
+    except subprocess.TimeoutExpired as exc:
+        # Its str() is "Command '<argv>' timed out", and since #116 argv
+        # carries the whole seatbelt profile -- a screenful per line. The
+        # command is already on the line, scrubbed; keep only the fact.
+        logging.info("run_shell: failed (timed out after %ss): %s", exc.timeout, safe_cmd)
+        retval = f"exec error: timed out after {exc.timeout}s"
     except Exception as exc:
-        # The exception text is scrubbed too, not only the command: a
-        # TimeoutExpired renders as "Command '<cmd>' timed out after Ns", so the
-        # raw argv comes back around through the one field safe_cmd never
-        # covered. Same reason the return value below is scrubbed downstream.
+        # The exception text is scrubbed too, not only the command: an OSError
+        # can quote the argv, so the raw command comes back around through the
+        # one field safe_cmd never covered. Same reason the return value below
+        # is scrubbed downstream.
         logging.info("run_shell: failed (%s): %s", repr(redact.scrub(str(exc))), safe_cmd)
         retval = f"exec error: {exc}"
     return retval

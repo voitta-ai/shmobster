@@ -53,7 +53,11 @@
   "exec": {
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",
-    "timeout_sec": 30
+    "timeout_sec": 30,
+    "sandbox": {
+      "read": [],
+      "write": []
+    }
   },
   "max_tool_steps": 50,
   "warn_tool_steps": 40,

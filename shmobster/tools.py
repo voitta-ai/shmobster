@@ -2,8 +2,11 @@
 Iter #4, by the per-channel policy (cwd / aws_profile / github_repos).
 
 Read-only commands run in the channel's cwd (with its AWS_PROFILE) if they pass
-the channel's github/aws scope. A mutating command is parked as a pending
-approval request (#48) and runs only once a trusted user approves it by id.
+the channel's github/aws scope. So does a mutating command the grant layer
+(#117, grant.py) vouches for -- a write the sandbox keeps in the tree, a commit
+on the user's own worktree branch. Any other mutating command is parked as a
+pending approval request (#48) and runs only once a trusted user approves it
+by id.
 
 Every disposition is logged (#97): ran, blocked by policy, or -- via approvals
 -- parked. #94 gave the queue a record and left the other two silent, so "did
@@ -19,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, policy as policy_mod, redact, sandbox, yolt_gate
+from . import approvals, config, grant, policy as policy_mod, redact, sandbox, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -27,10 +30,13 @@ RUN_SHELL = {
         "name": "run_shell",
         "description": (
             "Run a shell command and return its output. Read-only commands run "
-            "immediately; a mutating command is parked with a request id and runs "
-            "only after a trusted user approves it (approve_command) -- relay that "
-            "id to the user instead of retrying; commands outside this channel's "
-            "scope are blocked. Prefer read-only inspection."
+            "immediately, and so do writes inside this channel's tree (cp, mv, "
+            "mkdir, tee, cat > file, sed -i, git add, git commit on your own "
+            "worktree branch). Any other mutating command is parked with a "
+            "request id and runs only after a trusted user approves it "
+            "(approve_command) -- relay that id to the user instead of retrying; "
+            "commands outside this channel's scope are blocked. Prefer read-only "
+            "inspection."
         ),
         "parameters": {
             "type": "object",
@@ -53,6 +59,17 @@ _MAX_OUTPUT = 4000
 def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command)
     if decision != "safe":
+        # Not every mutation needs a human (#117): a write the sandbox keeps
+        # in the tree, or a commit on the user's own worktree branch, runs on
+        # the grant layer's say-so. Logged with its grounds, like a park.
+        granted, why = grant.check(command, policy)
+        if granted:
+            logging.info(
+                "run_shell: granted in %s (%s): %s",
+                channel, repr(redact.scrub(why)), repr(redact.scrub(command)),
+            )
+            retval = execute(command, policy)
+            return retval
         req_id = approvals.add(command, channel, reason)
         # The whole id, nonce and all (#109). It is what a human types back, and
         # a shortened one would mean a different request after the next restart

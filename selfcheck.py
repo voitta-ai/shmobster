@@ -1159,4 +1159,85 @@ if _HAVE_SANDBOX:
     os.makedirs(_wt)
     assert "sibling" in _sb_run(f"echo sibling > {_wt}/f && cat {_wt}/f"), "the worktrees sibling is writable"
 
+# 23) grant layer (#117): in-tree writes and self-authored worktree commits run
+# without a card; everything else still parks. Real git, real repo shape:
+# a primary checkout on master and a linked worktree on a branch.
+from shmobster import grant  # noqa: E402
+import subprocess  # noqa: E402
+_g_root = tempfile.mkdtemp()
+_g_primary = os.path.join(_g_root, "repo")
+_g_wt = os.path.join(_g_root, "repo.worktrees", "feat")
+_git = lambda *a, **k: subprocess.run(["git", "-C", k.get("cwd", _g_primary), *a], check=True, capture_output=True, env={**os.environ, **k.get("env", {})})  # noqa: E731
+os.makedirs(_g_primary)
+_git("init", "-q", "-b", "master")
+_git("config", "user.email", "me@example.com")
+_git("config", "user.name", "me")
+with open(os.path.join(_g_primary, "README"), "w") as _f:
+    _f.write("x\n")
+_git("add", "README")
+_git("commit", "-q", "-m", "init")
+_git("worktree", "add", "-q", "-b", "feat", _g_wt)
+_g_pol = {"cwd": _g_primary}
+# YOLT stubbed by verb: the grant layer asks it about the segments it does not
+# vouch for itself, so `diff` and `git status` come back safe, `rm` does not
+yolt_gate.classify = lambda cmd: (("safe", "read-only") if cmd.split()[0] in ("cd", "diff", "ls", "cat", "echo") or cmd.startswith(("git status", "git log")) else ("unsafe", cmd.split()[0] + ": mutating"))
+_ok, _why = grant.check(f"cd {_g_wt} && cp README copy && diff -q README copy; git add copy && git status --short && git commit -m 'c'", _g_pol)
+assert _ok, _why
+assert "git commit: linked worktree on feat, solo author" in _why, _why
+_ok, _why = grant.check("git commit -m x", _g_pol)
+assert not _ok and "primary checkout" in _why, _why
+_ok, _why = grant.check(f"git -C {_g_wt} commit -m x", _g_pol)
+assert _ok, "-C retargets the probe: " + _why
+_ok, _why = grant.check('cd "$DIR" && git commit -m x', _g_pol)
+assert not _ok and "not statically known" in _why, _why
+# a commit by someone else on the branch ends the grant
+with open(os.path.join(_g_wt, "theirs"), "w") as _f:
+    _f.write("y\n")
+_git("add", "theirs", cwd=_g_wt)
+_git("commit", "-q", "-m", "theirs", cwd=_g_wt, env={"GIT_AUTHOR_EMAIL": "other@example.com", "GIT_COMMITTER_EMAIL": "other@example.com"})
+_ok, _why = grant.check(f"cd {_g_wt} && git commit -m x", _g_pol)
+assert not _ok and "other@example.com" in _why, _why
+# the allowlist, from both sides
+for _cmd, _frag in (
+    ("cat > f <<'EOF'\nhi\nEOF", None),
+    ("mkdir -p out && ls | tee out/l 2>/dev/null", None),
+    ("git checkout -b x && git switch -c y && git add -A && git stash", None),
+    ('cp "$SRC" dst', None),
+    ("rm -rf out", "rm: mutating"),
+    ("git reset --hard", "git reset: not a local write"),
+    ("git push", "git push: not a local write"),
+    ("sudo cp a b", "sudo: mutating"),
+    ("FOO=1 cp a b", "prefix"),
+    ("(cd x && cp a b)", "subshell"),
+    ("cp $(rm -rf x) b", "command substitution"),
+    ("git commit -m \"$(cat msg)\"", "command substitution"),
+    ("echo hi > /dev/tcp/h/1", "redirect to device"),
+    ('git commit -m "unterminated', "does not parse"),
+    ("", "empty"),
+):
+    _ok, _why = grant.check(_cmd, _g_pol)
+    if _frag is None:
+        assert _ok, f"{_cmd!r} should be granted: {_why}"
+    else:
+        assert not _ok and _frag in _why, f"{_cmd!r}: {_why}"
+# through run_shell: a granted write runs and is logged with its grounds;
+# a refused one parks exactly as before
+_g_log = []
+class _Grab(logging.Handler):
+    def emit(self, record):
+        _g_log.append(record.getMessage())
+_grab = _Grab()
+_g_level = logging.getLogger().level
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().addHandler(_grab)
+_out = tools.run_shell("cp README granted_copy", _g_pol, "C1")
+assert not _out.startswith("NOT RUN"), _out
+assert os.path.exists(os.path.join(_g_primary, "granted_copy")), "the granted command ran"
+assert any(m.startswith("run_shell: granted in C1 ('cp: in-tree write')") for m in _g_log), _g_log
+_out = tools.run_shell("rm -rf granted_copy", _g_pol, "C1")
+assert _out.startswith("NOT RUN"), _out
+assert os.path.exists(os.path.join(_g_primary, "granted_copy")), "a refused command did not run"
+logging.getLogger().removeHandler(_grab)
+logging.getLogger().setLevel(_g_level)
+
 print(f"selfcheck OK -- shmobster {_b}")

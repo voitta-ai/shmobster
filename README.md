@@ -14,6 +14,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Create the Slack app](#create-the-slack-app)
 - [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
+- [What does not need a card (#117)](#what-does-not-need-a-card-117)
 - [Sandbox (#116)](#sandbox-116)
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
@@ -261,6 +262,49 @@ Buttons need **Interactivity** enabled on the Slack app. Apps created from the
 current [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) get it;
 an older app needs **Interactivity & Shortcuts** -> toggle on -> reinstall.
 Over Socket Mode there is no request URL to fill in and no extra OAuth scope.
+
+### What does not need a card (#117)
+
+YOLT answers *does this mutate anything*, and every yes used to park --
+including `cp x app/index.html && git add ... && git commit ...` inside the
+channel's own worktree, the work the channel exists for. Saying "proceed" in
+the thread does not help; approval is a separate gate. That relief cannot come
+from YOLT: it is being narrowed to deny-only
+([voitta-yolt#98](https://github.com/voitta-ai/voitta-yolt/issues/98)), and its
+reasons are about Claude Code as host, which has a classifier in front of it.
+shmobster does not, so the grant lives here, next to the only party that knows
+the channel's tree.
+
+A mutating command runs without a card when **every** segment is one of:
+
+- **YOLT-safe on its own** -- `cd`, `diff`, `git status`, `git log`.
+- **A filesystem verb** -- `cp`, `mv`, `mkdir`, `touch`, `tee`, `ln`, `chmod`,
+  `sed`. Sound only because the sandbox keeps the write in the tree.
+- **A local git write** -- `git add`, `git mv`, `git stash`, `git checkout -b`,
+  `git switch -c`; and `git commit` when the directory is a *linked worktree*
+  on a *non-default branch* whose commits so far are all yours (the three
+  predicates from voitta-yolt's closed
+  [#82](https://github.com/voitta-ai/voitta-yolt/pull/82), vendored in
+  `gitstate.py`). Read-only `git` probes, 3 s timeout; any probe failure means
+  no grant.
+- **One of the above with a redirect** -- `cat > f <<'EOF'` is how an agent
+  writes a file. A redirect to a device other than `/dev/null`, `/dev/stdout`,
+  `/dev/stderr` is refused.
+
+The command is walked as a bash AST, and a literal `cd` moves the directory the
+`git commit` predicates are asked about; `cd "$DIR"` makes every later commit
+ungrantable rather than judged against the wrong tree. Anything the walker does
+not model -- a subshell, `$(...)` in an allowlisted verb's arguments, `FOO=1
+cmd`, `for`/`if` -- is refused, not guessed at.
+
+It is an allowlist, so the tree-local destructive verbs are out by
+construction: `rm`, `git reset`, `git clean`, `git restore`, `git push`,
+`git branch -D`, `gh`, `aws`, `sudo`. Committed work is reflog-recoverable;
+uncommitted work is not, and that is why those still card.
+
+Every grant is logged with its grounds, next to the park and claim lines:
+
+    run_shell: granted in C0... ('cd; cp: in-tree write; git add: local; git commit: linked worktree on welcome-flow, solo author'): 'cd ... && cp ... && git add ... && git commit ...'
 
 ## Sandbox (#116)
 

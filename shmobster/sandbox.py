@@ -12,12 +12,19 @@ per channel from its policy:
 
 - writes: the channel cwd, its sibling `<cwd>.worktrees/` (the worktree
   convention puts a branch worktree next to the repo, not under it), the temp
-  dir, `/dev`, and a few caches under $HOME the toolchain insists on;
-- reads: everything outside $HOME (the toolchain lives in /usr, /opt/homebrew,
-  /Library), plus under $HOME only the tree, the writable caches, and the
-  config files git/gh need; `exec.sandbox.read` / `exec.sandbox.write` in the
-  config add to that for one machine's tooling;
-- the policy's `exclude` paths are denied last, so they win over everything.
+  dir, `/dev`, a few caches under $HOME the toolchain insists on, and the
+  policy's own `allow_write`;
+- reads: denied under /Users and /Volumes -- every home, /Users/Shared,
+  every mounted drive -- except the tree, the writable caches, the config
+  files git/gh need, and the policy's own `allow_read`. The system roots
+  (/usr, /opt/homebrew, /Library, /System, /private/etc) stay readable: the
+  toolchain lives there and is the same for every channel;
+- the policy's `exclude` paths are denied last, so they win.
+
+Allowances are per channel, in the policy, never global: a channel that
+pushes over ssh lists `~/.ssh` in its own `allow_read`, and no other channel
+can read it. Relative entries in `exclude`, `allow_read` and `allow_write`
+resolve against the channel cwd, the way policy._norm_path does.
 
 Seatbelt matches on the resolved vnode path, which is what makes symlinks
 unable to escape and why every path here goes through realpath first (`/tmp`
@@ -37,10 +44,12 @@ import shutil
 import sys
 import tempfile
 
-from . import config, policy
+from . import policy
 
 # Under $HOME, readable by default: what git and gh read on every invocation,
-# and the toolchain roots. ~/.ssh is deliberately absent (see config.py).
+# and the toolchain roots. ~/.ssh is deliberately absent -- a read-only
+# `cat ~/.ssh/id_*` would auto-run without a card. A channel that pushes over
+# ssh lists it in its own allow_read.
 _HOME_READ = (
     "~/.gitconfig",
     "~/.gitignore_global",
@@ -62,9 +71,23 @@ _SYSTEM_WRITE = (
     "/dev",
 )
 
+# Read-denied wholesale; the allows below carve the channel's own paths back
+# out. Not $HOME alone: /Users/Shared and every other home are just as far
+# outside the tree, and a mounted drive is where the data someone did not
+# mean to expose tends to live.
+_DENY_READ = (
+    "/Users",
+    "/Volumes",
+)
 
-def _real(path):
-    retval = os.path.realpath(os.path.expanduser(os.path.expandvars(path)))
+
+def _real(path, base=None):
+    """realpath of a policy path: ~ and $VARS expanded, a relative entry
+    taken against `base` (the channel cwd), never the process cwd."""
+    p = os.path.expanduser(os.path.expandvars(path))
+    if base is not None and not os.path.isabs(p):
+        p = os.path.join(base, p)
+    retval = os.path.realpath(p)
     return retval
 
 
@@ -74,13 +97,18 @@ def _quote(path):
     return retval
 
 
+def _under(path, root):
+    retval = path == root or path.startswith(root + os.sep)
+    return retval
+
+
 def _ancestors(path, stop):
-    """Every directory strictly between `stop` and `path`, plus `stop`
-    itself. Traversal into an allowed subpath needs metadata on each parent,
-    and $HOME is otherwise fully denied."""
+    """Every directory from `path`'s parent up to and including `stop`.
+    Traversal into an allowed subpath needs metadata on each parent, and the
+    deny roots are otherwise fully denied."""
     retval = []
     cur = os.path.dirname(path)
-    while (cur == stop or cur.startswith(stop + os.sep)) and cur != os.sep:
+    while _under(cur, stop) and cur != os.sep:
         retval.append(cur)
         if cur == stop:
             break
@@ -89,36 +117,38 @@ def _ancestors(path, stop):
 
 
 def roots(pol):
-    """(write_paths, read_paths) for a channel policy, all realpaths.
-    read_paths excludes what is already in write_paths."""
+    """(write_paths, read_paths, deny_roots) for a channel policy, all
+    realpaths. read_paths excludes what is already in write_paths."""
     cwd = _real(policy.cwd_for(pol))
-    home = _real("~")
     writes = [cwd, cwd + ".worktrees", _real(tempfile.gettempdir())]
     writes += [_real(p) for p in _SYSTEM_WRITE]
     writes += [_real(p) for p in _HOME_WRITE]
-    writes += [_real(p) for p in config.SANDBOX_WRITE]
+    writes += [_real(p, cwd) for p in (pol.get("allow_write") or [])]
     reads = [_real(p) for p in _HOME_READ]
-    reads += [_real(p) for p in config.SANDBOX_READ]
+    reads += [_real(p, cwd) for p in (pol.get("allow_read") or [])]
     writes = list(dict.fromkeys(writes))
     reads = [p for p in dict.fromkeys(reads) if p not in writes]
-    retval = (writes, reads, home)
+    deny = [_real(p) for p in _DENY_READ]
+    retval = (writes, reads, deny)
     return retval
 
 
 def profile(pol):
     """The seatbelt profile for one channel policy. Later rules win."""
-    writes, reads, home = roots(pol)
-    excludes = [_real(p) for p in (pol.get("exclude") or [])]
+    writes, reads, deny = roots(pol)
+    cwd = _real(policy.cwd_for(pol))
+    excludes = [_real(p, cwd) for p in (pol.get("exclude") or [])]
     meta = set()
     for p in writes + reads:
-        if p.startswith(home + os.sep) or p == home:
-            meta.update(_ancestors(p, home))
+        for root in deny:
+            if _under(p, root):
+                meta.update(_ancestors(p, root))
     lines = [
         "(version 1)",
         "(allow default)",
         "(deny file-write*)",
         "(allow file-write* " + " ".join(f"(subpath {_quote(p)})" for p in writes) + ")",
-        f"(deny file-read* (subpath {_quote(home)}))",
+        "(deny file-read* " + " ".join(f"(subpath {_quote(p)})" for p in deny) + ")",
     ]
     if meta:
         lines.append(

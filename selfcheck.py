@@ -1110,15 +1110,22 @@ _home = os.path.realpath(os.path.expanduser("~"))
 assert _prof.startswith("(version 1)\n(allow default)\n(deny file-write*)\n"), _prof
 assert f'(subpath "{_real_tree}")' in _prof, _prof
 assert f'(subpath "{_real_tree}.worktrees")' in _prof, "the sibling worktrees dir is part of the tree"
-assert f'(deny file-read* (subpath "{_home}"))' in _prof, _prof
+assert '(deny file-read* (subpath "/Users") (subpath "/Volumes"))' in _prof, _prof
 # excludes are the last rule, so they win over every allow above them
 assert _prof.rstrip().splitlines()[-1].startswith("(deny file-read* file-write* "), _prof
 assert f'(subpath "{_real_tree}/secret")' in _prof.rstrip().splitlines()[-1], _prof
-# ~/.ssh is not readable unless the operator says so (config.py)
+# a relative exclude is the channel cwd's, not the process's
+_rel = sandbox.profile({"cwd": _sb_tree, "exclude": ["secret"]}).rstrip().splitlines()[-1]
+assert f'(subpath "{_real_tree}/secret")' in _rel, _rel
+# ~/.ssh is readable only where the channel's own policy says so -- another
+# channel's profile never carries it
 assert '.ssh' not in _prof, _prof
-config.SANDBOX_READ = ["~/.ssh"]
-assert f'(subpath "{_home}/.ssh")' in sandbox.profile(_sb_pol)
-config.SANDBOX_READ = []
+_ssh = sandbox.profile({"cwd": _sb_tree, "allow_read": ["~/.ssh"]})
+assert f'(subpath "{_home}/.ssh")' in _ssh, _ssh
+assert '.ssh' not in sandbox.profile({"cwd": _sb_tree}), "an allowance is per channel"
+# allow_write grants read too, and a relative entry is under cwd
+_aw = sandbox.profile({"cwd": _sb_tree, "allow_write": ["scratch"]})
+assert _aw.count(f'(subpath "{_real_tree}/scratch")') == 2, _aw
 # a quote in a path cannot break out of the profile's string literal
 assert sandbox._quote('/a/b"c') == '"/a/b\\"c"'
 # no sandbox-exec -> no run, never an unconfined fallback
@@ -1139,6 +1146,10 @@ if _HAVE_SANDBOX:
     os.symlink(_home, os.path.join(_sb_tree, "link"))
     assert "Operation not permitted" in _sb_run("touch link/.shmobster_selfcheck_probe"), "a symlink out of the tree"
     assert "Operation not permitted" in _sb_run(f"ls {_home}"), "$HOME is not readable"
+    assert "Operation not permitted" in _sb_run("ls /Users/Shared"), "nor another home"
+    assert "Operation not permitted" in _sb_run("ls /Volumes"), "nor a mounted drive"
+    _rel_out = tools.execute("d=secret; cat $d/x", {"cwd": _sb_tree, "exclude": ["secret"]})
+    assert "hidden" not in _rel_out and "Operation not permitted" in _rel_out, _rel_out
     # the textual guard (#55) already blocks `cat secret/x`; this is the case
     # its docstring concedes -- a path the shell resolves at runtime
     _ex = _sb_run("d=secret; cat $d/x")

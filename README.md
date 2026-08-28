@@ -279,11 +279,13 @@ What the profile says:
   worktree lives next to the repo, not under it), the temp dir, `/dev`, and
   three caches the toolchain fails without (`~/.npm`, `~/.cache`,
   `~/Library/Caches`).
-- **Reads** anywhere outside `$HOME` (the toolchain lives in `/usr`,
-  `/opt/homebrew`, `/Library`). Under `$HOME`: the tree, those caches, and what
-  git and gh read on every call (`~/.gitconfig`, `~/.gitignore_global`,
-  `~/.config/gh`, `~/.nvm`, `~/.local`). Nothing else -- `ls ~` is
-  "Operation not permitted".
+- **Reads** denied under `/Users` and `/Volumes` -- every home, `/Users/Shared`,
+  every mounted drive -- except the tree, those caches, what git and gh read
+  on every call (`~/.gitconfig`, `~/.gitignore_global`, `~/.config/gh`,
+  `~/.nvm`, `~/.local`), and the policy's own `allow_read`. `ls ~` is
+  "Operation not permitted". The system roots (`/usr`, `/opt/homebrew`,
+  `/Library`, `/System`) stay readable: the toolchain lives there and is the
+  same for every channel.
 - The policy's `exclude` paths are denied last, so they win over everything
   above.
 
@@ -291,13 +293,14 @@ Seatbelt decides on the resolved path, so a symlink inside the tree that points
 outside it is denied at the target, and a path the shell resolves at runtime
 (`d=../elsewhere; cat $d/x`) is caught where the textual `exclude` guard never
 could. Verified on Darwin 25: write outside the tree, write through an escaping
-symlink, read of `$HOME` -- all `Operation not permitted`; `git`, `gh`, `node`
-run normally.
+symlink, read of `$HOME`, `/Users/Shared` and `/Volumes` -- all `Operation not
+permitted`; `git`, `gh`, `node` run normally.
 
-Per-machine additions go in `exec.sandbox` (see **Config & run**). `~/.ssh` is
-the one you will hit first: a channel that pushes over ssh needs it readable,
-and it is deliberately not a default, because a read-only `cat ~/.ssh/id_*`
-would auto-run without a card.
+Allowances are **per channel**, in the policy (`allow_read` / `allow_write`),
+never global. `~/.ssh` is the one you will hit first: a channel that pushes
+over ssh lists it in its own `allow_read`, and it is deliberately not a
+default, because a read-only `cat ~/.ssh/id_*` would auto-run without a card
+-- in every channel, if the allowance were global.
 
 Fail closed: no `sandbox-exec`, no command -- never a fallback to running
 unconfined. Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST`
@@ -372,10 +375,7 @@ one looks like a missing variable:
   park for a trusted user's approval (see **Approving mutating commands**).
   `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
-  are in requirements.txt.) `sandbox.read` / `sandbox.write`: paths under
-  `$HOME` this machine's tooling needs beyond the built-in allowlist (see
-  **Sandbox**), e.g. `"read": ["~/.ssh"]` for channels that push over ssh;
-  `write` grants read too.
+  are in requirements.txt.)
 Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
 machine's channel layout is versioned separately from the token/key config:
 
@@ -415,6 +415,12 @@ machine's channel layout is versioned separately from the token/key config:
     the agent can read; and the path is denied in the channel's sandbox
     profile (#116), which is what catches a symlink or a path the shell
     resolves at runtime. Omit for no exclusions.
+  - `allow_read` / `allow_write` -- paths under `/Users` or `/Volumes` this
+    channel's commands may reach beyond the tree and the built-in toolchain
+    allowlist (see **Sandbox**). `["~/.ssh"]` in `allow_read` is the one a
+    channel that pushes over ssh needs; it is per channel on purpose, so no
+    other channel's read-only `cat ~/.ssh/id_*` gets it. `allow_write` grants
+    read too. Relative entries resolve against `cwd`.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:

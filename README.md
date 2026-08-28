@@ -788,6 +788,22 @@ Then:
     deploy/service.sh logs          # tail logs/shmobster.err.log
     deploy/service.sh uninstall     # stop + remove
 
+**Upgrading pulls three checkouts, not one.** shmobster reads two sibling
+repos at runtime -- voitta-yolt's classifier and redactor
+(`exec.yolt_classifier`) and the skills directories in `skills.paths` (skillz,
+and any private catalog) -- so the code that actually runs after a restart is
+whatever those checkouts hold, and a release note that says "needs yolt >=
+X" means their `git pull`, not this repo's. In that order:
+
+    git -C /path/to/voitta-yolt pull
+    git -C /path/to/skillz pull            # and each other skills.paths entry
+    git pull && .venv/bin/pip install -r requirements.txt
+    .venv/bin/python selfcheck.py
+    deploy/service.sh restart
+
+Same order for a reinstall on a fresh machine: yolt and skillz first, then
+this repo, then the config.
+
 The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
 `deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
 `KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop

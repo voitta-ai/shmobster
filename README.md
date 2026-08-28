@@ -334,6 +334,22 @@ one looks like a missing variable:
 Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
 machine's channel layout is versioned separately from the token/key config:
 
+- **The live environment includes the session you run the sync from.** Run
+  it from a cmux pane or a Claude Code session and `compgen -e` carries
+  `PROMPT_COMMAND=_cmux_prompt_command`, thirty `CMUX_*` identity vars,
+  `CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1`, a `CLAUDE_CODE_MESSAGING_SOCKET`
+  that dies with the session, and `NODE_OPTIONS=--require=<a $TMPDIR file>` --
+  and the next `bootstrap` snapshots all of it into the service, where
+  `tools.py` copies it into every command the agent runs (#118). Nothing errors;
+  every `node` under the agent just depends on a `$TMPDIR` file the OS reaps
+  after a few idle days. Denylist session-scoped names in the sync
+  (`PROMPT_COMMAND`, `CMUX_.*`, `CLAUDE.*`, `GHOSTTY_.*`, `TERMINFO`,
+  `NODE_OPTIONS`, `CODEX_.*`, `AI_AGENT`) and audit the service with the
+  `inherited environment` print above. A wrong value is stickier than a
+  missing one: `launchctl unsetenv` each name, *then* `deploy/service.sh
+  update` -- `restart` (kickstart) keeps the snapshot, and the bootstrap half
+  of `update` can race `bootout` (#92).
+
     cp examples/shmobster-policies-example.json shmobster-policies.json
 
 `shmobster-policies.json` (gitignored; path overridable via `SHMOBSTER_POLICIES`):

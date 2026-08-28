@@ -58,6 +58,12 @@ def _gh_repo(tokens):
     return None
 
 
+# A GitHub repo named as a URL, in the three forms git accepts for it.
+_GITHUB_URL = re.compile(
+    r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
+)
+
+
 def _tokens(command):
     try:
         retval = shlex.split(command)
@@ -74,6 +80,17 @@ def _check_github(command, policy):
     is_gh = "gh" in tokens
     is_git = "git" in tokens
     if not (is_gh or is_git):
+        return (True, "")
+    # A git command that names a GitHub URL outright (`git ls-remote
+    # git@github.com:o/r`, `git push https://github.com/o/r`) targets that
+    # repo, not the checkout's origin -- and since #122 every channel's git
+    # carries the operator's credential over https, so the named repo is what
+    # the whitelist has to be checked against.
+    named = [m.group(1) for m in (_GITHUB_URL.match(t) for t in tokens) if m] if is_git else []
+    for repo in named:
+        if not any(fnmatch.fnmatch(repo, pat) for pat in allowed):
+            return (False, f"repo '{repo}' not in channel whitelist {allowed}")
+    if named and not is_gh:
         return (True, "")
     repo = _gh_repo(tokens) if is_gh else None
     if not repo:

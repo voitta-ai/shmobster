@@ -27,6 +27,8 @@ password now fails at once instead of holding the command until the timeout.
 
 Verified under the sandbox with ~/.ssh fully denied: `git ls-remote` and an
 authenticated `git push --dry-run` both succeed."""
+import os
+import subprocess
 
 _ENTRIES = (
     ("url.https://github.com/.insteadOf", "git@github.com:"),
@@ -42,4 +44,39 @@ def env():
     for i, (key, value) in enumerate(_ENTRIES):
         retval[f"GIT_CONFIG_KEY_{i}"] = key
         retval[f"GIT_CONFIG_VALUE_{i}"] = value
+    return retval
+
+
+def _run(argv, extra_env=None):
+    """(returncode, stdout) or (None, "") when the binary is missing or hangs."""
+    retval = (None, "")
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=10,
+            env={**os.environ, **(extra_env or {})},
+        )
+        retval = (proc.returncode, proc.stdout)
+    except (OSError, subprocess.SubprocessError):
+        retval = (None, "")
+    return retval
+
+
+def preflight():
+    """Warnings for a host that cannot run git the way env() assumes: a git
+    older than 2.31 ignores GIT_CONFIG_COUNT and would quietly go back to ssh
+    and the system credential helpers; a gh that is not logged in cannot
+    answer git's credential request. Startup logs these once."""
+    retval = []
+    rc, out = _run(["git", "config", "--get", "shmobster.preflight"], {**env(), "GIT_CONFIG_COUNT": "1",
+                                                                       "GIT_CONFIG_KEY_0": "shmobster.preflight",
+                                                                       "GIT_CONFIG_VALUE_0": "ok"})
+    if rc is None:
+        retval.append("git is not runnable")
+    elif out.strip() != "ok":
+        retval.append("git ignores GIT_CONFIG_COUNT (needs git >= 2.31); channels would fall back to ssh")
+    rc, _ = _run(["gh", "auth", "status", "--hostname", "github.com"])
+    if rc is None:
+        retval.append("gh is not runnable; git over https has no credential helper")
+    elif rc != 0:
+        retval.append("gh is not logged in to github.com; git push will fail in every channel")
     return retval

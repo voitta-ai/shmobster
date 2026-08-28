@@ -1132,6 +1132,31 @@ _gout = tools.execute(
     "printenv GIT_CONFIG_COUNT; git config --get-all url.https://github.com/.insteadof; "
     "git config --get-all credential.helper | tail -1", {"cwd": _sb_tree})
 assert _gout.splitlines() == ["4", "git@github.com:", "ssh://git@github.com/", "!gh auth git-credential"], _gout
+# the preflight is the same probe the startup log runs; on a host with git and
+# gh it has nothing to say (CI has git; a missing gh is reported, not raised)
+_pf = gitcfg.preflight()
+assert all("GIT_CONFIG_COUNT" not in w for w in _pf), _pf
+assert not _pf or (len(_pf) == 1 and _pf[0].startswith("gh is not")), _pf
+# a git command that names a GitHub URL is checked against the whitelist as
+# that repo, not as the checkout's origin (review of #122)
+_url_pol = {"cwd": _sb_tree, "github_repos": ["your-org/*"]}
+for _cmd in ("git ls-remote git@github.com:other-org/private.git",
+             "git push https://github.com/other-org/private HEAD",
+             "git fetch ssh://git@github.com/other-org/private"):
+    _ok, _why = policy.check(_cmd, _url_pol)
+    assert not _ok and "other-org/private" in _why, (_cmd, _why)
+assert policy.check("git ls-remote https://github.com/your-org/thing.git", _url_pol) == (True, ""), "a named allowed repo"
+# a gh that keeps its token in hosts.yml gets that file denied in every profile
+_hosts = os.path.join(_sb_root, "hosts.yml")
+with open(_hosts, "w") as _f:
+    _f.write("github.com:\n    user: me\n    oauth_token: not-a-real-token\n")
+_real_hosts = sandbox._GH_HOSTS
+sandbox._GH_HOSTS = _hosts
+try:
+    assert sandbox.gh_file_backed()
+    assert f'(subpath "{os.path.realpath(_hosts)}")' in sandbox.profile({"cwd": _sb_tree}).rstrip().splitlines()[-1]
+finally:
+    sandbox._GH_HOSTS = _real_hosts
 # allow_write grants read too, and a relative entry is under cwd
 _aw = sandbox.profile({"cwd": _sb_tree, "allow_write": ["scratch"]})
 assert _aw.count(f'(subpath "{_real_tree}/scratch")') == 2, _aw

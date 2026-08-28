@@ -82,6 +82,25 @@ _DENY_READ = (
     "/Volumes",
 )
 
+# gh keeps its token in the keychain, and then hosts.yml holds only the
+# login. Where the keychain is unavailable gh writes the token into this
+# file instead -- and a read-only cat of it would post the token into Slack.
+# When that is the case the file is denied to every channel: gh is then
+# unauthenticated in the sandbox rather than a leak. Fixed by `gh auth login`
+# on a host with a working keychain.
+_GH_HOSTS = "~/.config/gh/hosts.yml"
+
+
+def gh_file_backed():
+    """True when gh's hosts.yml carries a token."""
+    retval = False
+    try:
+        with open(os.path.expanduser(_GH_HOSTS), "r") as f:
+            retval = "oauth_token:" in f.read()
+    except OSError:
+        retval = False
+    return retval
+
 
 def _real(path, base=None):
     """realpath of a policy path: ~ and $VARS expanded, a relative entry
@@ -140,6 +159,8 @@ def profile(pol):
     writes, reads, deny = roots(pol)
     cwd = _real(policy.cwd_for(pol))
     excludes = [_real(p, cwd) for p in (pol.get("exclude") or [])]
+    if gh_file_backed():
+        excludes.append(_real(_GH_HOSTS))
     meta = set()
     for p in writes + reads:
         for root in deny:

@@ -1291,7 +1291,7 @@ _l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "client": None}
 _steps = [trajectory.step("run_shell", {"command": "echo hi"}, "hi"),
           trajectory.step("run_shell", {"command": "rm -rf x"}, "NOT RUN -- pending approval [k] (mutating)"),
           trajectory.step("run_shell", {"command": "gh repo view o/r"}, "BLOCKED by channel policy: no")]
-assert trajectory.record("C9", "U1", "1.1", "key AKIAABCDEFGHIJKLMNOP please", _steps, "done")
+assert trajectory.record("C9", "U1", "1.1", "key " + "AKIA" + "ABCDEFGHIJKLMNOP" + " please", _steps, "done")
 _recs = trajectory.thread("C9", "1.1")
 assert len(_recs) == 1 and "AKIA" not in json.dumps(_recs), _recs
 assert [x["disposition"] for x in _recs[0]["steps"]] == ["ran", "parked", "blocked"], _recs

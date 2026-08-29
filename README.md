@@ -139,6 +139,33 @@ One the manifest deliberately leaves out:
 means **not a member**, not a bad token and not a bad channel ID. Fix it with
 `/invite @<app name>` in that channel.
 
+### What a live app actually holds
+
+Exporting an app's manifest (`apps.manifest.export`) needs an *app
+configuration token*, which a running instance does not have. The granted
+scopes are readable anyway: Slack returns them in a response header on every
+API call, so with the two tokens from the config:
+
+    curl -s -D - -o /dev/null -X POST https://slack.com/api/auth.test \
+      -H "Authorization: Bearer $SLACK_BOT_TOKEN" | grep -i ^x-oauth-scopes
+    curl -s -D - -o /dev/null -X POST https://slack.com/api/auth.test \
+      -H "Authorization: Bearer $SLACK_APP_TOKEN" | grep -i ^x-oauth-scopes
+
+Checked against the first instance on 2026-08-29: the bot token held **33
+scopes** against the manifest's 8, and the app token `authorizations:read`
+next to `connections:write`. The 25 extras (`channels:join`,
+`chat:write.customize`, `files:write`, `groups:write`, `im:write`,
+`mpim:write`, `pins:*`, `bookmarks:*`, `calls:*`, `assistant:write`,
+`commands`, `users:read`, `*:read` for channels/groups/im/mpim,
+`links:read`, `reactions:read`, `search:read.*`, `incoming-webhook`) are
+accumulated grants from before the manifest existed; nothing in the loop
+calls an API that needs them. Two are worse than unused: `files:write` and
+the `*:write` channel scopes let a compromised token post files and manage
+channels, and `incoming-webhook` is what makes every reinstall stop at a
+channel picker. The manifest is the reference, not the live app; bring an
+old app down to it in **OAuth & Permissions** (remove the scopes, then
+**Reinstall to Workspace** -- the bot token survives a reinstall).
+
 ### Attachments (#68)
 
 Mention the agent with a file attached and it reads it: images go to the model

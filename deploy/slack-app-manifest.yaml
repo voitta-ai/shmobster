@@ -7,6 +7,11 @@
 #   - Basic Information -> App-Level Tokens -> Generate, scope connections:write
 #       -> copy (xapp-) -> shmobster-config.json  slack.app_token
 #   - Invite the bot into the target channel: /invite @Shmobster
+#
+# These bot scopes are the complete set the loop calls (README, "Slack scopes").
+# An app that predates this file may hold many more; read what it actually has
+# from the X-OAuth-Scopes header (README, "What a live app actually holds") and
+# trim it down to this list rather than adding to it.
 display_information:
   name: Shmobster
   description: Standalone multi-vendor Slack agent (bottom-up).

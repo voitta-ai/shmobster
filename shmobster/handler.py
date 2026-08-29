@@ -5,7 +5,7 @@ labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 
-from . import admin_tools, build, config, llm, policy as policy_mod, redact, skills, slack_tools, spine, tools
+from . import admin_tools, build, config, learning, llm, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -44,6 +44,9 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
         tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
+        # The flag is offered only where a PR can follow it (#129).
+        if learning.enabled():
+            tool_schemas += learning.TOOLS
     # Skills are offered only when some are configured, and the menu is rebuilt
     # per turn so a reload_skills takes effect without a restart (#74).
     skill_menu = skills.prompt_block()
@@ -95,12 +98,22 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         {"role": "user", "content": user_content},
     ]
     steps = 0
+    trace = []  # every tool call this turn, for the trajectory record (#129)
+
+    def _done(answer):
+        # Recorded before the reply goes out, only for channel turns: a script
+        # or a test calling handle() directly has no thread to learn from.
+        if channel:
+            trajectory.record(channel, user_id, thread_ts, text, trace, answer)
+        retval = _finalize(answer, steps)
+        return retval
+
     while steps < config.MAX_TOOL_STEPS:
         steps += 1
         msg = llm.complete(messages, tools=tool_schemas)
         calls = getattr(msg, "tool_calls", None)
         if not calls:
-            retval = _finalize(msg.content, steps)
+            retval = _done(msg.content)
             return retval
         messages.append(msg.model_dump())
         for call in calls:
@@ -116,6 +129,9 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 # policy; re-resolve so the rest of THIS turn's tool calls see the
                 # new scope instead of the stale dict from turn start (#58).
                 policy = policy_mod.resolve(channel)
+            elif name in learning.NAMES:
+                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
+                result = learning.dispatch(name, args, ctx)
             elif name in skills.NAMES:
                 result = skills.dispatch(name, args)
             elif name in slack_tools.NAMES:
@@ -128,9 +144,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": redact.scrub(result)}
             )
+            trace.append(trajectory.step(name, args, result))
     # Hit the step cap -> one final tools-less call so the user gets a real
     # answer from what we gathered, instead of a dead-end "(stopped)" message.
     final = llm.complete(messages)
     answer = final.content or "(reached the tool-step limit without a definitive answer)"
-    retval = _finalize(answer, steps)
+    retval = _done(answer)
     return retval

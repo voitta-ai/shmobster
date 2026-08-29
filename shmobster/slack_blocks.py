@@ -78,3 +78,47 @@ def claimed(action_id, req_id, user_id, req):
         text += "\n" + redact.scrub(f"```{req['command']}```")
     retval = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     return retval
+
+
+def proposal(key, prop, tags):
+    """The "worth a skill?" card (#129): the agent's flag, tagging the trusted
+    users who may act on it, with Open PR / Decline. Same shape as the
+    approval card so the click handler is shared; the id rides in the value."""
+    text = redact.scrub(
+        f":bulb: *Worth a skill?* [{key}] `{prop['name']}` -- {prop['why']}\n"
+        f"{tags} -- a trusted user decides; nothing is written until then."
+    )
+    retval = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {
+            "type": "actions",
+            "block_id": f"proposal_{key}",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": "open_skill_pr",
+                    "style": "primary",
+                    "text": {"type": "plain_text", "text": "Open PR"},
+                    "value": key,
+                },
+                {
+                    "type": "button",
+                    "action_id": "decline_skill",
+                    "text": {"type": "plain_text", "text": "Decline"},
+                    "value": key,
+                },
+            ],
+        },
+    ]
+    return retval
+
+
+_CLAIMED_VERB.update({"open_skill_pr": "Drafting the skill PR for", "decline_skill": "Declining"})
+
+
+def proposal_claimed(action_id, key, user_id, prop):
+    text = f":hourglass_flowing_sand: *{_CLAIMED_VERB.get(action_id, 'Working on')}* [{key}] -- <@{user_id}>"
+    if prop:
+        text += "\n" + redact.scrub(f"`{prop['name']}` -- {prop['why']}")
+    retval = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+    return retval

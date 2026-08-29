@@ -143,6 +143,16 @@ def claim_unsurfaced(channel):
     return retval
 
 
+def unsurface(key):
+    """The ingest could not post the card (#129 review): make the request
+    eligible for another one on the next mention, rather than pending with no
+    surface and no id anyone was ever shown."""
+    with _LOCK:
+        req = _PENDING.get(canonical(key))
+        if req is not None:
+            req["surfaced"] = False
+
+
 def pop(key, channel):
     """Claim a request -- only from the channel it was raised in, so an approval
     in one channel can't release a command parked in another.

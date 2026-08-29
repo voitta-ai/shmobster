@@ -56,6 +56,12 @@
       "/path/to/skillz/skills"
     ]
   },
+  "learning": {
+    "_comment": "Skill proposals (#129): the agent flags, a trusted user clicks Open PR, the PR lands here; merging it is the promotion (#130 loads it per channel). Remove this block to turn the feature off.",
+    "repo": "your-org/skillz-private",
+    "base": "master",
+    "path": "channels/{channel}/skills/{name}/SKILL.md"
+  },
   "exec": {
     "yolt_classifier": "/path/to/voitta-yolt/hooks/grammar_classifier.py",
     "cwd": "./workspace",

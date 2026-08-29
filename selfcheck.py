@@ -1278,4 +1278,133 @@ assert os.path.exists(os.path.join(_g_primary, "granted_copy")), "a refused comm
 logging.getLogger().removeHandler(_grab)
 logging.getLogger().setLevel(_g_level)
 
+# 24) learning L0 (#129): the turn is recorded, the agent may flag, only a
+# trusted user opens the PR, and a proposal id is never an approval id.
+from shmobster import learning, proposals, trajectory  # noqa: E402
+import base64  # noqa: E402
+trajectory._DIR = tempfile.mkdtemp()
+_state_path, state._PATH = state._PATH, os.path.join(tempfile.mkdtemp(), "state.json")
+_trusted, config.TRUSTED_USERS = config.TRUSTED_USERS, {"UT"}
+_repo, config.LEARNING_REPO = config.LEARNING_REPO, ""
+_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "client": None}
+# capture: one line per turn, scrubbed, dispositions read off the results
+_steps = [trajectory.step("run_shell", {"command": "echo hi"}, "hi"),
+          trajectory.step("run_shell", {"command": "rm -rf x"}, "NOT RUN -- pending approval [k] (mutating)"),
+          trajectory.step("run_shell", {"command": "gh repo view o/r"}, "BLOCKED by channel policy: no")]
+assert trajectory.record("C9", "U1", "1.1", "key " + "AKIA" + "ABCDEFGHIJKLMNOP" + " please", _steps, "done")
+_recs = trajectory.thread("C9", "1.1")
+assert len(_recs) == 1 and "AKIA" not in json.dumps(_recs), _recs
+assert [x["disposition"] for x in _recs[0]["steps"]] == ["ran", "parked", "blocked"], _recs
+assert trajectory.thread("C9", "9.9") == []
+# off unless a repo is configured; the flag refuses rather than parks
+assert "not configured" in learning.flag({"name": "x", "why": "y"}, _l_ctx)
+config.LEARNING_REPO = "org/skillz-private"
+_out = learning.flag({"name": "Launchd Race!", "why": "bootstrap races bootout"}, _l_ctx)
+_key = _out.split("[", 1)[1].split("]", 1)[0]
+assert proposals.peek(_key, "C9")["name"] == "launchd-race", _out
+assert approvals.pop(_key, "C9") is None, "a proposal id must not be an approval id"
+assert "already flagged" in learning.flag({"name": "again", "why": "z"}, _l_ctx), "one flag per thread"
+_cards = proposals.claim_unsurfaced("C9")
+assert [k for k, _ in _cards] == [_key] and proposals.claim_unsurfaced("C9") == []
+_blocks = json.dumps(slack_blocks.proposal(_key, _cards[0][1], "<@UT>"))
+assert "open_skill_pr" in _blocks and "decline_skill" in _blocks and "<@UT>" in _blocks, _blocks
+# an untrusted user cannot open the PR by text or by click, and the proposal stays
+assert admin_tools.dispatch("propose_skill", {"request_id": _key}, _l_ctx).startswith("REFUSED")
+_alerts = []
+class _AlertClient:
+    def chat_postMessage(self, **kw):
+        _alerts.append(kw["text"])
+admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
+assert any("skill proposal `launchd-race`" in t and "Open PR" in t for t in _alerts), _alerts
+assert proposals.peek(_key, "C9") is not None
+# a trusted user opens the PR: drafted from the record, pushed through gh api
+llm.complete = lambda messages, tools=None: _FakeMsg(content=(
+    "```\n---\nname: launchd-race\ndescription: |\n  bootstrap races bootout\n---\n"
+    "# Launchd race\n\n## Solution\nre-run bootstrap\n```"))
+_api_calls = []
+_gh_state = {"refs": set(), "files": {}, "prs": {}}
+def _fake_api(method, path, payload=None):
+    """Enough of GitHub to make open_pr resumable: refs, contents, pulls."""
+    _api_calls.append((method, path, payload))
+    if method == "GET":
+        if path.endswith("/git/ref/heads/master"):
+            return {"object": {"sha": "abc123"}}
+        if "/git/ref/heads/" in path:
+            if path.split("/git/ref/heads/", 1)[1] in _gh_state["refs"]:
+                return {"object": {"sha": "def456"}}
+            raise RuntimeError("gh api: HTTP 404: Not Found")
+        if "/contents/" in path:
+            f = path.split("/contents/", 1)[1].split("?", 1)[0]
+            if f in _gh_state["files"]:
+                return {"sha": _gh_state["files"][f]}
+            raise RuntimeError("gh api: HTTP 404: Not Found")
+        if "/pulls?head=" in path:
+            head = path.split("head=", 1)[1].split("&", 1)[0].split(":", 1)[1]
+            return [{"html_url": u} for h, u in _gh_state["prs"].items() if h == head]
+    if method == "POST" and path.endswith("/git/refs"):
+        _gh_state["refs"].add(payload["ref"][len("refs/heads/"):]); return {}
+    if method == "PUT":
+        _gh_state["files"][path.split("/contents/", 1)[1]] = "filesha"; return {}
+    if method == "POST" and path.endswith("/pulls"):
+        _gh_state["prs"][payload["head"]] = "https://github.com/org/skillz-private/pull/7"
+        return {"html_url": _gh_state["prs"][payload["head"]]}
+    return {}
+_t_ctx = {**_l_ctx, "user_id": "UT"}
+_out = learning.propose(_key, _t_ctx, api=_fake_api)
+assert "pull/7" in _out and "UT" in _out, _out
+assert [c[0] for c in _api_calls if c[0] != "GET"] == ["POST", "PUT", "POST"], _api_calls
+_put = [c for c in _api_calls if c[0] == "PUT"][0]
+assert _put[1] == "repos/org/skillz-private/contents/channels/c9/skills/launchd-race/SKILL.md", _put[1]
+_written = base64.b64decode(_put[2]["content"]).decode()
+assert _written.startswith("---\nname: launchd-race") and "```" not in _written, _written
+assert _put[2]["branch"] == f"skill/c9/launchd-race-{_key}", "branch keyed on the proposal id, so a retry resumes"
+_pr = [c for c in _api_calls if c[1].endswith("/pulls")][0][2]
+assert _pr["base"] == "master" and _pr["head"] == _put[2]["branch"] and "<@UT>" in _pr["body"], _pr
+assert learning.thread_state("1.1") == "proposed" and proposals.peek(_key, "C9") is None
+# decline: recorded, and the thread is not asked again
+_key2 = learning.flag({"name": "two", "why": "w"}, {**_l_ctx, "thread_ts": "2.2"}).split("[", 1)[1].split("]", 1)[0]
+assert "DECLINED" in admin_tools.dispatch("decline_skill", {"request_id": _key2}, {**_t_ctx, "thread_ts": "2.2"})
+assert learning.thread_state("2.2") == "declined"
+assert "already declined" in learning.flag({"name": "two", "why": "w"}, {**_l_ctx, "thread_ts": "2.2"})
+# a draft that fails writes nothing, and is NOT a decline: same id, still open
+_key3 = learning.flag({"name": "three", "why": "w"}, {**_l_ctx, "thread_ts": "3.3"}).split("[", 1)[1].split("]", 1)[0]
+_api_calls.clear()
+llm.complete = lambda messages, tools=None: (_ for _ in ()).throw(RuntimeError("vendor down"))
+_out = learning.propose(_key3, {**_t_ctx, "thread_ts": "3.3"}, api=_fake_api)
+assert _out.startswith(learning.RETRY) and "could not draft" in _out and not _api_calls, _out
+assert proposals.peek(_key3, "C9") is not None and learning.thread_state("3.3") == "flagged"
+# a GitHub failure part-way keeps the id too, and the retry resumes: the branch
+# made the first time is found, the file is updated in place, one PR results
+trajectory.record("C9", "UT", "3.3", "did a thing", [trajectory.step("run_shell", {"command": "ls"}, "a")], "ok")
+llm.complete = lambda messages, tools=None: _FakeMsg(content="---\nname: three\ndescription: |\n  d\n---\n# T\n")
+_boom = {"n": 0}
+def _flaky_api(method, path, payload=None):
+    if method == "PUT" and _boom["n"] == 0:
+        _boom["n"] += 1
+        raise RuntimeError("gh api: HTTP 502: Bad Gateway")
+    return _fake_api(method, path, payload)
+_out = learning.propose(_key3, {**_t_ctx, "thread_ts": "3.3"}, api=_flaky_api)
+assert _out.startswith(learning.RETRY) and "could not open the PR" in _out, _out
+assert proposals.peek(_key3, "C9") is not None, "same id, still open after a GitHub failure"
+assert f"skill/c9/three-{_key3}" in _gh_state["refs"], "the branch from the failed attempt exists"
+_api_calls.clear()
+_out = learning.propose(_key3, {**_t_ctx, "thread_ts": "3.3"}, api=_flaky_api)
+assert "pull/7" in _out and not _out.startswith(learning.RETRY), _out
+assert not [c for c in _api_calls if c[0] == "POST" and c[1].endswith("/git/refs")], "no second branch on resume"
+assert learning.thread_state("3.3") == "proposed"
+# a retry when the PR already exists returns it rather than opening another
+_key4 = learning.flag({"name": "four", "why": "w"}, {**_l_ctx, "thread_ts": "4.4"}).split("[", 1)[1].split("]", 1)[0]
+trajectory.record("C9", "UT", "4.4", "x", [], "ok")
+_gh_state["refs"].add(f"skill/c9/four-{_key4}"); _gh_state["prs"][f"skill/c9/four-{_key4}"] = "https://github.com/org/skillz-private/pull/9"
+_api_calls.clear()
+assert "pull/9" in learning.propose(_key4, {**_t_ctx, "thread_ts": "4.4"}, api=_fake_api)
+assert not [c for c in _api_calls if c[0] == "POST" and c[1].endswith("/pulls")], "existing PR reused"
+# a card the ingest could not post is offered again
+_key5 = learning.flag({"name": "five", "why": "w"}, {**_l_ctx, "thread_ts": "5.5"}).split("[", 1)[1].split("]", 1)[0]
+assert [k for k, _ in proposals.claim_unsurfaced("C9")] == [_key5]
+proposals.unsurface(_key5)
+assert [k for k, _ in proposals.claim_unsurfaced("C9")] == [_key5], "unsurface makes it eligible again"
+llm.complete = _REAL_COMPLETE
+config.TRUSTED_USERS, config.LEARNING_REPO, state._PATH = _trusted, _repo, _state_path
+
 print(f"selfcheck OK -- shmobster {_b}")

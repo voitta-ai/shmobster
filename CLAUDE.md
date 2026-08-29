@@ -15,6 +15,10 @@ does:
   which version they were upgraded to. Do not reimplement the version
   comparison or the state file -- `announce` owns both, so every mode announces
   on the same event.
+- **Skill proposals (#129)** -- after a turn, render `proposals.claim_unsurfaced(channel)`
+  the way you render `approvals.claim_unsurfaced`: a card or a line naming the id,
+  and a way for a trusted user to answer by id (`propose_skill` / `decline_skill`).
+  The trajectory record is written by `handler`, so nothing to do there.
 - **Identity** -- resolve the agent label and self id before serving, so history
   can be labelled by real speaker (#60).
 - **Version reporting** -- the build string comes from `shmobster.build()`; do

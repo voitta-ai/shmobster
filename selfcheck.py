@@ -28,6 +28,7 @@ for _var in (
     "SLACK_APP_TOKEN",
     "ANTHROPIC_API_KEY",
     "GEMINI_API_KEY",
+    "NVIDIA_API_KEY",
     "REQUESTY_API_KEY",
     "OPENROUTER_API_KEY",
     # referenced by the example policy file's per-channel env (#104)
@@ -74,7 +75,7 @@ if not _HAVE_SANDBOX:
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == [
-    "anthropic", "gemini", "requesty", "codex", "openrouter"], config.WATERFALL
+    "anthropic", "gemini", "nvidia", "requesty", "codex", "openrouter"], config.WATERFALL
 # the codex rung (#35) is a subscription, not an api_key row: it authenticates
 # from the codex CLI's token file, so a key here would be a config error
 assert "api_key" not in next(v for v in config.WATERFALL if v["name"] == "codex")

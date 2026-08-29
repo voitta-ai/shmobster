@@ -27,6 +27,12 @@
       "api_key": "${GEMINI_API_KEY}"
     },
     {
+      "_comment": "NVIDIA NIM direct: the same nemotron as the Requesty row below, on NVIDIA's own quota and about 1s to a tool call (re-probed 2026-08-29). Model ids retire without notice there -- see README 'Finding free, tool-capable models'.",
+      "name": "nvidia",
+      "model": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+      "api_key": "${NVIDIA_API_KEY}"
+    },
+    {
       "_comment": "Requesty has no litellm provider prefix; it is OpenAI-compatible, so use openai/<model> plus api_base.",
       "name": "requesty",
       "model": "openai/nvidia/nemotron-3-super-120b-a12b",

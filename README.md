@@ -536,8 +536,11 @@ send a real tool schema and assert a `tool_calls` came back:
 
 **2. Pass a `timeout`.** A free endpoint that hangs is worse than one that
 fails: without a timeout the whole turn blocks, and the Slack ack just spins.
-NVIDIA's direct NIM endpoint answers plain completions but timed out twice at 45s
-on a tool-schema request, which is why it is not in the example config.
+NVIDIA's direct NIM endpoint did exactly that in 2026-07 (45 s and no answer
+on a tool-schema request to `meta/llama-3.3-70b-instruct`); re-probed on
+2026-08-29, `nvidia/nemotron-3-super-120b-a12b` answers a tool call in about
+a second, so it is in the example config now. The waterfall itself does not
+yet pass a timeout -- #125.
 
 ### Finding free, tool-capable models
 
@@ -566,8 +569,12 @@ litellm has no `requesty/` provider prefix, but the endpoint is OpenAI-compatibl
 **NVIDIA NIM** -- `https://integrate.api.nvidia.com/v1/models` lists what a key
 can reach, but note two traps: that endpoint answers `200` to *any* bearer token,
 so it cannot tell you whether a key is valid; and model ids are retired without
-notice (`meta/llama-3.1-405b-instruct` now 404s). The same NVIDIA models are
-reachable through OpenRouter and Requesty, which is the easier path.
+notice (`meta/llama-3.1-405b-instruct` now 404s, and on 2026-08-29 the listing
+still carried `nvidia/nemotron-3.5-lightning-30b-a3b`, which 404s too -- the
+listing is not a liveness check). The same NVIDIA models are reachable through
+OpenRouter and Requesty; NIM direct is a separate quota, which is what makes it
+worth its own rung rather than a duplicate. Config: `"model":
+"nvidia_nim/<id>"`, `"api_key": "${NVIDIA_API_KEY}"`.
 
 ### Verified working
 
@@ -577,7 +584,9 @@ reachable through OpenRouter and Requesty, which is the easier path.
 | OpenRouter | `z-ai/glm-5.2:free`, `nvidia/nemotron-3-super-120b-a12b:free` | yes |
 | Gemini | `gemini-flash-latest` | yes |
 | Codex subscription | `chatgpt/gpt-5.5` (see below) | yes |
-| NVIDIA direct | `meta/llama-3.3-70b-instruct` | **times out** -- not usable |
+| NVIDIA direct (2026-08-29) | `nvidia/nemotron-3-super-120b-a12b` (0.9 s), `openai/gpt-oss-120b` (1.2 s), `nvidia/nemotron-3-ultra-550b-a55b` (12 s) | yes |
+| NVIDIA direct | `moonshotai/kimi-k3` | emits a tool call with **no tools offered** -- skip |
+| NVIDIA direct (2026-07) | `meta/llama-3.3-70b-instruct` | timed out at 45 s |
 
 Model ids retire. `gemini-2.0-flash` and `meta/llama-3.1-405b-instruct` both went
 404 during this round of testing, so prefer an alias like `gemini-flash-latest`

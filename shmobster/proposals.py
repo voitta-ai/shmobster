@@ -46,6 +46,26 @@ def add(name, why, channel, thread_ts, user_id):
     return retval
 
 
+def restore(key, prop):
+    """Put a popped proposal back under its ORIGINAL id, card already posted.
+    A draft or a PR can fail for reasons that will not hold next time -- the
+    waterfall was down, GitHub blinked -- and the card the trusted user
+    clicked is the only place the id is written down. A fresh id would leave
+    that card pointing at nothing and the proposal waiting for a mention that
+    surfaces it into some other thread."""
+    with _LOCK:
+        _PENDING[canonical(key)] = {**prop, "surfaced": True}
+
+
+def unsurface(key):
+    """The ingest could not post the card: make the proposal eligible for
+    another one, instead of pending forever with no surface."""
+    with _LOCK:
+        prop = _PENDING.get(canonical(key))
+        if prop is not None:
+            prop["surfaced"] = False
+
+
 def claim_unsurfaced(channel):
     out = []
     with _LOCK:

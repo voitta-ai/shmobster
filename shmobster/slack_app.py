@@ -80,6 +80,7 @@ def _post_pending(client, channel, thread_ts):
             )
         except Exception:
             logging.exception("could not post approval buttons for %s", req_id)
+            approvals.unsurface(req_id)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
     for key, prop in proposals.claim_unsurfaced(channel):
@@ -92,6 +93,7 @@ def _post_pending(client, channel, thread_ts):
             )
         except Exception:
             logging.exception("could not post the skill proposal card for %s", key)
+            proposals.unsurface(key)
 
 
 def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_blocks.claimed):
@@ -158,13 +160,17 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
         result = redact.scrub(run(req_id, ctx))
     finally:
         queue.release(req_id)
+    if result.startswith(learning.RETRY) and queue is proposals:
+        # A transient failure put the proposal back under the same id (#129
+        # review): the card gets its buttons back, with the reason on it, so
+        # the trusted user can try again from where they are.
+        prop = proposals.peek(req_id, channel)
+        blocks = slack_blocks.proposal(req_id, prop, admin_tools._trusted_tags()) if prop else []
+        blocks.insert(0, {"type": "section", "text": {"type": "mrkdwn", "text": f":warning: {result[len(learning.RETRY):].strip()[:2800]}"}})
+    else:
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"```{result[:2900]}```"}}]
     try:
-        client.chat_update(
-            channel=channel,
-            ts=message_ts,
-            text=result[:2900],
-            blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f"```{result[:2900]}```"}}],
-        )
+        client.chat_update(channel=channel, ts=message_ts, text=result[:2900], blocks=blocks)
     except Exception:
         logging.exception("could not update approval message")
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=result[:2900])

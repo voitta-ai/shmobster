@@ -188,19 +188,48 @@ def _gh(method, path, payload=None):
     return retval
 
 
-def open_pr(name, channel, text, body, api=_gh):
-    """Branch, file and PR in learning.repo. Returns the PR URL."""
+RETRY = "RETRY:"
+
+
+def _optional(api, path):
+    """GET that reads a 404 as None, for the resume checks in open_pr."""
+    try:
+        retval = api("GET", path)
+    except RuntimeError as exc:
+        if "404" not in str(exc):
+            raise
+        retval = None
+    return retval
+
+
+def open_pr(key, name, channel, text, body, api=_gh):
+    """Branch, file and PR in learning.repo. Returns the PR URL.
+
+    Resumable, keyed on the proposal id: a retry after a failure part-way
+    (branch made, file not; file made, PR not) finds what exists and
+    continues, so a transient error never strands a half-made proposal or
+    makes a second branch for the same one."""
     repo, base = config.LEARNING_REPO, config.LEARNING_BASE
     cslug = channel_slug(channel)
     path = config.LEARNING_PATH.format(channel=cslug, name=name)
-    branch = f"skill/{cslug}/{name}-{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M')}"
-    sha = api("GET", f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]
-    api("POST", f"repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
-    api("PUT", f"repos/{repo}/contents/{path}", {
+    branch = f"skill/{cslug}/{name}-{proposals.canonical(key)}"
+    if _optional(api, f"repos/{repo}/git/ref/heads/{branch}") is None:
+        sha = api("GET", f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]
+        api("POST", f"repos/{repo}/git/refs", {"ref": f"refs/heads/{branch}", "sha": sha})
+    existing = _optional(api, f"repos/{repo}/contents/{path}?ref={branch}")
+    put = {
         "message": f"skill: {name} ({cslug})",
         "content": base64.b64encode(text.encode("utf-8")).decode("ascii"),
         "branch": branch,
-    })
+    }
+    if existing and existing.get("sha"):
+        put["sha"] = existing["sha"]
+    api("PUT", f"repos/{repo}/contents/{path}", put)
+    owner = repo.split("/", 1)[0]
+    open_prs = _optional(api, f"repos/{repo}/pulls?head={owner}:{branch}&state=open") or []
+    if open_prs:
+        retval = open_prs[0].get("html_url", "")
+        return retval
     pr = api("POST", f"repos/{repo}/pulls", {
         "title": f"skill: {name} ({cslug})", "head": branch, "base": base, "body": body,
     })
@@ -230,15 +259,20 @@ def propose(key, ctx, api=_gh):
         retval = f"no pending skill proposal '{proposals.canonical(key)}' in this channel.{also}"
         return retval
     name, why, thread_ts = prop["name"], prop["why"], prop["thread_ts"]
+    # Every failure below is one that may not repeat -- the waterfall was
+    # down, the record file was not there yet, GitHub blinked -- so none of
+    # them is a decline. The proposal goes back under the SAME id and the
+    # card is re-rendered with its buttons; only a trusted user's Decline
+    # closes a thread.
     text, err = draft(name, why, channel, thread_ts)
     if err:
-        mark_thread(thread_ts, "declined")
-        retval = f"could not draft `{name}`: {err}. Nothing was written; the thread will not be asked again."
+        proposals.restore(key, prop)
+        retval = f"{RETRY} could not draft `{name}`: {err}. Nothing was written; the proposal is still open."
         return retval
     meta, _body = skills._parse_text(text)
     if meta is None or not meta.get("name") or not meta.get("description"):
-        mark_thread(thread_ts, "declined")
-        retval = f"the draft for `{name}` had no parseable frontmatter; nothing was written."
+        proposals.restore(key, prop)
+        retval = f"{RETRY} the draft for `{name}` had no usable frontmatter; nothing was written, the proposal is still open."
         return retval
     link = _permalink({**ctx, "thread_ts": thread_ts})
     body = (
@@ -249,12 +283,11 @@ def propose(key, ctx, api=_gh):
         "Provenance: shmobster #129."
     )
     try:
-        url = open_pr(name, channel, text, redact.scrub(body), api=api)
+        url = open_pr(key, name, channel, text, redact.scrub(body), api=api)
     except Exception as exc:  # noqa: BLE001
         logging.exception("learning: could not open the PR for %s", name)
-        mark_thread(thread_ts, "flagged")
-        proposals.add(name, why, channel, thread_ts, prop.get("user_id"))
-        retval = f"could not open the PR for `{name}`: {redact.scrub(str(exc))[:300]}. The proposal is parked again."
+        proposals.restore(key, prop)
+        retval = f"{RETRY} could not open the PR for `{name}`: {redact.scrub(str(exc))[:300]}. The proposal is still open; a retry resumes where this stopped."
         return retval
     mark_thread(thread_ts, "proposed")
     logging.info("learning: PR opened for %s in %s by %s: %s", name, channel, ctx.get("user_id"), url)

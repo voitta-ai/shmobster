@@ -1278,4 +1278,80 @@ assert os.path.exists(os.path.join(_g_primary, "granted_copy")), "a refused comm
 logging.getLogger().removeHandler(_grab)
 logging.getLogger().setLevel(_g_level)
 
+# 24) learning L0 (#129): the turn is recorded, the agent may flag, only a
+# trusted user opens the PR, and a proposal id is never an approval id.
+from shmobster import learning, proposals, trajectory  # noqa: E402
+import base64  # noqa: E402
+trajectory._DIR = tempfile.mkdtemp()
+_state_path, state._PATH = state._PATH, os.path.join(tempfile.mkdtemp(), "state.json")
+_trusted, config.TRUSTED_USERS = config.TRUSTED_USERS, {"UT"}
+_repo, config.LEARNING_REPO = config.LEARNING_REPO, ""
+_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "client": None}
+# capture: one line per turn, scrubbed, dispositions read off the results
+_steps = [trajectory.step("run_shell", {"command": "echo hi"}, "hi"),
+          trajectory.step("run_shell", {"command": "rm -rf x"}, "NOT RUN -- pending approval [k] (mutating)"),
+          trajectory.step("run_shell", {"command": "gh repo view o/r"}, "BLOCKED by channel policy: no")]
+assert trajectory.record("C9", "U1", "1.1", "key AKIAABCDEFGHIJKLMNOP please", _steps, "done")
+_recs = trajectory.thread("C9", "1.1")
+assert len(_recs) == 1 and "AKIA" not in json.dumps(_recs), _recs
+assert [x["disposition"] for x in _recs[0]["steps"]] == ["ran", "parked", "blocked"], _recs
+assert trajectory.thread("C9", "9.9") == []
+# off unless a repo is configured; the flag refuses rather than parks
+assert "not configured" in learning.flag({"name": "x", "why": "y"}, _l_ctx)
+config.LEARNING_REPO = "org/skillz-private"
+_out = learning.flag({"name": "Launchd Race!", "why": "bootstrap races bootout"}, _l_ctx)
+_key = _out.split("[", 1)[1].split("]", 1)[0]
+assert proposals.peek(_key, "C9")["name"] == "launchd-race", _out
+assert approvals.pop(_key, "C9") is None, "a proposal id must not be an approval id"
+assert "already flagged" in learning.flag({"name": "again", "why": "z"}, _l_ctx), "one flag per thread"
+_cards = proposals.claim_unsurfaced("C9")
+assert [k for k, _ in _cards] == [_key] and proposals.claim_unsurfaced("C9") == []
+_blocks = json.dumps(slack_blocks.proposal(_key, _cards[0][1], "<@UT>"))
+assert "open_skill_pr" in _blocks and "decline_skill" in _blocks and "<@UT>" in _blocks, _blocks
+# an untrusted user cannot open the PR by text or by click, and the proposal stays
+assert admin_tools.dispatch("propose_skill", {"request_id": _key}, _l_ctx).startswith("REFUSED")
+_alerts = []
+class _AlertClient:
+    def chat_postMessage(self, **kw):
+        _alerts.append(kw["text"])
+admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
+assert any("skill proposal `launchd-race`" in t and "Open PR" in t for t in _alerts), _alerts
+assert proposals.peek(_key, "C9") is not None
+# a trusted user opens the PR: drafted from the record, pushed through gh api
+llm.complete = lambda messages, tools=None: _FakeMsg(content=(
+    "```\n---\nname: launchd-race\ndescription: |\n  bootstrap races bootout\n---\n"
+    "# Launchd race\n\n## Solution\nre-run bootstrap\n```"))
+_api_calls = []
+def _fake_api(method, path, payload=None):
+    _api_calls.append((method, path, payload))
+    if method == "GET":
+        return {"object": {"sha": "abc123"}}
+    if path.endswith("/pulls"):
+        return {"html_url": "https://github.com/org/skillz-private/pull/7"}
+    return {}
+_t_ctx = {**_l_ctx, "user_id": "UT"}
+_out = learning.propose(_key, _t_ctx, api=_fake_api)
+assert "pull/7" in _out and "UT" in _out, _out
+assert [c[0] for c in _api_calls] == ["GET", "POST", "PUT", "POST"], _api_calls
+_put = [c for c in _api_calls if c[0] == "PUT"][0]
+assert _put[1] == "repos/org/skillz-private/contents/channels/c9/skills/launchd-race/SKILL.md", _put[1]
+_written = base64.b64decode(_put[2]["content"]).decode()
+assert _written.startswith("---\nname: launchd-race") and "```" not in _written, _written
+assert _put[2]["branch"].startswith("skill/c9/launchd-race-"), _put[2]["branch"]
+_pr = [c for c in _api_calls if c[1].endswith("/pulls")][0][2]
+assert _pr["base"] == "master" and _pr["head"] == _put[2]["branch"] and "<@UT>" in _pr["body"], _pr
+assert learning.thread_state("1.1") == "proposed" and proposals.peek(_key, "C9") is None
+# decline: recorded, and the thread is not asked again
+_key2 = learning.flag({"name": "two", "why": "w"}, {**_l_ctx, "thread_ts": "2.2"}).split("[", 1)[1].split("]", 1)[0]
+assert "DECLINED" in admin_tools.dispatch("decline_skill", {"request_id": _key2}, {**_t_ctx, "thread_ts": "2.2"})
+assert learning.thread_state("2.2") == "declined"
+assert "already declined" in learning.flag({"name": "two", "why": "w"}, {**_l_ctx, "thread_ts": "2.2"})
+# a draft that fails writes nothing
+_key3 = learning.flag({"name": "three", "why": "w"}, {**_l_ctx, "thread_ts": "3.3"}).split("[", 1)[1].split("]", 1)[0]
+_api_calls.clear()
+llm.complete = lambda messages, tools=None: (_ for _ in ()).throw(RuntimeError("vendor down"))
+assert "could not draft" in learning.propose(_key3, {**_t_ctx, "thread_ts": "3.3"}, api=_fake_api) and not _api_calls
+llm.complete = _REAL_COMPLETE
+config.TRUSTED_USERS, config.LEARNING_REPO, state._PATH = _trusted, _repo, _state_path
+
 print(f"selfcheck OK -- shmobster {_b}")

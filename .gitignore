@@ -11,3 +11,4 @@ shmobster-config.json
 shmobster-policies.json
 deploy/ai.shmobster.plist
 shmobster-state.json
+trajectories/

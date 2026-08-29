@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, redact, sandbox, skills, slack_blocks, watchdog
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, proposals, redact, sandbox, skills, slack_blocks, watchdog
 
 # asctime is not in the default format (#102). Without it the disposition log
 # (#97) records order but not time, and "how long did that take" / "did this run
@@ -80,9 +80,21 @@ def _post_pending(client, channel, thread_ts):
             )
         except Exception:
             logging.exception("could not post approval buttons for %s", req_id)
+    # And any skill the agent flagged this turn (#129): a card tagging the
+    # trusted users, who may open the PR or decline. Same rendering path.
+    for key, prop in proposals.claim_unsurfaced(channel):
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}"),
+                blocks=slack_blocks.proposal(key, prop, admin_tools._trusted_tags()),
+            )
+        except Exception:
+            logging.exception("could not post the skill proposal card for %s", key)
 
 
-def _resolve(ack, body, client, action, run):
+def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_blocks.claimed):
     """Shared button plumbing: ack inside Slack's 3s budget, act as the clicking
     user (never the model), then rewrite the message so the buttons are gone and
     the outcome is on the record."""
@@ -109,7 +121,7 @@ def _resolve(ack, body, client, action, run):
     # land on two Bolt threads, and the loser -- whose pop finds nothing --
     # would otherwise overwrite the winner's output with "no pending request"
     # for a command that did run. Hiding the buttons does not prevent that.
-    req = approvals.acquire(req_id, channel)
+    req = queue.acquire(req_id, channel)
     if req is None:
         # Two reasons acquire can fail, and they deserve different answers. If
         # another delivery of this press has it in flight, that thread will
@@ -119,7 +131,7 @@ def _resolve(ack, body, client, action, run):
         # Only a genuinely absent request gets a message, and it goes to the
         # thread rather than rewriting the card, because a click that resolves
         # nothing must not destroy the only copy of the parked command (#94).
-        if approvals.status(req_id, channel)[0] == "held":
+        if queue.status(req_id, channel)[0] == "held":
             return
         try:
             client.chat_postMessage(
@@ -139,13 +151,13 @@ def _resolve(ack, body, client, action, run):
                 channel=channel,
                 ts=message_ts,
                 text=f"Working on [{req_id}] for <@{ctx['user_id']}>",
-                blocks=slack_blocks.claimed(action.get("action_id"), req_id, ctx["user_id"], req),
+                blocks=claimed(action.get("action_id"), req_id, ctx["user_id"], req),
             )
         except Exception:
             logging.exception("could not mark approval message as claimed")
         result = redact.scrub(run(req_id, ctx))
     finally:
-        approvals.release(req_id)
+        queue.release(req_id)
     try:
         client.chat_update(
             channel=channel,
@@ -171,6 +183,24 @@ def on_approve(ack, body, client, action):
 @app.action("deny_command")
 def on_deny(ack, body, client, action):
     _resolve(ack, body, client, action, admin_tools.deny)
+
+
+@app.action("open_skill_pr")
+def on_open_skill_pr(ack, body, client, action):
+    _resolve(
+        ack, body, client, action,
+        lambda key, ctx: admin_tools.dispatch("propose_skill", {"request_id": key}, ctx),
+        queue=proposals, claimed=slack_blocks.proposal_claimed,
+    )
+
+
+@app.action("decline_skill")
+def on_decline_skill(ack, body, client, action):
+    _resolve(
+        ack, body, client, action,
+        lambda key, ctx: admin_tools.dispatch("decline_skill", {"request_id": key}, ctx),
+        queue=proposals, claimed=slack_blocks.proposal_claimed,
+    )
 
 
 @app.event("app_mention")
@@ -289,6 +319,8 @@ def main():
             "gh keeps its token in %s, not the keychain; the file is denied to every "
             "channel, so gh runs unauthenticated there. Re-run `gh auth login` on a host "
             "with a working keychain.", sandbox._GH_HOSTS)
+    if learning.enabled():
+        logging.info("learning: proposals go to %s (%s)", config.LEARNING_REPO, config.LEARNING_PATH)
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
     # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
     # the connection ourselves and exit when it stops hearing Slack.

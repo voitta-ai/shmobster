@@ -38,6 +38,14 @@ def _parse(path):
     except OSError:
         retval = (None, None)
         return retval
+    retval = _parse_text(text)
+    return retval
+
+
+def _parse_text(text):
+    """(frontmatter dict, body) for SKILL.md text, or (None, None). Split from
+    _parse so a draft that has not been written anywhere yet (#129) is checked
+    by the same rules a file on disk is."""
     if not text.startswith("---"):
         retval = (None, None)
         return retval

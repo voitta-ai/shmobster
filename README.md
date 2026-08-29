@@ -15,6 +15,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
 - [Slack scopes](#slack-scopes)
 - [Trust model](#trust-model)
 - [What does not need a card (#117)](#what-does-not-need-a-card-117)
+- [Learning (#129)](#learning-129)
 - [Sandbox (#116)](#sandbox-116)
 - [Config & run](#config--run)
 - [Free-tier fallbacks](#free-tier-fallbacks)
@@ -335,6 +336,47 @@ uncommitted work is not, and that is why those still card.
 Every grant is logged with its grounds, next to the park and claim lines:
 
     run_shell: granted in C0... ('cd; cp: in-tree write; git add: local; git commit: linked worktree on welcome-flow, solo author'): 'cd ... && cp ... && git add ... && git commit ...'
+
+## Learning (#129)
+
+The agent can notice that a turn was worth writing down; a trusted user
+decides whether it is; a merged PR is what makes it a skill. Design in #100,
+principle in #52: *learning inherits the authz spine*.
+
+- **Capture.** Every channel turn is recorded -- request, each tool call with
+  its disposition (`ran` / `parked` / `blocked` / `approved`), the answer --
+  as one JSON line under `trajectories/<channel>/<date>.jsonl`, scrubbed at
+  the emission site like the approval log, gitignored (`SHMOBSTER_TRAJECTORIES`
+  to move it).
+- **Flag.** `flag_skill(name, why)` is the one tool the agent may call on its
+  own initiative, at most once per thread, when the work met the bar (non-obvious
+  debugging, a workaround found by trial and error, a project quirk the docs do
+  not cover). It writes nothing. The reply is followed by a card:
+
+      :bulb: Worth a skill? [a1b2c3d4e5f60718-2] `<name>` -- <why>
+      <@trusted> <@trusted> -- a trusted user decides; nothing is written until then.
+      [ Open PR ]  [ Decline ]
+
+- **Decide.** A trusted click on **Open PR** drafts a `SKILL.md` (skillz
+  format) from the thread's record via the waterfall and opens a PR against
+  `learning.repo` at `learning.path` -- through `gh api` from the agent
+  process, never from the channel's shell: the sandbox confines a channel to
+  its tree and the model gets no push path to the skills repo. **Decline**
+  records the thread so it is not asked again. Text works too, by id:
+  `@agent propose a1b2c3d4e5f60718-2` / `decline ...`. An untrusted click gets
+  the same refusal as an approval click (#107); the queue is a sibling of the
+  approval queue, so a proposal id handed to `approve_command` resolves to
+  nothing.
+- **Promote.** Merging the PR. Until #130 lands, a merged skill still has to be
+  put on a `skills.paths` entry to load; either way a loaded skill carries no
+  authority -- it is prompt text, and its commands go through the same
+  YOLT / grant / sandbox / approval path as anything else.
+
+Config: `learning.repo` (owner/repo; unset = feature off, tool not offered),
+`learning.base` (default `master`), `learning.path` (default
+`channels/{channel}/skills/{name}/SKILL.md`, `{channel}` = the channel's
+configured name, slugged). Needs `gh` logged in on the host, which git over
+https already requires.
 
 ## Sandbox (#116)
 

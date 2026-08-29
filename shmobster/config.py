@@ -104,6 +104,16 @@ YOLT_CLASSIFIER = _exec.get("yolt_classifier", "")
 EXEC_CWD = _exec.get("cwd", ".")
 EXEC_TIMEOUT = _exec.get("timeout_sec", 30)
 
+# Learning (#129): where a proposed skill goes. `repo` is the owner/repo the
+# propose_skill PR is opened against (the operator's private skills catalog);
+# unset means the feature is off and the flag_skill tool is not offered.
+# `base` is that repo's default branch; `path` is where the file lands, with
+# {channel} (the channel's configured name, slugged) and {name} filled in.
+_learning = _cfg.get("learning", {})
+LEARNING_REPO = _learning.get("repo", "")
+LEARNING_BASE = _learning.get("base", "master")
+LEARNING_PATH = _learning.get("path", "channels/{channel}/skills/{name}/SKILL.md")
+
 # Per-channel policy (Iter #4): channel_id -> {cwd, aws_profile, github_repos}.
 # Unlisted channels fall back to default_policy. This is the capability envelope
 # keyed by channel (where/what), distinct from who (multi-user, later).

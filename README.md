@@ -367,10 +367,11 @@ principle in #52: *learning inherits the authz spine*.
   the same refusal as an approval click (#107); the queue is a sibling of the
   approval queue, so a proposal id handed to `approve_command` resolves to
   nothing.
-- **Promote.** Merging the PR. Until #130 lands, a merged skill still has to be
-  put on a `skills.paths` entry to load; either way a loaded skill carries no
-  authority -- it is prompt text, and its commands go through the same
-  YOLT / grant / sandbox / approval path as anything else.
+- **Promote.** Merging the PR. The channel's policy `skills` entry points at
+  its dir in the private catalog (#130), so after the next `git pull` of that
+  clone the skill is on the menu -- in that channel only. A loaded skill
+  carries no authority -- it is prompt text, and its commands go through the
+  same YOLT / grant / sandbox / approval path as anything else.
 
 Config: `learning.repo` (owner/repo; unset = feature off, tool not offered),
 `learning.base` (default `master`), `learning.path` (default
@@ -547,6 +548,10 @@ machine's channel layout is versioned separately from the token/key config:
     into Slack without a card. Git needs no `~/.ssh` (it runs over https),
     and AWS keys belong in `env`. `allow_write` grants read too. Relative
     entries resolve against `cwd`.
+  - `skills` -- directories of `<name>/SKILL.md` this channel alone may load,
+    on top of the global `skills.paths` (see **Skills**). Where a learned skill
+    is picked up after its PR merges. `~`, `$VARS` and cwd-relative entries
+    resolve like `allow_read`.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:
@@ -799,6 +804,16 @@ every turn by every vendor in the waterfall:
 With no `skills.paths` configured there is no menu and no tool -- the feature
 costs nothing when unused.
 
+**Per channel (#130).** A channel policy may carry its own `skills` list --
+directories of `<name>/SKILL.md` that channel alone sees, on top of the global
+paths (global wins a name collision, the same order rule). That is where a
+learned skill lives (see **Learning**): the PR lands it under
+`channels/<channel>/skills/` in the private catalog, and the channel's policy
+points there. A skill loaded this way carries no authority -- it is prompt
+text, and its commands go through the same YOLT / grant / sandbox / approval
+path as anything else. Channel dirs are read on each turn, not indexed at
+boot, so a merge or a policy edit shows up without a reload.
+
 **Refresh.** The index is built at boot. A trusted user can say "reload your
 skills" to re-scan after pulling a catalog; the `reload_skills` tool sits behind
 the same trust gate as `set_policy` (see **Trust model**). Reading files is not a
@@ -875,6 +890,7 @@ X" means their `git pull`, not this repo's. In that order:
 
     git -C /path/to/voitta-yolt pull
     git -C /path/to/skillz pull            # and each other skills.paths entry
+    git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
     git pull && .venv/bin/pip install -r requirements.txt
     .venv/bin/python selfcheck.py
     deploy/service.sh restart

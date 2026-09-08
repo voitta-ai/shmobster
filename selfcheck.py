@@ -1407,4 +1407,36 @@ assert [k for k, _ in proposals.claim_unsurfaced("C9")] == [_key5], "unsurface m
 llm.complete = _REAL_COMPLETE
 config.TRUSTED_USERS, config.LEARNING_REPO, state._PATH = _trusted, _repo, _state_path
 
+# 25) per-channel skills (#130): a channel's own dirs join the menu for that
+# channel only, global wins a collision, and a policy edit needs no reload.
+_sk_root = tempfile.mkdtemp()
+_sk_dir = os.path.join(_sk_root, "channels", "nine", "skills")
+os.makedirs(os.path.join(_sk_dir, "launchd-race"))
+with open(os.path.join(_sk_dir, "launchd-race", "SKILL.md"), "w") as _f:
+    _f.write("---\nname: launchd-race\ndescription: Re-run bootstrap after the bootout race. Then verify.\n---\n# Launchd race\nre-run bootstrap\n")
+_saved_cps = dict(config.CHANNEL_POLICIES)
+config.CHANNEL_POLICIES["C9"] = {"cwd": _sk_root, "skills": ["channels/nine/skills"]}   # relative to cwd
+config.CHANNEL_POLICIES["C8"] = {"cwd": _sk_root}
+# an earlier section stubbed policy.resolve to a fixed dict; this section is
+# about what resolve feeds skills, so put the real lookup back
+policy.resolve = lambda ch: config.CHANNEL_POLICIES.get(ch) or config.DEFAULT_POLICY
+assert "launchd-race: Re-run bootstrap after the bootout race." in skills.prompt_block("C9")
+assert skills.prompt_block("C8") == "", "another channel does not see it"
+assert skills.prompt_block() == "", "nor the channel-less view"
+assert "re-run bootstrap" in skills.load("launchd-race", "C9")
+assert skills.load("launchd-race", "C8").startswith("no such skill")
+assert "re-run bootstrap" in skills.dispatch("load_skill", {"name": "launchd-race"}, "C9")
+# global wins a collision: the same name in a global path shadows the channel's
+_g_dir = os.path.join(_sk_root, "global"); os.makedirs(os.path.join(_g_dir, "launchd-race"))
+with open(os.path.join(_g_dir, "launchd-race", "SKILL.md"), "w") as _f:
+    _f.write("---\nname: launchd-race\ndescription: the global one\n---\nglobal body\n")
+_saved_paths, config.SKILL_PATHS = config.SKILL_PATHS, [_g_dir]
+skills.reload()
+assert "global body" in skills.load("launchd-race", "C9")
+config.SKILL_PATHS = _saved_paths; skills.reload()
+# a policy edit shows up on the next call, no reload
+config.CHANNEL_POLICIES["C8"] = {"cwd": _sk_root, "skills": [_sk_dir]}
+assert "launchd-race" in skills.prompt_block("C8")
+config.CHANNEL_POLICIES.clear(); config.CHANNEL_POLICIES.update(_saved_cps)
+
 print(f"selfcheck OK -- shmobster {_b}")

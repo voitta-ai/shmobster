@@ -19,7 +19,10 @@
       "env": {
         "VERCEL_TOKEN": "${VERCEL_TOKEN}",
         "HEROKU_API_KEY": "${HEROKU_API_KEY}"
-      }
+      },
+      "skills": [
+        "~/g/skillz-private/channels/scoped-channel/skills"
+      ]
     }
   },
   "default_policy": {

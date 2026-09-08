@@ -20,7 +20,7 @@ import os
 
 import yaml
 
-from . import config
+from . import config, policy as policy_mod
 
 _SUMMARY_MAX = 150
 _BODY_MAX = 20000
@@ -123,8 +123,37 @@ def reload():
     return retval
 
 
-def names():
-    retval = sorted(_INDEX)
+def channel_paths(channel):
+    """The channel policy's own `skills` directories (#130), expanded like
+    allow_read: `~` and $VARS, a relative entry against the channel cwd."""
+    pol = policy_mod.resolve(channel) if channel else {}
+    base = policy_mod.cwd_for(pol)
+    out = []
+    for raw in (pol.get("skills") or []):
+        path = os.path.expanduser(os.path.expandvars(str(raw)))
+        if not os.path.isabs(path):
+            path = os.path.join(base, path)
+        out.append(os.path.normpath(path))
+    retval = out
+    return retval
+
+
+def view(channel=None):
+    """The index this channel sees: the global catalogs, then its own dirs.
+    Global entries win a name collision, the same order rule as skills.paths.
+    The channel dirs are scanned on the call, not cached: a channel has a
+    handful of skills, a merge lands between turns, and a policy edit must
+    take effect without a reload -- the global index stays boot-time."""
+    index = dict(_INDEX)
+    shadowed = []
+    for root in channel_paths(channel):
+        _scan_dir(root, index, shadowed)
+    retval = index
+    return retval
+
+
+def names(channel=None):
+    retval = sorted(view(channel)) if channel else sorted(_INDEX)
     return retval
 
 
@@ -133,10 +162,11 @@ def shadowed():
     return retval
 
 
-def prompt_block():
+def prompt_block(channel=None):
     """The standing menu for the system prompt -- empty string when no skills are
     configured, so an instance without them pays nothing."""
-    if not _INDEX:
+    index = view(channel)
+    if not index:
         retval = ""
         return retval
     lines = [
@@ -147,19 +177,20 @@ def prompt_block():
         "the line here is only a label, the body has the actual steps.",
         "",
     ]
-    for name in sorted(_INDEX):
-        summary = _INDEX[name]["summary"]
+    for name in sorted(index):
+        summary = index[name]["summary"]
         lines.append(f"- {name}: {summary}" if summary else f"- {name}")
     retval = "\n".join(lines)
     return retval
 
 
-def load(name):
+def load(name, channel=None):
     """Return a skill's body text, or a message naming the near misses."""
     key = str(name or "").strip()
-    entry = _INDEX.get(key)
+    index = view(channel)
+    entry = index.get(key)
     if entry is None:
-        near = [n for n in sorted(_INDEX) if key and key.lower() in n.lower()]
+        near = [n for n in sorted(index) if key and key.lower() in n.lower()]
         hint = f" Closest: {', '.join(near[:5])}." if near else ""
         retval = f"no such skill: {key!r}.{hint}"
         return retval
@@ -200,9 +231,9 @@ TOOLS = [
 NAMES = {t["function"]["name"] for t in TOOLS}
 
 
-def dispatch(name, args):
+def dispatch(name, args, channel=None):
     if name == "load_skill":
-        retval = load(args.get("name", ""))
+        retval = load(args.get("name", ""), channel)
     else:
         retval = f"unknown skill tool: {name}"
     return retval

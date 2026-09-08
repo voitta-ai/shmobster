@@ -31,6 +31,7 @@ TOOLS = [
                     "github_repos": {"type": "array", "items": {"type": "string"}, "description": "Allowed owner/repo globs for git/gh (empty list = no repo restriction)."},
                     "aws_profile": {"type": "string", "description": "AWS profile for commands in that channel."},
                     "exclude": {"type": "array", "items": {"type": "string"}, "description": "Paths under cwd to keep off-limits (best-effort text guard, e.g. [\"~/g/OneDrive\"]); empty list clears it."},
+                    "skills": {"type": "array", "items": {"type": "string"}, "description": "Directories of <name>/SKILL.md this channel alone may load, on top of the global skills.paths (#130); empty list clears it."},
                 },
                 "required": ["channel_id"],
             },
@@ -355,6 +356,7 @@ def dispatch(name, args, ctx):
         "github_repos": args.get("github_repos"),
         "aws_profile": args.get("aws_profile"),
         "exclude": args.get("exclude"),
+        "skills": args.get("skills"),
     }
     channel_id = args.get("channel_id") or ctx.get("channel")
     try:

@@ -49,7 +49,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             tool_schemas += learning.TOOLS
     # Skills are offered only when some are configured, and the menu is rebuilt
     # per turn so a reload_skills takes effect without a restart (#74).
-    skill_menu = skills.prompt_block()
+    skill_menu = skills.prompt_block(channel)
     if skill_menu:
         tool_schemas += skills.TOOLS
     system = _system_prompt()
@@ -133,7 +133,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
                 result = learning.dispatch(name, args, ctx)
             elif name in skills.NAMES:
-                result = skills.dispatch(name, args)
+                result = skills.dispatch(name, args, channel)
             elif name in slack_tools.NAMES:
                 result = slack_tools.dispatch(name, args, slack_client)
             else:

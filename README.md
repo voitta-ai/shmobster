@@ -551,7 +551,9 @@ machine's channel layout is versioned separately from the token/key config:
   - `skills` -- directories of `<name>/SKILL.md` this channel alone may load,
     on top of the global `skills.paths` (see **Skills**). Where a learned skill
     is picked up after its PR merges. `~`, `$VARS` and cwd-relative entries
-    resolve like `allow_read`.
+    resolve like `allow_read`; an entry under the channel's writable roots is
+    ignored with a warning (a granted write must not become standing
+    instructions).
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:
@@ -813,6 +815,14 @@ points there. A skill loaded this way carries no authority -- it is prompt
 text, and its commands go through the same YOLT / grant / sandbox / approval
 path as anything else. Channel dirs are read on each turn, not indexed at
 boot, so a merge or a policy edit shows up without a reload.
+
+One rule is enforced: a `skills` entry that resolves under the channel's own
+*writable* roots (the tree, its worktrees sibling, temp, the caches,
+`allow_write`) is ignored with a startup-style warning. A skill is standing
+instructions, and in-tree writes run without a card (#117) -- a skills dir
+inside the tree would let one granted `cat > skills/x/SKILL.md` become next
+turn's prompt, skipping the PR gate that is the promotion story. Point the
+entry at the read-only catalog clone, which lives outside every channel tree.
 
 **Refresh.** The index is built at boot. A trusted user can say "reload your
 skills" to re-scan after pulling a catalog; the `reload_skills` tool sits behind

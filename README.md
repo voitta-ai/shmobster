@@ -1,35 +1,155 @@
 # shmobster
 
-Standalone Slack agent, built bottom-up. Two features force it to exist:
-**multi-vendor API waterfall** (rate limits) and **multi-user Slack authz**
-(collaborators). Everything else is borrowed or transplanted.
+A Slack agent you host yourself: one process per machine, answering in the
+channels it is invited to, running commands in a tree you scope per channel.
+
+**The punch line, before the backstory:**
+
+- **Nothing it runs leaves the channel's tree.** Every command -- read-only,
+  granted or approved -- executes under macOS `sandbox-exec`, so `ls ~` is
+  `Operation not permitted`. No sandbox, no command: there is no unconfined
+  fallback.
+- **Nothing that mutates runs until a human clicks Approve**, with one
+  documented exception -- writes inside the channel's own tree and commits you
+  authored yourself, so working where the channel is pointed is not a stream of
+  prompts.
+- **No single vendor can take it offline.** Model vendors are an ordered
+  waterfall; a 429, a 401 or an exhausted budget falls through to the next rung,
+  and an exhausted one is parked rather than re-dialled every turn.
+- **Nothing it says carries a credential out.** Output is scrubbed where it is
+  collected, and the process refuses to boot if the redactor is missing.
+- **It can tell you which build it is**, and announces its own upgrades in the
+  channel.
+
+**What it costs you:** a macOS machine that stays up, a Slack app of your own, a
+clone of [voitta-yolt](https://github.com/voitta-ai/voitta-yolt), and at least
+one model API key. It is **v0.7.0** -- 0.x because someone else's config does not
+yet survive an upgrade.
+
+> Delivery style throughout, including the section order: punch line first,
+> backstory after --
+> ["I'm OK; the bull is dead"](https://www.computerworld.com/article/1702433/i-m-ok-the-bull-is-dead.html).
+
+## At a glance
+
+The same answer, for a reader that parses rather than skims:
+
+```yaml
+version:     "0.7.0"          # anchor: shmobster/__init__.py; build() reports <version>+<sha>
+platform:    macOS            # sandbox-exec is required, and fail-closed
+python:      "3.12+"          # CI pins 3.12
+entrypoint:  .venv/bin/python -m shmobster.slack_app
+check:       .venv/bin/python selfcheck.py    # offline; the repo's whole test surface
+service:     deploy/service.sh {install,restart,update,status,logs,uninstall}
+ingest:      slack socket mode, app_mention events    # DMs are #23
+files:
+  config:       shmobster-config.json       # $SHMOBSTER_CONFIG       gitignored, chmod 600
+  policies:     shmobster-policies.json     # $SHMOBSTER_POLICIES     gitignored, chmod 600
+  state:        shmobster-state.json        # $SHMOBSTER_STATE
+  trajectories: trajectories/<channel>/<date>.jsonl   # $SHMOBSTER_TRAJECTORIES
+  logs:         logs/shmobster.{out,err}.log
+  spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
+needs:
+  - voitta-ai/voitta-yolt >= 1.0.0   # a clone, not a package: exec classifier + secret_redact
+  - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
+  - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
+gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
+secrets:     "${VAR} references only, never literals -- in the examples and in a live config"
+license:     MIT
+```
 
 ## Contents
 
-- [Own / rent / delegate](#own--rent--delegate)
-- [Operating principle: 0, 1, 2, 3, many](#operating-principle-0-1-2-3-many)
-- [Authz = f(user, channel)](#authz--fuser-channel)
-- [Iterations](#iterations)
-- [New instance setup](#new-instance-setup)
-- [Create the Slack app](#create-the-slack-app)
-- [Slack scopes](#slack-scopes)
-- [Trust model](#trust-model)
-- [What does not need a card (#117)](#what-does-not-need-a-card-117)
-- [Learning (#129)](#learning-129)
-- [Sandbox (#116)](#sandbox-116)
-- [Config & run](#config--run)
-- [Free-tier fallbacks](#free-tier-fallbacks)
-- [When a vendor runs out of budget (#80)](#when-a-vendor-runs-out-of-budget-80)
-- [Codex subscription as a rung (#35)](#codex-subscription-as-a-rung-35)
-- [Skills (#74)](#skills-74)
-- [Credential redaction (#72)](#credential-redaction-72)
-- [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
-- [Versioning & releases (#76)](#versioning--releases-76)
-- [Upgrade announcements (#77)](#upgrade-announcements-77)
-- [Running multiple instances](#running-multiple-instances)
+| I want to... | Start at |
+|---|---|
+| know what this replaced | [What we tried before](#what-we-tried-before) |
+| know why it exists at all | [Why this one](#why-this-one) |
+| stand one up, or use one | [How to use it](#how-to-use-it) |
+| know what it will run on its own | [How it decides what to run](#how-it-decides-what-to-run) |
+| change it | [How to improve it](#how-to-improve-it) |
+| hear why not something off the shelf | [Why not something else](#why-not-something-else) |
+
+<details>
+<summary>Every section</summary>
+
+- [At a glance](#at-a-glance)
+- [What we tried before](#what-we-tried-before)
+- [Why this one](#why-this-one)
+  - [Own / rent / delegate](#own--rent--delegate)
+  - [Operating principle: 0, 1, 2, 3, many](#operating-principle-0-1-2-3-many)
+  - [Authz = f(user, channel)](#authz--fuser-channel)
+- [How to use it](#how-to-use-it)
+  - [Talking to it](#talking-to-it)
+  - [New instance setup](#new-instance-setup)
+  - [Create the Slack app](#create-the-slack-app)
+  - [Slack scopes](#slack-scopes)
+  - [Config & run](#config--run)
+  - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
+  - [Running multiple instances](#running-multiple-instances)
+- [How it decides what to run](#how-it-decides-what-to-run)
+  - [Trust model](#trust-model)
+  - [Approving mutating commands (#48)](#approving-mutating-commands-48)
+  - [Sandbox (#116)](#sandbox-116)
+  - [Credential redaction (#72)](#credential-redaction-72)
+- [The model waterfall](#the-model-waterfall)
+  - [Free-tier fallbacks](#free-tier-fallbacks)
+- [Skills and learning](#skills-and-learning)
+  - [Skills (#74)](#skills-74)
+  - [Learning (#129)](#learning-129)
+- [How to improve it](#how-to-improve-it)
+  - [The map](#the-map)
+  - [Where a change goes](#where-a-change-goes)
+  - [House rules](#house-rules)
+  - [Versioning & releases (#76)](#versioning--releases-76)
+  - [Where it is going](#where-it-is-going)
+- [Why not something else](#why-not-something-else)
 - [License](#license)
 
-## Own / rent / delegate
+</details>
+
+## What we tried before
+
+A locally maintained fork of the [OpenClaw](https://github.com/openclaw/openclaw)
+desktop app. It worked, and then it stopped being the right shape (#1):
+
+- **An Electron app is a poor daemon.** A GUI process, Sparkle updates, and a
+  gateway that had to be alive for the agent to be alive.
+- **Secrets sat in plaintext.**
+- **Every command asked.** In the channel we used most, ~14 of 20 recent agent
+  messages were *"approved command did not run / exec denied
+  (approval-timeout)"* -- and every denied command was a read-only diagnostic:
+  `lsof`, `pgrep`, `find`, `sample`. A gate that fires on `pgrep` teaches you to
+  stop reading gates.
+
+One part was worth keeping, and was kept: the `.md` workspace spine
+(SOUL / USER / CALIBRATION / RUNBOOKS / TOOLS). It is transplanted here under
+MIT with credit (#46,
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)), it is runtime-agnostic, and
+the loop boots by reading it.
+
+Why not simply adopt something else off the shelf: see
+[Why not something else](#why-not-something-else), at the bottom where it
+belongs.
+
+## Why this one
+
+Two features force a bespoke build. Everything else is borrowed.
+
+- **A model waterfall we control.** Rate limits and spent budgets are the
+  weather, not the incident. The primary 429s and the next rung answers; a
+  vendor that reports no budget is parked instead of re-dialled on every turn
+  (#80), and a 429 cools the deployment on the first failure rather than the
+  fifth (#51).
+- **Multi-user Slack authz.** A channel is a room with other people in it, so
+  what the agent may do has to be a function of *who asked* and *where* --
+  `authz = f(user, channel)` -- not one global switch.
+
+Neither can be bolted on from outside someone else's loop, because both live
+inside the turn: the waterfall decides what happens when a call fails mid-turn,
+and authz decides whether a tool call is allowed to happen at all. The rest of
+the design is the discipline of refusing to own anything else.
+
+### Own / rent / delegate
 
 - **Own:** orchestration loop, Slack door + socket reliability, authz.
 - **Rent:** LiteLLM (multi-vendor waterfall), voitta-yolt (exec classifier,
@@ -42,7 +162,7 @@ Standalone Slack agent, built bottom-up. Two features force it to exist:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)) and is runtime-agnostic; the
   loop boots by reading it.
 
-## Operating principle: 0, 1, 2, 3, many
+### Operating principle: 0, 1, 2, 3, many
 
 Each axis sits at its own cardinality; architect each to its number; advance
 only when that count actually increments.
@@ -55,18 +175,52 @@ only when that count actually increments.
 
 Generalize only when someone else wants in. Not before.
 
-## Authz = f(user, channel)
+### Authz = f(user, channel)
 
 - **YOLT** answers *is this command mutating?* (read-only -> run; mutating -> gate)
 - **Channel policy** answers *is this in scope?* -- a config map
   `channel_id -> {cwd_allow, github_allow, aws_profile, extra_whitelist, owner_only}`
 
-## Iterations
+## How to use it
 
-See issues. 0 skeleton -> 1 exec-gate (YOLT) -> 2 per-channel policy ->
-3 waterfall hardening -> 4 multi-user.
+One instance per machine: its own Slack app, its own config, its own launchd
+service. The long form is the sections below; this is the short form for
+someone who has done it before.
 
-## New instance setup
+    git clone https://github.com/voitta-ai/shmobster && cd shmobster
+    git clone https://github.com/voitta-ai/voitta-yolt ../voitta-yolt   # the exec classifier
+    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    cp examples/shmobster-config-example.json shmobster-config.json
+    cp examples/shmobster-policies-example.json shmobster-policies.json
+    chmod 600 shmobster-config.json shmobster-policies.json
+    # create the Slack app from deploy/slack-app-manifest.yaml, then fill both files
+    .venv/bin/python selfcheck.py                  # offline sanity
+    .venv/bin/python -m shmobster.slack_app        # foreground; launchd for real use
+
+### Talking to it
+
+@mention it in a channel it has been invited to. It reacts `:eyes:` as soon as
+it has the message (#32) and replies in the thread; the thread is the session,
+so a follow-up does not have to repeat itself (#11). Attach an image or a text
+file to the mention and it reads it (#68).
+
+What that feels like in practice:
+
+- **Read-only work just happens.** No confirmation step for a `git log`, and no
+  approval spam -- that was the point (see
+  [What we tried before](#what-we-tried-before)).
+- **A mutating command comes back as a card** with Approve / Deny. Anyone in the
+  channel may ask for it; only a trusted user may release it. `@agent approve
+  <id>` does the same job when the buttons are out of reach.
+- **A trusted user can re-scope a channel from inside the channel** -- "you may
+  also use repo `x/y`" calls `set_policy`. Nobody can grant *themselves* trust
+  that way; the trusted list is file-only.
+- **It knows which build it is.** Ask it.
+
+Not yet: DMs (#23 -- it only sees `app_mention` events) and arbitrary URLs
+(#62).
+
+### New instance setup
 
 One instance per machine (each its own Slack app + config):
 
@@ -82,7 +236,7 @@ One instance per machine (each its own Slack app + config):
 5. `.venv/bin/python selfcheck.py` (offline sanity).
 6. Run under launchd (see below).
 
-## Create the Slack app
+### Create the Slack app
 
 Shmobster connects over Socket Mode, so it needs its own Slack app (a bot token
 and an app-level token). A workspace can host more than one -- e.g. a
@@ -111,7 +265,7 @@ name and, ideally, a dedicated test channel to avoid cross-talk.
 > must **reinstall** to grant it (OAuth & Permissions -> add the scope ->
 > Reinstall to Workspace) -- until then the reaction just no-ops.
 
-## Slack scopes
+### Slack scopes
 
 Every bot scope the loop actually uses, all granted by
 [the manifest](deploy/slack-app-manifest.yaml):
@@ -140,7 +294,7 @@ One the manifest deliberately leaves out:
 means **not a member**, not a bad token and not a bad channel ID. Fix it with
 `/invite @<app name>` in that channel.
 
-### What a live app actually holds
+#### What a live app actually holds
 
 Exporting an app's manifest (`apps.manifest.export`) needs an *app
 configuration token*, which a running instance does not have. The granted
@@ -167,7 +321,7 @@ channel picker. The manifest is the reference, not the live app; bring an
 old app down to it in **OAuth & Permissions** (remove the scopes, then
 **Reinstall to Workspace** -- the bot token survives a reinstall).
 
-### Attachments (#68)
+#### Attachments (#68)
 
 Mention the agent with a file attached and it reads it: images go to the model
 as images, text files as text. Anything else comes back as a one-line note in
@@ -183,7 +337,270 @@ back as `got Slack's sign-in page instead of the file` -- Slack answers an
 unauthorized file fetch with a **200 and the HTML login page**, not an error, so
 that string is the scope being missing rather than a network problem.
 
-## Trust model
+### Config & run
+
+One JSON config, no `.env`. Copy the example and fill it in:
+
+    cp examples/shmobster-config-example.json shmobster-config.json
+    chmod 600 shmobster-config.json   # holds secrets; gitignored
+
+`shmobster-config.json` fields:
+
+- `slack.bot_token` / `slack.app_token` -- from your Slack app (see
+  **Create the Slack app** above).
+- `slack.channels` -- list of `{name, id}` channels Shmobster responds in
+  (Iter 0: just m-and-a). `name` is for humans; `id` is what Slack matches.
+- `agent.label` -- name shown in the post marker `[agent: <label>]`. Leave empty
+  (or omit) to auto-derive from the Slack app's display name on boot (#8), so the
+  label matches whatever you named the app.
+- `agent.workspace` -- path to the `.md` spine (point at an openclaw-workspace
+  clone, or use the bundled `./workspace`).
+- `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
+  `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
+  endpoints like openrouter / nvidia).
+- `budget_park_sec` -- how long to skip a vendor that reported no budget
+  (default 3600; 0 disables). See **When a vendor runs out of budget**.
+- `skills.paths` -- directories of skills to load (see **Skills** below). Omit
+  for none.
+- `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
+  [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
+  `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones
+  park for a trusted user's approval (see **Approving mutating commands**).
+  `cwd`: working dir for commands. `timeout_sec`: per
+  command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
+  are in requirements.txt.)
+
+#### Secrets: reference the environment, don't paste keys (opinionated)
+
+Any string value in the config may contain `${VAR}`, expanded from the process
+environment at load time -- e.g. `"api_key": "${ANTHROPIC_API_KEY}"`,
+`"bot_token": "${SLACK_BOT_TOKEN}"`. A referenced variable that is **unset fails
+startup loudly** (it never sends an empty credential). Prefer this over literal
+keys so the config file holds no secrets. Don't like it? Send a PR.
+
+Values are **never logged**: shmobster logs no credential, and the LiteLLM router
+is pinned to non-verbose + WARNING so it can't dump request params (which carry
+`api_key`). See [voitta-yolt#84](https://github.com/voitta-ai/voitta-yolt/issues/84)
+for why that matters.
+
+**macOS launchd caveat:** launchd does **not** read `~/.bash_profile`, so a
+service-run shmobster won't see your shell's exports and `${VAR}` expansion fails
+loudly at boot. Put the vars in the launchctl environment (`launchctl setenv VAR
+value`, or a sync tool such as osx-env-sync) or in the plist's
+`EnvironmentVariables`. Four things about that are easy to get wrong, and each
+one looks like a missing variable:
+
+- **A running service does not see a later `setenv`.** Its environment is a
+  snapshot taken when the service was bootstrapped, and `launchctl kickstart -k`
+  (what `deploy/service.sh restart` uses) reuses the loaded definition. A new
+  variable needs `bootout` + `bootstrap` -- `deploy/service.sh update` -- before
+  the process can see it. Check what the service actually has:
+
+      launchctl print gui/$(id -u)/ai.shmobster.agent | sed -n '/environment/,/}/p'
+
+- **`launchctl getenv` exits 0 whether or not the variable is set**, so
+  `getenv X && echo present` always says present. Measure the output instead:
+  `launchctl getenv X | wc -c` -- 0 bytes means unset.
+
+- **A sync tool that greps `^export` out of one profile misses sourced files.**
+  If `~/.bash_profile` does `. ~/.bash_profile_extra.sh`, a text scan never sees
+  what that file defines, and those variables silently never sync. Compare
+  `grep -c '^export' ~/.bash_profile` against `bash -lc 'compgen -e' | wc -l`; if
+  they differ, deriving the list from the live login environment is the fix.
+
+- **The live environment includes the session you run the sync from.** Run
+  it from a cmux pane or a Claude Code session and `compgen -e` carries
+  `PROMPT_COMMAND=_cmux_prompt_command`, thirty `CMUX_*` identity vars,
+  `CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1`, a `CLAUDE_CODE_MESSAGING_SOCKET`
+  that dies with the session, and `NODE_OPTIONS=--require=<a $TMPDIR file>` --
+  and the next `bootstrap` snapshots all of it into the service, where
+  `tools.py` copies it into every command the agent runs (#118). Nothing errors;
+  every `node` under the agent just depends on a `$TMPDIR` file the OS reaps
+  after a few idle days. Denylist session-scoped names in the sync
+  (`PROMPT_COMMAND`, `CMUX_.*`, `CLAUDE.*`, `GHOSTTY_.*`, `TERMINFO`,
+  `NODE_OPTIONS`, `CODEX_.*`, `AI_AGENT`) and audit the service with the
+  `inherited environment` print above. A wrong value is stickier than a
+  missing one: `launchctl unsetenv` each name, *then* `deploy/service.sh
+  update` -- `restart` (kickstart) keeps the snapshot, and the bootstrap half
+  of `update` can race `bootout` (#92).
+
+#### Per-channel policy
+
+Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
+machine's channel layout is versioned separately from the token/key config:
+
+    cp examples/shmobster-policies-example.json shmobster-policies.json
+
+`shmobster-policies.json` (gitignored; path overridable via `SHMOBSTER_POLICIES`):
+
+- `channel_policies` / `default_policy` -- per-channel capability envelope
+  (Iter #4). Channels not listed use `default_policy`. Each policy:
+  - `cwd` -- commands run here (a channel scoped to a project points at that
+    project's dir). A *free-for-all* channel is just `{ "cwd": ... }` with no
+    further keys -- nothing to restrict. `~` and `$VARS` are expanded at
+    exec-time, so `"~/g/project"` works.
+  - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
+    `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
+  - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
+    overriding to another profile is blocked. Omit for no AWS.
+  - `exclude` -- paths under `cwd` to keep off-limits, e.g.
+    `["~/g/OneDrive"]`. Enforced twice: a command whose (expanded) tokens
+    resolve under an excluded path is blocked before it runs, with a reason
+    the agent can read; and the path is denied in the channel's sandbox
+    profile (#116), which is what catches a symlink or a path the shell
+    resolves at runtime. Omit for no exclusions.
+  - `allow_read` / `allow_write` -- paths under `/Users` or `/Volumes` this
+    channel's commands may reach beyond the tree and the built-in toolchain
+    allowlist (see **Sandbox**), e.g. a data directory next to the project.
+    Not for credentials: a file a channel can read, a read-only `cat` posts
+    into Slack without a card. Git needs no `~/.ssh` (it runs over https),
+    and AWS keys belong in `env`. `allow_write` grants read too. Relative
+    entries resolve against `cwd`.
+  - `skills` -- directories of `<name>/SKILL.md` this channel alone may load,
+    on top of the global `skills.paths` (see **Skills**). Where a learned skill
+    is picked up after its PR merges. `~`, `$VARS` and cwd-relative entries
+    resolve like `allow_read`; an entry under the channel's writable roots is
+    ignored with a warning (a granted write must not become standing
+    instructions).
+  - `env` -- extra environment variables injected only for this channel's
+    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
+    as `${VAR}` references like everything else (#104), not literals:
+
+        "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" }
+
+    This is also how you give one channel an API token *without* handing it to
+    every channel. A name that appears in any channel's `env` is treated as
+    channel-scoped: it is stripped from the environment every command inherits,
+    and added back only for the channel that declares it. So the `${VAR}` the
+    process needs in order to expand the reference is not readable from another
+    channel with a plain `printenv`. And a
+    command that can read the credential it needs from its environment is a
+    plain read-only command -- no `source`, so nothing trips the mutating gate
+    and nothing needs approving.
+
+Because `env` may hold secrets, treat `shmobster-policies.json` like the main
+config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
+`default_policy` in the main config are still honored when no
+`shmobster-policies.json` exists.
+
+#### Run
+
+    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    .venv/bin/python selfcheck.py            # offline sanity check
+    .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
+
+### Running as a service (launchd, macOS)
+
+For anything but a quick foreground test, run it under launchd so it stays up
+across restarts/sleep, independent of any shell. First time, make your own
+(gitignored) plist from the sample and set the paths:
+
+    cp deploy/ai.shmobster.plist.sample deploy/ai.shmobster.plist
+    # edit deploy/ai.shmobster.plist: replace /Users/CHANGE_ME/path/to/shmobster
+    deploy/service.sh install
+
+Then:
+
+    deploy/service.sh restart       # after `git pull`, to load new code (kickstart)
+    deploy/service.sh update        # after editing the plist, re-copy + full reload
+    deploy/service.sh status        # pid / state
+    deploy/service.sh logs          # tail logs/shmobster.err.log
+    deploy/service.sh uninstall     # stop + remove
+
+**Upgrading pulls three checkouts, not one.** shmobster reads two sibling
+repos at runtime -- voitta-yolt's classifier and redactor
+(`exec.yolt_classifier`) and the skills directories in `skills.paths` (skillz,
+and any private catalog) -- so the code that actually runs after a restart is
+whatever those checkouts hold, and a release note that says "needs yolt >=
+X" means their `git pull`, not this repo's. In that order:
+
+    git -C /path/to/voitta-yolt pull
+    git -C /path/to/skillz pull            # and each other skills.paths entry
+    git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
+    git pull && .venv/bin/pip install -r requirements.txt
+    .venv/bin/python selfcheck.py
+    deploy/service.sh restart
+
+Same order for a reinstall on a fresh machine: yolt and skillz first, then
+this repo, then the config.
+
+The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
+`deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
+`KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop
+guard). Logs go to `logs/shmobster.{out,err}.log`.
+
+It also sets `PATH` explicitly, which matters more than it looks (#50): launchd
+gives a process only `/usr/bin:/bin:/usr/sbin:/sbin`, so without it the agent
+cannot see `gh`, `aws`, `node` or anything else under `/opt/homebrew/bin`, and
+those commands fail with exit 127 `command not found` -- easy to misread as the
+approval gate blocking them. If your plist predates this, copy the
+`EnvironmentVariables` block from the sample and run `deploy/service.sh update`.
+Check what the running agent actually has:
+
+    ps eww "$(launchctl print gui/$(id -u)/ai.shmobster.agent | awk '/pid =/{print $3}')" | tr ' ' '\n' | grep ^PATH=
+
+#### Liveness watchdog (#66)
+
+`KeepAlive` only reacts to a process that exits, and the nastiest Socket Mode
+failure does not exit: the client reconnects forever without ever receiving
+anything (handshake 101, no `hello`, no pong, server drops the socket ~20s
+later, EPIPE, reconnect, repeat). Every error is caught and logged, so launchd
+sees a healthy service while the agent is deaf. One instance sat like that for
+13 days.
+
+So the process watches itself. A daemon thread exits nonzero -- letting
+`KeepAlive` restart it -- once the connection has looked broken for
+`watchdog_timeout_sec` (default 120, minimum 90, `0` disables) by either of two
+measures:
+
+- **No stable session.** In the wedge no session survives ~21s; a healthy one
+  lives for hours. The watchdog wants some session to reach 60s.
+- **No ping/pong.** Covers a session that stays up but goes quiet. Pongs land
+  every ~10s (`ping_interval`) no matter how busy the workspace is.
+
+Both have to look healthy, and neither is *delivered events*: a bot in quiet
+channels legitimately receives none for days. Reconnect logs are not a signal
+either -- the wedged instance emitted 52,707 of them in 13 days.
+
+The floor of 90s exists because the SDK heals ordinary stalls by itself: it
+tears a session down at `ping_interval * 4` (40s) and needs another cycle to
+re-establish. A shorter timeout turns that self-healing into a restart loop.
+
+Two costs, both accepted. A genuine network outage restarts the agent every
+timeout until the network returns (`ThrottleInterval=10` bounds the churn), and
+each restart clears the in-memory approval queue, so a command parked before the
+restart has to be asked again -- the same "safe direction" `approvals` already
+takes on any restart.
+
+### Running multiple instances
+
+Each instance is one config file + one process. `shmobster` is just the project
+name; name each instance via `agent.label` (or let it auto-derive from the app).
+
+- **Different machines** (e.g. Barrymore here, Cosima elsewhere): nothing
+  special -- each machine has its own gitignored `shmobster-config.json` and
+  plist, and the default launchd Label doesn't collide across machines.
+- **Ad-hoc / a second config:**
+  `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
+- **Two instances on the *same* machine** additionally need distinct launchd
+  Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+## How it decides what to run
+
+A command has to clear all of these. The model's opinion is not one of them.
+
+| Gate | Question it answers | Lives in |
+|---|---|---|
+| YOLT verdict | does this mutate anything? | `yolt_gate.py` -> voitta-yolt |
+| Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
+| Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |
+| Sandbox (#116) | where may it reach on this disk? | `sandbox.py` -> `sandbox-exec` |
+| A human | may it run at all? | `approvals.py` -> Approve / Deny |
+
+Everything the agent then says is scrubbed on the way out
+([Credential redaction](#credential-redaction-72)).
+
+### Trust model
 
 Assumes **private channels and trusted invitees -- no bad actors.** The agent
 responds to any @mention in any channel it's in (invite = permission to talk).
@@ -202,7 +619,7 @@ Two tiers:
 The `trusted_users` gate protects **config changes and approvals**, not general
 use.
 
-### Multiple instances in one channel (#60)
+#### Multiple instances in one channel (#60)
 
 Two instances (e.g. a bot per machine) can share a channel. Each is its own
 Slack app with a distinct bot user id (`config.BOT_USER_ID`, resolved from
@@ -212,7 +629,7 @@ instance's own messages show as `<label> (me)`, a sibling's as
 from mistaking a sibling's (or its own) posts for impersonation. `SOUL.md`
 tells the agent siblings are normal collaborators, not spoofing.
 
-## Approving mutating commands (#48)
+### Approving mutating commands (#48)
 
 Two independent gates, deliberately separate:
 
@@ -291,7 +708,7 @@ current [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) get i
 an older app needs **Interactivity & Shortcuts** -> toggle on -> reinstall.
 Over Socket Mode there is no request URL to fill in and no extra OAuth scope.
 
-### What does not need a card (#117)
+#### What does not need a card (#117)
 
 YOLT answers *does this mutate anything*, and every yes used to park --
 including `cp x app/index.html && git add ... && git commit ...` inside the
@@ -337,49 +754,7 @@ Every grant is logged with its grounds, next to the park and claim lines:
 
     run_shell: granted in C0... ('cd; cp: in-tree write; git add: local; git commit: linked worktree on welcome-flow, solo author'): 'cd ... && cp ... && git add ... && git commit ...'
 
-## Learning (#129)
-
-The agent can notice that a turn was worth writing down; a trusted user
-decides whether it is; a merged PR is what makes it a skill. Design in #100,
-principle in #52: *learning inherits the authz spine*.
-
-- **Capture.** Every channel turn is recorded -- request, each tool call with
-  its disposition (`ran` / `parked` / `blocked` / `approved`), the answer --
-  as one JSON line under `trajectories/<channel>/<date>.jsonl`, scrubbed at
-  the emission site like the approval log, gitignored (`SHMOBSTER_TRAJECTORIES`
-  to move it).
-- **Flag.** `flag_skill(name, why)` is the one tool the agent may call on its
-  own initiative, at most once per thread, when the work met the bar (non-obvious
-  debugging, a workaround found by trial and error, a project quirk the docs do
-  not cover). It writes nothing. The reply is followed by a card:
-
-      :bulb: Worth a skill? [a1b2c3d4e5f60718-2] `<name>` -- <why>
-      <@trusted> <@trusted> -- a trusted user decides; nothing is written until then.
-      [ Open PR ]  [ Decline ]
-
-- **Decide.** A trusted click on **Open PR** drafts a `SKILL.md` (skillz
-  format) from the thread's record via the waterfall and opens a PR against
-  `learning.repo` at `learning.path` -- through `gh api` from the agent
-  process, never from the channel's shell: the sandbox confines a channel to
-  its tree and the model gets no push path to the skills repo. **Decline**
-  records the thread so it is not asked again. Text works too, by id:
-  `@agent propose a1b2c3d4e5f60718-2` / `decline ...`. An untrusted click gets
-  the same refusal as an approval click (#107); the queue is a sibling of the
-  approval queue, so a proposal id handed to `approve_command` resolves to
-  nothing.
-- **Promote.** Merging the PR. The channel's policy `skills` entry points at
-  its dir in the private catalog (#130), so after the next `git pull` of that
-  clone the skill is on the menu -- in that channel only. A loaded skill
-  carries no authority -- it is prompt text, and its commands go through the
-  same YOLT / grant / sandbox / approval path as anything else.
-
-Config: `learning.repo` (owner/repo; unset = feature off, tool not offered),
-`learning.base` (default `master`), `learning.path` (default
-`channels/{channel}/skills/{name}/SKILL.md`, `{channel}` = the channel's
-configured name, slugged). Needs `gh` logged in on the host, which git over
-https already requires.
-
-## Sandbox (#116)
+### Sandbox (#116)
 
 Every command that runs -- read-only, approved, whichever -- runs under macOS
 `sandbox-exec`, confined to the channel's tree. Three gates, each on every
@@ -432,156 +807,55 @@ Fail closed: no `sandbox-exec`, no command -- never a fallback to running
 unconfined. Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST`
 are external effects and stay behind the approval card.
 
-## Config & run
+### Credential redaction (#72)
 
-One JSON config, no `.env`. Copy the example and fill it in:
+Everything this agent says is scrubbed before it leaves the process. The bug
+class is the one that bit [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)
+(#84, #91): anything returning command output verbatim hoards every credential
+that rides through it. `run_shell` hands output straight to a channel, and `cat`,
+`env` and `printenv` are read-only -- they clear the YOLT gate and run with no
+approval.
 
-    cp examples/shmobster-config-example.json shmobster-config.json
-    chmod 600 shmobster-config.json   # holds secrets; gitignored
+Two layers:
 
-`shmobster-config.json` fields:
+- **Known shapes** -- detection is voitta-yolt's `secret_redact` (v1.0.0+),
+  imported from the same tree as the classifier this instance already uses. One
+  source of truth, not a second pattern list that drifts. Markers name the shape
+  (`[REDACTED:github-token]`) so a redacted record stays diagnosable.
+- **Known values** -- the one thing YOLT cannot know: this process's own secrets.
+  Every Slack token, waterfall `api_key` and per-channel policy `env` value is
+  matched exactly, so a credential in a format nobody anticipated is still caught
+  when it is one of ours.
 
-- `slack.bot_token` / `slack.app_token` -- from your Slack app (see
-  **Create the Slack app** above).
-- `slack.channels` -- list of `{name, id}` channels Shmobster responds in
-  (Iter 0: just m-and-a). `name` is for humans; `id` is what Slack matches.
-- `agent.label` -- name shown in the post marker `[agent: <label>]`. Leave empty
-  (or omit) to auto-derive from the Slack app's display name on boot (#8), so the
-  label matches whatever you named the app.
-- `agent.workspace` -- path to the `.md` spine (point at an openclaw-workspace
-  clone, or use the bundled `./workspace`).
-- `waterfall` -- ordered vendor list, first = primary. Each entry: `name`,
-  `model` (LiteLLM id), `api_key`, optional `api_base` (for OpenAI-compatible
-  endpoints like openrouter / nvidia).
-- `budget_park_sec` -- how long to skip a vendor that reported no budget
-  (default 3600; 0 disables). See **When a vendor runs out of budget**.
-- `skills.paths` -- directories of skills to load (see **Skills** below). Omit
-  for none.
+Scrubbing happens **at collection** -- the tool result, before it enters the
+model's context -- so every downstream copy inherits it: the vendor's logs, the
+thread, and anything the model later quotes. The final reply and the
+approval-button messages are scrubbed again on the way out, since a parked
+command carries its own argv.
 
-### Secrets: reference the environment, don't paste keys (opinionated)
+Deliberately not included: a generic "40 characters of base64" rule. It matches a
+git SHA, so it would redact half of any `git log`. A redactor that mangles
+ordinary output gets switched off, and then it protects nothing.
 
-Any string value in the config may contain `${VAR}`, expanded from the process
-environment at load time -- e.g. `"api_key": "${ANTHROPIC_API_KEY}"`,
-`"bot_token": "${SLACK_BOT_TOKEN}"`. A referenced variable that is **unset fails
-startup loudly** (it never sends an empty credential). Prefer this over literal
-keys so the config file holds no secrets. Don't like it? Send a PR.
+**Fails loudly, never open.** With `secret_redact` unavailable the agent refuses
+to start rather than posting unredacted output -- posting a secret is worse than
+not booting. That makes voitta-yolt v1.0.0+ a hard requirement, not just for the
+exec gate.
 
-Values are **never logged**: shmobster logs no credential, and the LiteLLM router
-is pinned to non-verbose + WARNING so it can't dump request params (which carry
-`api_key`). See [voitta-yolt#84](https://github.com/voitta-ai/voitta-yolt/issues/84)
-for why that matters.
+> Redaction is best-effort on shapes it knows plus values it holds. It is a
+> backstop for accidents, not a licence to put secrets where the agent can read
+> them. Config values stay `${VAR}` references (#73).
 
-**macOS launchd caveat:** launchd does **not** read `~/.bash_profile`, so a
-service-run shmobster won't see your shell's exports and `${VAR}` expansion fails
-loudly at boot. Put the vars in the launchctl environment (`launchctl setenv VAR
-value`, or a sync tool such as osx-env-sync) or in the plist's
-`EnvironmentVariables`. Three things about that are easy to get wrong, and each
-one looks like a missing variable:
+## The model waterfall
 
-- **A running service does not see a later `setenv`.** Its environment is a
-  snapshot taken when the service was bootstrapped, and `launchctl kickstart -k`
-  (what `deploy/service.sh restart` uses) reuses the loaded definition. A new
-  variable needs `bootout` + `bootstrap` -- `deploy/service.sh update` -- before
-  the process can see it. Check what the service actually has:
+`waterfall` is an ordered list of vendors; the first is the primary and every
+other one exists for the moment the primary says no. LiteLLM's Router does the
+dialling -- rented, not owned. What is owned here is the *cooling policy*,
+because the defaults miss the two failures that actually happen: a spent budget,
+which is not one of the statuses LiteLLM cools (#80), and the first 429, which
+by default takes several before it counts (#51).
 
-      launchctl print gui/$(id -u)/ai.shmobster.agent | sed -n '/environment/,/}/p'
-
-- **`launchctl getenv` exits 0 whether or not the variable is set**, so
-  `getenv X && echo present` always says present. Measure the output instead:
-  `launchctl getenv X | wc -c` -- 0 bytes means unset.
-
-- **A sync tool that greps `^export` out of one profile misses sourced files.**
-  If `~/.bash_profile` does `. ~/.bash_profile_extra.sh`, a text scan never sees
-  what that file defines, and those variables silently never sync. Compare
-  `grep -c '^export' ~/.bash_profile` against `bash -lc 'compgen -e' | wc -l`; if
-  they differ, deriving the list from the live login environment is the fix.
-- `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
-  [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
-  `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones
-  park for a trusted user's approval (see **Approving mutating commands**).
-  `cwd`: working dir for commands. `timeout_sec`: per
-  command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
-  are in requirements.txt.)
-Per-channel policy lives in its own file, not in `shmobster-config.json`, so a
-machine's channel layout is versioned separately from the token/key config:
-
-- **The live environment includes the session you run the sync from.** Run
-  it from a cmux pane or a Claude Code session and `compgen -e` carries
-  `PROMPT_COMMAND=_cmux_prompt_command`, thirty `CMUX_*` identity vars,
-  `CLAUDECODE=1`, `CLAUDE_CODE_CHILD_SESSION=1`, a `CLAUDE_CODE_MESSAGING_SOCKET`
-  that dies with the session, and `NODE_OPTIONS=--require=<a $TMPDIR file>` --
-  and the next `bootstrap` snapshots all of it into the service, where
-  `tools.py` copies it into every command the agent runs (#118). Nothing errors;
-  every `node` under the agent just depends on a `$TMPDIR` file the OS reaps
-  after a few idle days. Denylist session-scoped names in the sync
-  (`PROMPT_COMMAND`, `CMUX_.*`, `CLAUDE.*`, `GHOSTTY_.*`, `TERMINFO`,
-  `NODE_OPTIONS`, `CODEX_.*`, `AI_AGENT`) and audit the service with the
-  `inherited environment` print above. A wrong value is stickier than a
-  missing one: `launchctl unsetenv` each name, *then* `deploy/service.sh
-  update` -- `restart` (kickstart) keeps the snapshot, and the bootstrap half
-  of `update` can race `bootout` (#92).
-
-    cp examples/shmobster-policies-example.json shmobster-policies.json
-
-`shmobster-policies.json` (gitignored; path overridable via `SHMOBSTER_POLICIES`):
-
-- `channel_policies` / `default_policy` -- per-channel capability envelope
-  (Iter #4). Channels not listed use `default_policy`. Each policy:
-  - `cwd` -- commands run here (a channel scoped to a project points at that
-    project's dir). A *free-for-all* channel is just `{ "cwd": ... }` with no
-    further keys -- nothing to restrict. `~` and `$VARS` are expanded at
-    exec-time, so `"~/g/project"` works.
-  - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
-    `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
-  - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
-    overriding to another profile is blocked. Omit for no AWS.
-  - `exclude` -- paths under `cwd` to keep off-limits, e.g.
-    `["~/g/OneDrive"]`. Enforced twice: a command whose (expanded) tokens
-    resolve under an excluded path is blocked before it runs, with a reason
-    the agent can read; and the path is denied in the channel's sandbox
-    profile (#116), which is what catches a symlink or a path the shell
-    resolves at runtime. Omit for no exclusions.
-  - `allow_read` / `allow_write` -- paths under `/Users` or `/Volumes` this
-    channel's commands may reach beyond the tree and the built-in toolchain
-    allowlist (see **Sandbox**), e.g. a data directory next to the project.
-    Not for credentials: a file a channel can read, a read-only `cat` posts
-    into Slack without a card. Git needs no `~/.ssh` (it runs over https),
-    and AWS keys belong in `env`. `allow_write` grants read too. Relative
-    entries resolve against `cwd`.
-  - `skills` -- directories of `<name>/SKILL.md` this channel alone may load,
-    on top of the global `skills.paths` (see **Skills**). Where a learned skill
-    is picked up after its PR merges. `~`, `$VARS` and cwd-relative entries
-    resolve like `allow_read`; an entry under the channel's writable roots is
-    ignored with a warning (a granted write must not become standing
-    instructions).
-  - `env` -- extra environment variables injected only for this channel's
-    commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
-    as `${VAR}` references like everything else (#104), not literals:
-
-        "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" }
-
-    This is also how you give one channel an API token *without* handing it to
-    every channel. A name that appears in any channel's `env` is treated as
-    channel-scoped: it is stripped from the environment every command inherits,
-    and added back only for the channel that declares it. So the `${VAR}` the
-    process needs in order to expand the reference is not readable from another
-    channel with a plain `printenv`. And a
-    command that can read the credential it needs from its environment is a
-    plain read-only command -- no `source`, so nothing trips the mutating gate
-    and nothing needs approving.
-
-Because `env` may hold secrets, treat `shmobster-policies.json` like the main
-config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
-`default_policy` in the main config are still honored when no
-`shmobster-policies.json` exists.
-
-Run:
-
-    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-    .venv/bin/python selfcheck.py            # offline sanity check
-    .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
-
-## Free-tier fallbacks
+### Free-tier fallbacks
 
 The waterfall exists for rate limits, so the slots below the primary should be
 things that keep answering when the primary will not. Free-tier models on the
@@ -618,7 +892,7 @@ on a tool-schema request to `meta/llama-3.3-70b-instruct`); re-probed on
 a second, so it is in the example config now. The waterfall itself does not
 yet pass a timeout -- #125.
 
-### Finding free, tool-capable models
+#### Finding free, tool-capable models
 
 **OpenRouter** -- free ids end in `:free`; the catalogue lists capabilities:
 
@@ -652,7 +926,7 @@ OpenRouter and Requesty; NIM direct is a separate quota, which is what makes it
 worth its own rung rather than a duplicate. Config: `"model":
 "nvidia_nim/<id>"`, `"api_key": "${NVIDIA_API_KEY}"`.
 
-### Verified working
+#### Verified working
 
 | Route | Model | Tool calls |
 |---|---|---|
@@ -668,7 +942,7 @@ Model ids retire. `gemini-2.0-flash` and `meta/llama-3.1-405b-instruct` both wen
 404 during this round of testing, so prefer an alias like `gemini-flash-latest`
 where the provider offers one, and expect to re-run the probe above periodically.
 
-### Codex subscription as a rung (#35)
+#### Codex subscription as a rung (#35)
 
 Every other rung is an `api_key` HTTP row that LiteLLM can dial from config
 alone. A **codex subscription** is not: it authenticates with the ChatGPT OAuth
@@ -719,7 +993,7 @@ own tool set, sandbox and approval policy, and shmobster already owns that loop
 (handler + YOLT gate + channel policy). Nesting a second agent inside one
 waterfall rung buys nothing here.
 
-### When a vendor runs out of budget (#80)
+#### When a vendor runs out of budget (#80)
 
 LiteLLM decides cooldowns by HTTP status and cools only 429/401/408/404. Budget
 exhaustion is none of those -- Anthropic answers a usage cap with **400**,
@@ -771,7 +1045,15 @@ now cools a deployment on the *first* 429 rather than after a threshold (#51).
 A Slack agent's traffic is bursty and low-volume, so by the time a threshold is
 reached the burst is over and every failure in it was a wasted round-trip.
 
-## Skills (#74)
+## Skills and learning
+
+Standing instructions arrive as files (`SKILL.md`, the
+[skillz](https://github.com/voitta-ai/skillz) format) and leave as pull
+requests. A skill carries **no authority**: it is prompt text, and anything it
+tells the agent to run goes through the gates above exactly like a command a
+human typed.
+
+### Skills (#74)
 
 A skill is a directory holding a `SKILL.md`: YAML frontmatter with `name` and
 `description`, then a Markdown body of steps. That is the format
@@ -834,129 +1116,116 @@ exactly the thing the gate is for.
 agent to run still goes through YOLT and the channel policy, so a skill cannot
 widen what a channel can do.
 
-## Credential redaction (#72)
+### Learning (#129)
 
-Everything this agent says is scrubbed before it leaves the process. The bug
-class is the one that bit [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)
-(#84, #91): anything returning command output verbatim hoards every credential
-that rides through it. `run_shell` hands output straight to a channel, and `cat`,
-`env` and `printenv` are read-only -- they clear the YOLT gate and run with no
-approval.
+The agent can notice that a turn was worth writing down; a trusted user
+decides whether it is; a merged PR is what makes it a skill. Design in #100,
+principle in #52: *learning inherits the authz spine*.
 
-Two layers:
+- **Capture.** Every channel turn is recorded -- request, each tool call with
+  its disposition (`ran` / `parked` / `blocked` / `approved`), the answer --
+  as one JSON line under `trajectories/<channel>/<date>.jsonl`, scrubbed at
+  the emission site like the approval log, gitignored (`SHMOBSTER_TRAJECTORIES`
+  to move it).
+- **Flag.** `flag_skill(name, why)` is the one tool the agent may call on its
+  own initiative, at most once per thread, when the work met the bar (non-obvious
+  debugging, a workaround found by trial and error, a project quirk the docs do
+  not cover). It writes nothing. The reply is followed by a card:
 
-- **Known shapes** -- detection is voitta-yolt's `secret_redact` (v1.0.0+),
-  imported from the same tree as the classifier this instance already uses. One
-  source of truth, not a second pattern list that drifts. Markers name the shape
-  (`[REDACTED:github-token]`) so a redacted record stays diagnosable.
-- **Known values** -- the one thing YOLT cannot know: this process's own secrets.
-  Every Slack token, waterfall `api_key` and per-channel policy `env` value is
-  matched exactly, so a credential in a format nobody anticipated is still caught
-  when it is one of ours.
+      :bulb: Worth a skill? [a1b2c3d4e5f60718-2] `<name>` -- <why>
+      <@trusted> <@trusted> -- a trusted user decides; nothing is written until then.
+      [ Open PR ]  [ Decline ]
 
-Scrubbing happens **at collection** -- the tool result, before it enters the
-model's context -- so every downstream copy inherits it: the vendor's logs, the
-thread, and anything the model later quotes. The final reply and the
-approval-button messages are scrubbed again on the way out, since a parked
-command carries its own argv.
+- **Decide.** A trusted click on **Open PR** drafts a `SKILL.md` (skillz
+  format) from the thread's record via the waterfall and opens a PR against
+  `learning.repo` at `learning.path` -- through `gh api` from the agent
+  process, never from the channel's shell: the sandbox confines a channel to
+  its tree and the model gets no push path to the skills repo. **Decline**
+  records the thread so it is not asked again. Text works too, by id:
+  `@agent propose a1b2c3d4e5f60718-2` / `decline ...`. An untrusted click gets
+  the same refusal as an approval click (#107); the queue is a sibling of the
+  approval queue, so a proposal id handed to `approve_command` resolves to
+  nothing.
+- **Promote.** Merging the PR. The channel's policy `skills` entry points at
+  its dir in the private catalog (#130), so after the next `git pull` of that
+  clone the skill is on the menu -- in that channel only. A loaded skill
+  carries no authority -- it is prompt text, and its commands go through the
+  same YOLT / grant / sandbox / approval path as anything else.
 
-Deliberately not included: a generic "40 characters of base64" rule. It matches a
-git SHA, so it would redact half of any `git log`. A redactor that mangles
-ordinary output gets switched off, and then it protects nothing.
+Config: `learning.repo` (owner/repo; unset = feature off, tool not offered),
+`learning.base` (default `master`), `learning.path` (default
+`channels/{channel}/skills/{name}/SKILL.md`, `{channel}` = the channel's
+configured name, slugged). Needs `gh` logged in on the host, which git over
+https already requires.
 
-**Fails loudly, never open.** With `secret_redact` unavailable the agent refuses
-to start rather than posting unredacted output -- posting a secret is worse than
-not booting. That makes voitta-yolt v1.0.0+ a hard requirement, not just for the
-exec gate.
+## How to improve it
 
-> Redaction is best-effort on shapes it knows plus values it holds. It is a
-> backstop for accidents, not a licence to put secrets where the agent can read
-> them. Config values stay `${VAR}` references (#73).
+### The map
 
-## Running as a service (launchd, macOS)
+One job per file. Start at the file that owns the thing you are changing.
 
-For anything but a quick foreground test, run it under launchd so it stays up
-across restarts/sleep, independent of any shell. First time, make your own
-(gitignored) plist from the sample and set the paths:
+| File | Owns |
+|---|---|
+| `slack_app.py` | the Slack door: Bolt Socket Mode, events in, replies and cards out |
+| `handler.py` | the turn -- an **ingest-agnostic** tool-calling loop that knows nothing about Slack |
+| `llm.py` | the vendor waterfall (a LiteLLM Router built from config) |
+| `codex_llm.py` | the codex-subscription rung, as an in-process `litellm.CustomLLM` |
+| `tools.py` | the model-callable tools; `run_shell` is the one that matters |
+| `slack_tools.py` | Slack-read tools (#28): another thread, channel history, a permalink |
+| `admin_tools.py` | the privileged tools: `set_policy`, `approve_command`, `reload_skills` |
+| `yolt_gate.py` | the mutating / read-only verdict, from voitta-yolt's classifier |
+| `grant.py`, `gitstate.py` | the exception to carding (#117): in-tree writes, your own commits |
+| `policy.py` | the per-channel capability envelope |
+| `sandbox.py` | the seatbelt profile, built per channel from that envelope |
+| `gitcfg.py` | git over https for every channel, so nothing ever needs to read `~/.ssh` |
+| `approvals.py`, `slack_blocks.py` | parked commands, and the Approve / Deny card |
+| `redact.py` | scrubbing: at collection, and again on the way out |
+| `skills.py` | the skill menu and the `load_skill` tool |
+| `learning.py`, `proposals.py`, `trajectory.py` | flag -> card -> PR, and the per-turn record behind it |
+| `config.py`, `spine.py`, `identity.py`, `state.py` | config and `${VAR}`, the `.md` spine, who spoke (#60), what survives a restart |
+| `announce.py`, `watchdog.py` | upgrade announcements (#77), and exiting when the socket wedges (#66) |
+| `selfcheck.py` (repo root) | the entire test surface, offline |
 
-    cp deploy/ai.shmobster.plist.sample deploy/ai.shmobster.plist
-    # edit deploy/ai.shmobster.plist: replace /Users/CHANGE_ME/path/to/shmobster
-    deploy/service.sh install
+### Where a change goes
 
-Then:
+- **A new model vendor** -- a row in `waterfall`, no code. The single exception
+  so far is a vendor that is not HTTP-plus-an-api-key: the codex subscription,
+  which needed `codex_llm.py`. Probe any candidate *before* adding it: it must
+  return real `tool_calls`, and it must take a timeout. See
+  [Free-tier fallbacks](#free-tier-fallbacks).
+- **A new ingest** -- email (#25), a CLI, anything. `handler.handle()` is
+  already ingest-agnostic and `slack_app.py` is the only file that knows what
+  Slack is. The cross-cutting pieces a new mode still owes -- upgrade
+  announcements, skill proposals, identity, the build string -- are listed in
+  [CLAUDE.md](CLAUDE.md).
+- **A new tool for the model** -- `tools.py`, after reading `admin_tools.py` if
+  it is privileged. A tool that shells out inherits every gate for free; a tool
+  that does not has to say in its docstring why it is safe without them.
+- **A relaxation of the approval gate** -- `grant.py`, and expect to argue for
+  it. The grant layer is an allowlist of verbs, and every widening is another
+  way for the agent to act with nobody watching (#117, #123).
+- **A learned procedure** -- not code at all. A `SKILL.md` in a catalog the
+  channel's policy points at; the agent can propose one itself (#129).
 
-    deploy/service.sh restart       # after `git pull`, to load new code (kickstart)
-    deploy/service.sh update        # after editing the plist, re-copy + full reload
-    deploy/service.sh status        # pid / state
-    deploy/service.sh logs          # tail logs/shmobster.err.log
-    deploy/service.sh uninstall     # stop + remove
+### House rules
 
-**Upgrading pulls three checkouts, not one.** shmobster reads two sibling
-repos at runtime -- voitta-yolt's classifier and redactor
-(`exec.yolt_classifier`) and the skills directories in `skills.paths` (skillz,
-and any private catalog) -- so the code that actually runs after a restart is
-whatever those checkouts hold, and a release note that says "needs yolt >=
-X" means their `git pull`, not this repo's. In that order:
+- **YAGNI, per axis.** 0, 1, 2, 3, many -- see
+  [Operating principle](#operating-principle-0-1-2-3-many). Generalize when a
+  count actually increments, not in anticipation of it.
+- **An issue first, and its number in the PR title.** Nearly every heading in
+  this file carries the issue that produced it; that is the audit trail, and it
+  is how a future reader finds out *why*.
+- **`selfcheck.py` is the only test surface** -- one flat script of assertions,
+  offline, no Slack and no keys. Extend it in the same style. CI runs it on
+  every PR (`.github/workflows/checks.yml`) next to a JSON parse of the example
+  configs and a structural sensitive-term gate.
+- **Secrets are `${VAR}` references, never literals** -- in the examples and in
+  a running deployment's own config (#73). Never print a config value, never
+  echo one into a log, a commit or a channel.
+- **Feature PRs leave `__version__` alone.** A release is its own commit; see
+  [Versioning & releases (#76)](#versioning--releases-76).
 
-    git -C /path/to/voitta-yolt pull
-    git -C /path/to/skillz pull            # and each other skills.paths entry
-    git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
-    git pull && .venv/bin/pip install -r requirements.txt
-    .venv/bin/python selfcheck.py
-    deploy/service.sh restart
-
-Same order for a reinstall on a fresh machine: yolt and skillz first, then
-this repo, then the config.
-
-The real `deploy/ai.shmobster.plist` is gitignored (paths are machine-specific);
-`deploy/ai.shmobster.plist.sample` is the committed template. The plist sets
-`KeepAlive` + `ThrottleInterval=10` (respawn backoff -- the anti-crash-loop
-guard). Logs go to `logs/shmobster.{out,err}.log`.
-
-It also sets `PATH` explicitly, which matters more than it looks (#50): launchd
-gives a process only `/usr/bin:/bin:/usr/sbin:/sbin`, so without it the agent
-cannot see `gh`, `aws`, `node` or anything else under `/opt/homebrew/bin`, and
-those commands fail with exit 127 `command not found` -- easy to misread as the
-approval gate blocking them. If your plist predates this, copy the
-`EnvironmentVariables` block from the sample and run `deploy/service.sh update`.
-Check what the running agent actually has:
-
-    ps eww "$(launchctl print gui/$(id -u)/ai.shmobster.agent | awk '/pid =/{print $3}')" | tr ' ' '\n' | grep ^PATH=
-
-### Liveness watchdog (#66)
-
-`KeepAlive` only reacts to a process that exits, and the nastiest Socket Mode
-failure does not exit: the client reconnects forever without ever receiving
-anything (handshake 101, no `hello`, no pong, server drops the socket ~20s
-later, EPIPE, reconnect, repeat). Every error is caught and logged, so launchd
-sees a healthy service while the agent is deaf. One instance sat like that for
-13 days.
-
-So the process watches itself. A daemon thread exits nonzero -- letting
-`KeepAlive` restart it -- once the connection has looked broken for
-`watchdog_timeout_sec` (default 120, minimum 90, `0` disables) by either of two
-measures:
-
-- **No stable session.** In the wedge no session survives ~21s; a healthy one
-  lives for hours. The watchdog wants some session to reach 60s.
-- **No ping/pong.** Covers a session that stays up but goes quiet. Pongs land
-  every ~10s (`ping_interval`) no matter how busy the workspace is.
-
-Both have to look healthy, and neither is *delivered events*: a bot in quiet
-channels legitimately receives none for days. Reconnect logs are not a signal
-either -- the wedged instance emitted 52,707 of them in 13 days.
-
-The floor of 90s exists because the SDK heals ordinary stalls by itself: it
-tears a session down at `ping_interval * 4` (40s) and needs another cycle to
-re-establish. A shorter timeout turns that self-healing into a restart loop.
-
-Two costs, both accepted. A genuine network outage restarts the agent every
-timeout until the network returns (`ThrottleInterval=10` bounds the churn), and
-each restart clears the in-memory approval queue, so a command parked before the
-restart has to be asked again -- the same "safe direction" `approvals` already
-takes on any restart.
-
-## Versioning & releases (#76)
+### Versioning & releases (#76)
 
 `shmobster.__version__` is the anchor. An instance reports `<version>+<short-sha>`
 -- ask it which build it is and it answers from `build()`, the same string it
@@ -987,7 +1256,7 @@ configs, and runs a structural sensitive-term gate ported from skillz
 IPs, internal domains). The name-wordlist half of that gate stays off CI on
 purpose; it reads a private out-of-repo file, see the script header.
 
-### Upgrade announcements (#77)
+#### Upgrade announcements (#77)
 
 An instance announces itself in its channels the first time it boots on a new
 version:
@@ -1015,18 +1284,51 @@ announcement.
 `announce` knows nothing about Slack -- it takes a `post(text)` callable. A new
 ingest mode wires its own poster; see [CLAUDE.md](CLAUDE.md).
 
-## Running multiple instances
+### Where it is going
 
-Each instance is one config file + one process. `shmobster` is just the project
-name; name each instance via `agent.label` (or let it auto-derive from the app).
+Iterations, in order: 0 skeleton -> 1 exec-gate (YOLT) -> 2 per-channel policy
+-> 3 waterfall hardening (#5) -> 4 multi-user register (#6). The tracker is #1.
 
-- **Different machines** (e.g. Barrymore here, Cosima elsewhere): nothing
-  special -- each machine has its own gitignored `shmobster-config.json` and
-  plist, and the default launchd Label doesn't collide across machines.
-- **Ad-hoc / a second config:**
-  `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
-- **Two instances on the *same* machine** additionally need distinct launchd
-  Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+The known soft spots, each one a real issue rather than a wish:
+
+| Soft spot | Issue |
+|---|---|
+| A waterfall rung gets no per-request timeout, so a hung vendor blocks the turn | #125 |
+| Commands inherit the whole machine environment; per-channel config should be the only route in | #112 |
+| Security posture review: auto-run surface, scope-guard bypasses, redaction gaps | #123 |
+| The agent asserts outcomes it never verified | #134 |
+| A text approval racing a click leaves the card contradicting the thread | #105 |
+| `service.sh update` can lose the race and leave the agent down | #92 |
+| A configured channel that does not resolve is not warned about at startup | #93 |
+| Two instances on one machine are not parameterized (Label, logs, config) | #16 |
+| The agent improvises its capabilities instead of reporting them | #9 |
+| DM ingest (#23), email ingest (#25), a web-fetch tool (#62) | -- |
+
+## Why not something else
+
+The short version. The long one is the blog team's problem.
+
+- **The OpenClaw fork we were running.** See
+  [What we tried before](#what-we-tried-before). The part worth keeping -- the
+  workspace spine -- was kept.
+- **A hosted Slack AI app.** Someone else's loop, someone else's vendor, and
+  nowhere to put either forcing feature: a waterfall is a decision made *during*
+  a failed call, and `authz = f(user, channel)` is a decision made *before* a
+  tool call. Neither is exposed from outside.
+- **Claude Code (`claude -p`) or codex as the harness.** Both are already
+  agents: their own tool set, their own sandbox, their own approval policy.
+  Nesting one inside a loop that already owns those gives you two of everything
+  and an authority boundary you cannot audit. So both are used, deliberately, in
+  smaller roles -- `claude -p` is *delegated* the browser work it is better at,
+  and a ChatGPT subscription is *one rung* of the waterfall, reached by reading
+  the codex CLI's token file rather than driving its binary
+  ([why](#codex-subscription-as-a-rung-35)).
+- **An agent framework.** The loop is about 150 lines (`handler.py`). The hard
+  parts here are authz, the sandbox and vendor failure, and a framework has no
+  opinion about those that survives contact with a Slack channel.
+
+The general rule, applied every time: **own the loop, the door and authz; rent
+the vendor layer; delegate what another agent already does better.**
 
 ## License
 

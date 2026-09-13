@@ -105,6 +105,9 @@ license:     MIT
 - [Why not something else](#why-not-something-else)
 - [License](#license)
 
+What to work on next, and the reasoning behind the order:
+[docs/HANDOFF.md](docs/HANDOFF.md).
+
 </details>
 
 ## What we tried before

@@ -287,6 +287,23 @@ def main():
         logging.info("skills: %d indexed from %d path(s)", count, len(config.SKILL_PATHS))
         for name, path in skills.shadowed():
             logging.info("skills: %s at %s shadowed by a higher-precedence path", name, path)
+    # Probe every configured channel once at startup (#93, follow-up to #89):
+    # a stale id or a channel the bot was never invited to otherwise surfaces
+    # only when a post fails, deep in a turn. conversations.history is the
+    # probe because nothing here holds channels:read (see README, Slack
+    # scopes): channel_not_found from it means NOT A MEMBER (or a dead id),
+    # not a bad token -- fix with /invite, or correct the id in the config.
+    for _ch in config.CHANNELS:
+        try:
+            app.client.conversations_history(channel=_ch, limit=1)
+        except Exception as exc:
+            _err = getattr(exc, "response", {})
+            _err = _err.get("error", "") if hasattr(_err, "get") else ""
+            logging.warning(
+                "channel %s (%s) does not resolve at startup: %s -- "
+                "channel_not_found means the bot is not a member (or the id is "
+                "stale); /invite it there or fix slack.channels",
+                config.CHANNEL_NAMES.get(_ch, _ch), _ch, _err or exc)
     # Say so in the channels when this instance came back on a new version (#77).
     # Ingest-agnostic: announce knows only how to call post(text).
     #

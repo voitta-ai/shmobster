@@ -50,6 +50,7 @@
       "api_key": "${OPENROUTER_API_KEY}"
     }
   ],
+  "waterfall_timeout_sec": 45,
   "skills": {
     "_comment": "Directories of skillz-format <name>/SKILL.md skills (#74). Order is precedence: the first path defining a name wins, so a private catalog can shadow the public one. Omit the block for no skills.",
     "paths": [

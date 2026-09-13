@@ -93,8 +93,15 @@ WORKSPACE = _agent.get("workspace", "./workspace")
 # the standing prompt pays nothing for the feature.
 SKILL_PATHS = _cfg.get("skills", {}).get("paths", [])
 
-# Ordered list of {name, model, api_key, [api_base]} -- first is primary.
+# Ordered list of {name, model, api_key, [api_base], [timeout_sec]} -- first is
+# primary. waterfall_timeout_sec is the per-request ceiling every rung gets
+# unless its row overrides it (#125): without one, a rung that accepts the
+# connection and never answers holds the turn for litellm's own 600s default
+# and the fallback chain never gets its chance -- NVIDIA NIM did exactly that
+# in 2026-07. Per-row override because the rungs are not alike: nemotron-super
+# answers a tool call in about a second, the ultra-class rungs take 10-13s.
 WATERFALL = _cfg.get("waterfall", [])
+WATERFALL_TIMEOUT = _cfg.get("waterfall_timeout_sec", 45)
 
 # Exec (Iter 1): shell commands are gated by voitta-yolt. yolt_classifier is the
 # path to voitta-yolt's grammar_classifier.py. Read-only commands auto-run;

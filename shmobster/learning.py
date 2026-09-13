@@ -249,15 +249,32 @@ def _permalink(ctx):
 
 
 def propose(key, ctx, api=_gh):
-    """A trusted user said yes: draft from the trajectory and open the PR.
+    """A trusted user said yes, by text: acquire, then the acquired core.
     Trust is the caller's check (admin_tools), the same as approve_command."""
     channel = ctx.get("channel")
-    prop = proposals.pop(key, channel)
+    k = proposals.canonical(key)
+    prop = proposals.acquire(k, channel)
     if prop is None:
+        if proposals.status(k, channel)[0] == "held":
+            retval = (f"[{k}] is already being acted on by another surface -- do not "
+                      f"retry; that surface will report the outcome.")
+            return retval
         parked = len(proposals.ids(channel))
         also = f" {parked} other proposal(s) are parked here." if parked else ""
-        retval = f"no pending skill proposal '{proposals.canonical(key)}' in this channel.{also}"
+        retval = f"no pending skill proposal '{k}' in this channel.{also}"
         return retval
+    try:
+        retval = propose_acquired(k, prop, ctx, api=api)
+    finally:
+        proposals.release(k)
+    return retval
+
+
+def propose_acquired(key, prop, ctx, api=_gh):
+    """The work, for a proposal the caller owns (#105). On a transient failure
+    the proposal goes back under the SAME id via restore(); on success it is
+    consumed with finish()."""
+    channel = ctx.get("channel")
     name, why, thread_ts = prop["name"], prop["why"], prop["thread_ts"]
     # Every failure below is one that may not repeat -- the waterfall was
     # down, the record file was not there yet, GitHub blinked -- so none of
@@ -289,20 +306,34 @@ def propose(key, ctx, api=_gh):
         proposals.restore(key, prop)
         retval = f"{RETRY} could not open the PR for `{name}`: {redact.scrub(str(exc))[:300]}. The proposal is still open; a retry resumes where this stopped."
         return retval
+    proposals.finish(key)
     mark_thread(thread_ts, "proposed")
     logging.info("learning: PR opened for %s in %s by %s: %s", name, channel, ctx.get("user_id"), url)
     retval = f"PR opened by <@{ctx.get('user_id')}> for `{name}`: {url}\nMerging it is the promotion; nothing loads until then."
     return retval
 
 
-def decline(key, ctx):
-    channel = ctx.get("channel")
-    prop = proposals.pop(key, channel)
-    if prop is None:
-        retval = f"no pending skill proposal '{proposals.canonical(key)}' in this channel."
-        return retval
+def decline_acquired(key, prop, ctx):
+    proposals.finish(key)
     mark_thread(prop["thread_ts"], "declined")
     retval = f"DECLINED by <@{ctx.get('user_id')}>: `{prop['name']}` -- this thread will not be asked again."
+    return retval
+
+
+def decline(key, ctx):
+    channel = ctx.get("channel")
+    k = proposals.canonical(key)
+    prop = proposals.acquire(k, channel)
+    if prop is None:
+        if proposals.status(k, channel)[0] == "held":
+            retval = f"[{k}] is already being acted on by another surface -- do not retry."
+            return retval
+        retval = f"no pending skill proposal '{k}' in this channel."
+        return retval
+    try:
+        retval = decline_acquired(k, prop, ctx)
+    finally:
+        proposals.release(k)
     return retval
 
 

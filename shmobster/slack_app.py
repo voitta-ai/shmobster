@@ -157,7 +157,11 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
             )
         except Exception:
             logging.exception("could not mark approval message as claimed")
-        result = redact.scrub(run(req_id, ctx))
+        # The runner gets the request we acquired (#105): it must execute
+        # what it was handed, never look it up again by id -- the id path
+        # would find nothing (we hold it) and report "no pending request"
+        # for a command that is about to run.
+        result = redact.scrub(run(req_id, req, ctx))
     finally:
         queue.release(req_id)
     if result.startswith(learning.RETRY) and queue is proposals:
@@ -178,24 +182,19 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
 
 @app.action("approve_command")
 def on_approve(ack, body, client, action):
-    _resolve(
-        ack, body, client, action,
-        lambda req_id, ctx: admin_tools.dispatch(
-            "approve_command", {"request_id": req_id}, ctx
-        ),
-    )
+    _resolve(ack, body, client, action, admin_tools.run_approved)
 
 
 @app.action("deny_command")
 def on_deny(ack, body, client, action):
-    _resolve(ack, body, client, action, admin_tools.deny)
+    _resolve(ack, body, client, action, admin_tools.run_denied)
 
 
 @app.action("open_skill_pr")
 def on_open_skill_pr(ack, body, client, action):
     _resolve(
         ack, body, client, action,
-        lambda key, ctx: admin_tools.dispatch("propose_skill", {"request_id": key}, ctx),
+        lambda key, prop, ctx: learning.propose_acquired(key, prop, ctx),
         queue=proposals, claimed=slack_blocks.proposal_claimed,
     )
 
@@ -204,7 +203,7 @@ def on_open_skill_pr(ack, body, client, action):
 def on_decline_skill(ack, body, client, action):
     _resolve(
         ack, body, client, action,
-        lambda key, ctx: admin_tools.dispatch("decline_skill", {"request_id": key}, ctx),
+        lambda key, prop, ctx: learning.decline_acquired(key, prop, ctx),
         queue=proposals, claimed=slack_blocks.proposal_claimed,
     )
 

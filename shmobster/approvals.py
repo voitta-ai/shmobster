@@ -69,7 +69,13 @@ _ids = itertools.count(1)
 # bytes is eight more characters for whoever types an id by hand.
 _NONCE = secrets.token_hex(8)
 _MAX = 50
-_CLAIMING = {}  # request id -> the channel holding it
+# Requests a surface has taken out of the queue and not yet finished or put
+# back (#105). Ownership, not a flag: acquire() MOVES the request here, so
+# there is exactly one transition and a second consumer -- another delivery of
+# the same click, or a trusted user typing `approve <id>` mid-run -- can only
+# ever be told "already in flight", never "no pending request" for a command
+# that did run.
+_INFLIGHT = {}  # request id -> the request dict
 _LOCK = threading.Lock()
 
 
@@ -114,8 +120,11 @@ def add(command, channel, reason):
         # a request it had just deleted. When there is nothing evictable the cap
         # is exceeded instead -- it is a safety valve on a 50-deep queue, and
         # going one over beats returning a dead id.
+        # A held request is out of _PENDING entirely (#105), so overflow can
+        # no longer evict it; only the request being parked right now is
+        # protected here, or add() would return an id it just deleted.
         while len(_PENDING) > _MAX:
-            victim = next((k for k in _PENDING if k not in _CLAIMING and k != key), None)
+            victim = next((k for k in _PENDING if k != key), None)
             if victim is None:
                 break
             del _PENDING[victim]
@@ -154,53 +163,55 @@ def unsurface(key):
 
 
 def pop(key, channel):
-    """Claim a request -- only from the channel it was raised in, so an approval
-    in one channel can't release a command parked in another.
+    """Claim and consume a request in one step: acquire() then finish().
 
-    Under the lock, because the lookup and the delete are two steps and the
-    button surface and the text surface reach here on different threads (#103).
-    Unlocked, both callers pass the guard, one deletes, and the other raises
-    KeyError out of a button handler -- so the request that a human approved is
-    consumed by one path and reported as a crash by the other."""
-    with _LOCK:
-        k = canonical(key)
-        req = _PENDING.get(k)
-        if req is None or req.get("channel") != channel:
-            return None
-        # Logged before the delete, not after: scrub() is fail-closed and raises
-        # when the redactor cannot be loaded, and a raise between the delete and
-        # the caller's execute() would consume the request without running it.
-        # Failing here instead leaves it parked, which is the retryable direction.
-        logging.info("approvals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(req["command"])))
-        del _PENDING[k]
-        retval = req
+    Returns None for a request that is held by another surface (#105) exactly
+    as for one that is absent -- callers that need to tell those apart ask
+    status(). Kept as the composite because "take it and run it" is still the
+    common shape for a caller that owns no card."""
+    req = acquire(key, channel)
+    if req is not None:
+        finish(key)
+    retval = req
     return retval
 
 
 def acquire(key, channel):
-    """Take exclusive hold of a request before acting on it, or return None.
+    """Take ownership of a request, or return None.
 
-    Two Slack deliveries of the same button press land on two Bolt threads
-    (#103). Without this, both see a pending request, both proceed, and the
-    loser -- the one whose pop finds nothing -- overwrites the winner's output
-    with "no pending request" for a command that did run. Hiding the buttons
-    does not prevent that; only a state transition ahead of the work does.
+    The request MOVES out of _PENDING (#105): while a surface holds it, no
+    other consumer can pop it, approve it by text, or evict it on overflow --
+    they see "held", not "gone", and the log cannot end up with one surface
+    saying the command ran while another says there was nothing to run. That
+    was #103's hold made advisory; this is it made authoritative.
 
-    Returns None for a stale request too, which is the other half: a surface
-    that did not acquire must not rewrite the card, because that card holds the
-    only copy of the command (#94).
+    The caller owes exactly one of finish() -- the request is consumed, on the
+    same pop-before-execute rule as before -- or release(), which puts it back
+    pending, the retryable direction. release() after finish() is a no-op, so
+    a finally: release() around a body that finishes on success is correct.
 
-    Held until release(), which the caller owes in a finally. In-memory, so a
-    restart clears it -- the same direction the queue itself takes."""
+    Logged here as the claim: this is now the moment a request leaves the
+    queue, and the log's job is to record that exactly once (#94). Logged
+    before the move for the reason the old pop() logged before its delete:
+    scrub() is fail-closed, and failing here leaves the request parked."""
     with _LOCK:
         k = canonical(key)
         req = _PENDING.get(k)
-        if req is None or req.get("channel") != channel or k in _CLAIMING:
+        if req is None or req.get("channel") != channel or k in _INFLIGHT:
             retval = None
         else:
-            _CLAIMING[k] = channel
+            logging.info("approvals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(req["command"])))
+            del _PENDING[k]
+            _INFLIGHT[k] = req
             retval = req
     return retval
+
+
+def finish(key):
+    """Consume a held request for good. The counterpart of acquire(); called
+    before the command runs, preserving the old pop-then-execute semantics."""
+    with _LOCK:
+        _INFLIGHT.pop(canonical(key), None)
 
 
 def status(key, channel):
@@ -212,22 +223,24 @@ def status(key, channel):
     between. It can still go stale on the way to Slack; nothing about a live
     queue is instantaneously true. What it must not be is self-contradictory.
 
-    "held" is asked first because the queue goes quiet in the middle of a
-    click: the approve path pops the request and only then runs the command, so
-    for the entire duration of the run _PENDING says nothing and the hold is
-    the only thing that knows (#103). Channel-scoped throughout, like pop and
-    peek: an id is unique per boot now (#109), so the scope is no longer what
-    keeps two channels' requests apart -- it is the separate guarantee that an
-    approval raised in one channel is answerable only there (#107).
+    "held" is asked first because a held request lives in _INFLIGHT, not
+    _PENDING (#105), for the whole duration of the run. Unlike before, "held"
+    now comes WITH the request, so a surface that must name the command -- a
+    refused click during a run (#94) -- can. Channel-scoped throughout: an id
+    is unique per boot (#109), so the scope is no longer what keeps two
+    channels' requests apart -- it is the separate guarantee that an approval
+    raised in one channel is answerable only there (#107).
     """
     with _LOCK:
         k = canonical(key)
+        held = _INFLIGHT.get(k)
+        if held is not None and held.get("channel") == channel:
+            retval = ("held", held)
+            return retval
         req = _PENDING.get(k)
         if req is not None and req.get("channel") != channel:
             req = None
-        if _CLAIMING.get(k) == channel:
-            retval = ("held", req)
-        elif req is not None:
+        if req is not None:
             retval = ("pending", req)
         else:
             retval = ("absent", None)
@@ -235,9 +248,15 @@ def status(key, channel):
 
 
 def release(key):
-    """Drop the hold acquire() took. Safe to call for a key never acquired."""
+    """Put a held request back in the queue -- the surface could not or did
+    not act on it. No-op after finish() and for a key never acquired, so a
+    finally: release() is always safe. `surfaced` is left as it was: the card
+    that acquired it is still standing."""
     with _LOCK:
-        _CLAIMING.pop(canonical(key), None)
+        k = canonical(key)
+        req = _INFLIGHT.pop(k, None)
+        if req is not None:
+            _PENDING[k] = req
 
 
 def peek(key, channel):

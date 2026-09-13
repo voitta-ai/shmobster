@@ -223,7 +223,14 @@ class _BudgetWatch(CustomLogger):
 
 def _on_failure(kwargs):
     exc = kwargs.get("exception")
-    if exc is None or not is_budget_error(exc):
+    if exc is None:
+        return
+    if isinstance(exc, litellm.Timeout):
+        # Named in the log the way parking is (#125): a rung that keeps timing
+        # out should be visible as a pattern, not as stack traces.
+        logging.warning("waterfall: %s timed out; failing over", _deployment_of(kwargs) or "unknown rung")
+        return
+    if not is_budget_error(exc):
         return
     park(exc, _deployment_of(kwargs))
 
@@ -248,6 +255,9 @@ def _deployment(model_name, vendor):
     # from the CLI's own token file. Sending `api_key: None` is not the same as
     # omitting it -- litellm treats the key as present-but-empty.
     params = {"model": vendor["model"]}
+    # Every rung gets a per-request ceiling (#125): a rung that hangs must
+    # become a Timeout the Router can fail over, not a held turn.
+    params["timeout"] = vendor.get("timeout_sec") or config.WATERFALL_TIMEOUT
     if vendor.get("api_key"):
         params["api_key"] = vendor["api_key"]
     if vendor.get("api_base"):

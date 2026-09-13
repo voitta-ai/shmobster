@@ -362,6 +362,11 @@ One JSON config, no `.env`. Copy the example and fill it in:
   (default 3600; 0 disables). See **When a vendor runs out of budget**.
 - `skills.paths` -- directories of skills to load (see **Skills** below). Omit
   for none.
+- `waterfall_timeout_sec` -- per-request ceiling for every rung (default 45);
+  a row may override with its own `timeout_sec` (#125). Without one, a rung
+  that accepts the connection and never answers holds the turn for litellm's
+  600s default and the fallbacks never run. A timeout logs a `waterfall:` line
+  and fails over.
 - `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones

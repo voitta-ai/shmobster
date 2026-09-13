@@ -1005,6 +1005,14 @@ if True:
                  if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)}
     assert _install_line in _toplevel, "install_logging() must run at import, not inside a function"
 
+# 20b) every deployment carries a per-request timeout (#125): the default from
+# waterfall_timeout_sec, a per-vendor timeout_sec overriding it
+assert config.WATERFALL_TIMEOUT == 45, config.WATERFALL_TIMEOUT
+_dep = llm._deployment("primary", {"name": "x", "model": "openai/gpt", "api_key": "k"})
+assert _dep["litellm_params"]["timeout"] == 45, _dep
+_dep = llm._deployment("fb0", {"name": "y", "model": "openai/gpt", "timeout_sec": 12})
+assert _dep["litellm_params"]["timeout"] == 12, "a slow rung may say so per-row"
+
 # 21) budget parking (#80): a vendor that reports no budget is skipped until its
 # window expires, instead of being re-dialled every turn
 state._PATH = os.path.join(tempfile.mkdtemp(), "state.json")

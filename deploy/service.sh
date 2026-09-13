@@ -32,13 +32,18 @@ wait_gone() {
 }
 
 bootstrap_retry() {
+  # Keep each attempt's stderr: the retries exist for the transient I/O race,
+  # but a malformed plist or a domain problem fails all three the same way,
+  # and the one thing recovery needs then is launchctl's actual words.
+  local _err=""
   for _i in 1 2 3; do
-    if launchctl bootstrap "$DOMAIN" "$DST" 2>/dev/null; then
+    if _err=$(launchctl bootstrap "$DOMAIN" "$DST" 2>&1); then
       return 0
     fi
+    echo "bootstrap attempt $_i failed: $_err" >&2
     sleep 2
   done
-  echo "bootstrap failed three times; service is NOT running. Retry with:" >&2
+  echo "bootstrap failed three times; service is NOT running. Last error above. Retry with:" >&2
   echo "  launchctl bootstrap $DOMAIN $DST" >&2
   exit 1
 }

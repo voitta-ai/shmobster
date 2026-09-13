@@ -703,6 +703,15 @@ Requests are in-memory and channel-scoped: a restart clears them (re-ask rather
 than run a stale approval), and an approval in one channel cannot release a
 command parked in another.
 
+The in-flight hold is ownership, not a flag (#105): the moment any surface --
+a button click or a typed `approve <id>` -- takes a request, it leaves the
+queue, and every other surface that tries is told "[id] is already being acted
+on; that surface will report the outcome". Before this, a text approval racing
+a click could leave the card saying `no pending request` for a command that
+did run -- two surfaces telling the thread opposite stories about one
+execution. Exactly one consumer ever gets a request; a surface that fails
+mid-flight puts it back pending rather than consuming it.
+
 Buttons need **Interactivity** enabled on the Slack app. Apps created from the
 current [`deploy/slack-app-manifest.yaml`](deploy/slack-app-manifest.yaml) get it;
 an older app needs **Interactivity & Shortcuts** -> toggle on -> reinstall.

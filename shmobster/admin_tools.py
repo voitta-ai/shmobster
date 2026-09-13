@@ -117,6 +117,32 @@ def is_trusted(user_id):
     return retval
 
 
+def _held_answer(kind, key, channel, queue):
+    """What a consumer that failed to take a request is told. Held and absent
+    are different truths (#105): "no pending request" for a command another
+    surface is running right now is exactly the contradiction the in-flight
+    hold exists to prevent."""
+    state, _req = queue.status(key, channel)
+    if state == "held":
+        retval = (
+            f"[{key}] is already being acted on by another surface (a click or a "
+            f"text approval got there first) -- do not retry; that surface will "
+            f"report the outcome in this channel."
+        )
+        return retval
+    retval = f"no pending {kind} '{key}' in this channel."
+    return retval
+
+
+def run_denied(request_id, req, ctx):
+    """Core of Deny for a request the caller already acquired (#105): consume
+    it and report. The button path acquires in _resolve; the text path in
+    deny()."""
+    approvals.finish(request_id)
+    retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
+    return retval
+
+
 def deny(request_id, ctx):
     """Drop a parked request without running it (#50 -- the Deny button).
     Trust-gated like approve_command; denial is a privileged act too, since a
@@ -125,11 +151,15 @@ def deny(request_id, ctx):
         retval = _refuse(ctx, "deny a mutating command")
         return retval
     channel = ctx.get("channel")
-    req = approvals.pop(request_id, channel)
+    key = approvals.canonical(request_id)
+    req = approvals.acquire(key, channel)
     if req is None:
-        retval = f"no pending request '{approvals.canonical(request_id)}' in this channel."
+        retval = _held_answer("request", key, channel, approvals)
         return retval
-    retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
+    try:
+        retval = run_denied(key, req, ctx)
+    finally:
+        approvals.release(key)
     return retval
 
 
@@ -301,10 +331,24 @@ def _reload_skills():
     return retval
 
 
+def run_approved(request_id, req, ctx):
+    """Core of Approve for a request the caller already acquired (#105):
+    consume it (finish before execute -- the same pop-then-run rule as
+    always), run it under the channel policy, report."""
+    approvals.finish(request_id)
+    policy = policy_mod.resolve(ctx.get("channel"))
+    out = tools.execute(req["command"], policy)
+    retval = f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"
+    return retval
+
+
 def _approve_command(args, ctx):
     channel = ctx.get("channel")
     req_id = approvals.canonical(args.get("request_id", ""))
-    req = approvals.pop(req_id, channel)
+    req = approvals.acquire(req_id, channel)
+    if req is None and approvals.status(req_id, channel)[0] == "held":
+        retval = _held_answer("request", req_id, channel, approvals)
+        return retval
     if req is None:
         # How many are parked, never which (#109). The likeliest way to reach
         # here is a trusted user quoting an id off a card from before a restart,
@@ -322,9 +366,11 @@ def _approve_command(args, ctx):
             f"or to use its Approve button."
         )
         return retval
-    policy = policy_mod.resolve(channel)
-    out = tools.execute(req["command"], policy)
-    return f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"
+    try:
+        retval = run_approved(req_id, req, ctx)
+    finally:
+        approvals.release(req_id)
+    return retval
 
 
 def dispatch(name, args, ctx):

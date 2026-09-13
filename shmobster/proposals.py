@@ -22,7 +22,7 @@ _PENDING = {}
 _ids = itertools.count(1)
 _NONCE = secrets.token_hex(8)
 _MAX = 50
-_CLAIMING = {}
+_INFLIGHT = {}  # proposal id -> the proposal dict; see approvals._INFLIGHT (#105)
 _LOCK = threading.Lock()
 
 canonical = approvals.canonical
@@ -38,7 +38,7 @@ def add(name, why, channel, thread_ts, user_id):
             "user_id": user_id, "surfaced": False,
         }
         while len(_PENDING) > _MAX:
-            victim = next((k for k in _PENDING if k not in _CLAIMING and k != key), None)
+            victim = next((k for k in _PENDING if k != key), None)
             if victim is None:
                 break
             del _PENDING[victim]
@@ -47,14 +47,16 @@ def add(name, why, channel, thread_ts, user_id):
 
 
 def restore(key, prop):
-    """Put a popped proposal back under its ORIGINAL id, card already posted.
+    """Put a proposal back under its ORIGINAL id, card already posted.
     A draft or a PR can fail for reasons that will not hold next time -- the
     waterfall was down, GitHub blinked -- and the card the trusted user
     clicked is the only place the id is written down. A fresh id would leave
-    that card pointing at nothing and the proposal waiting for a mention that
-    surfaces it into some other thread."""
+    that card pointing at nothing. Clears any in-flight hold too (#105), so
+    restore after acquire is a complete put-back."""
     with _LOCK:
-        _PENDING[canonical(key)] = {**prop, "surfaced": True}
+        k = canonical(key)
+        _INFLIGHT.pop(k, None)
+        _PENDING[k] = {**prop, "surfaced": True}
 
 
 def unsurface(key):
@@ -78,38 +80,46 @@ def claim_unsurfaced(channel):
 
 
 def pop(key, channel):
-    with _LOCK:
-        k = canonical(key)
-        prop = _PENDING.get(k)
-        if prop is None or prop.get("channel") != channel:
-            return None
-        logging.info("proposals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(prop["name"])))
-        del _PENDING[k]
-        retval = prop
+    """acquire() + finish(); None while another surface holds it (#105)."""
+    prop = acquire(key, channel)
+    if prop is not None:
+        finish(key)
+    retval = prop
     return retval
 
 
 def acquire(key, channel):
+    """Move the proposal out of _PENDING into the in-flight map (#105); the
+    caller owes finish() or release(), same contract as approvals.acquire."""
     with _LOCK:
         k = canonical(key)
         prop = _PENDING.get(k)
-        if prop is None or prop.get("channel") != channel or k in _CLAIMING:
+        if prop is None or prop.get("channel") != channel or k in _INFLIGHT:
             retval = None
         else:
-            _CLAIMING[k] = channel
+            logging.info("proposals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(prop["name"])))
+            del _PENDING[k]
+            _INFLIGHT[k] = prop
             retval = prop
     return retval
+
+
+def finish(key):
+    with _LOCK:
+        _INFLIGHT.pop(canonical(key), None)
 
 
 def status(key, channel):
     with _LOCK:
         k = canonical(key)
+        held = _INFLIGHT.get(k)
+        if held is not None and held.get("channel") == channel:
+            retval = ("held", held)
+            return retval
         prop = _PENDING.get(k)
         if prop is not None and prop.get("channel") != channel:
             prop = None
-        if _CLAIMING.get(k) == channel:
-            retval = ("held", prop)
-        elif prop is not None:
+        if prop is not None:
             retval = ("pending", prop)
         else:
             retval = ("absent", None)
@@ -117,8 +127,12 @@ def status(key, channel):
 
 
 def release(key):
+    """Put a held proposal back; no-op after finish() or for a stranger."""
     with _LOCK:
-        _CLAIMING.pop(canonical(key), None)
+        k = canonical(key)
+        prop = _INFLIGHT.pop(k, None)
+        if prop is not None:
+            _PENDING[k] = prop
 
 
 def peek(key, channel):

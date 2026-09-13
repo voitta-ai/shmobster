@@ -416,25 +416,33 @@ assert approvals.ids("C1") == [_key3], "acquiring does not consume the request"
 # would report a running command as gone.
 approvals.acquire(_req3, "C1")
 assert approvals.status(_req3, "C1")[0] == "held", "acquired -> held"
-approvals.pop(_req3, "C1")  # what _approve_command does before it executes
-assert approvals.peek(_req3, "C1") is None, "popped, so the queue no longer knows"
-assert approvals.status(_req3, "C1")[0] == "held", "still in flight, and status says so"
+# THE #105 regression: a text approval racing a click used to pop the request
+# out from under the hold and run it, leaving the card to report "no pending
+# request" for a command that ran. Ownership moved with acquire now, so the
+# racing consumer gets nothing and status says why.
+assert approvals.pop(_req3, "C1") is None, "a consumer racing a hold must get nothing (#105)"
+assert approvals.peek(_req3, "C1") is None, "held means out of the queue entirely"
+_h_state, _h_req = approvals.status(_req3, "C1")
+assert _h_state == "held" and _h_req["command"] == "echo refused_click_321", "held comes WITH the request now (#105)"
 assert approvals.status("no-such-id", "C1")[0] == "absent", "an absent request is not held"
 # ids are a process counter that restarts at 1 while approval cards outlive the
 # process, so a stale card in one channel can name an id another channel holds
 assert approvals.status(_req3, "C_OTHER")[0] == "absent", "a hold in one channel is not a hold in another"
 approvals.release(_req3)
-assert approvals.status(_req3, "C1")[0] != "held", "released"
+assert approvals.status(_req3, "C1")[0] == "pending", "release puts it back pending (#105)"
+approvals.pop(_req3, "C1")
+assert approvals.status(_req3, "C1")[0] == "absent", "pop = acquire + finish consumes it"
 
-# a held request must survive queue overflow: acquire leaves it in _PENDING
-# until the approve path pops it, and evicting it in that window turns a
-# trusted click into "no pending request" for a command a human approved
+# a held request must survive queue overflow: acquire moves it OUT of the
+# queue (#105), so eviction cannot reach it by construction; release puts it
+# back afterwards intact
 _held = approvals.add("echo survives_overflow", "C_OVF", "mutating")
 approvals.acquire(_held, "C_OVF")
 for _i in range(60):
     approvals.add(f"echo filler_{_i}", "C_OVF", "mutating")
-assert approvals.peek(_held, "C_OVF") is not None, "overflow evicted a held request"
+assert approvals.status(_held, "C_OVF")[0] == "held", "out of eviction's reach while held"
 approvals.release(_held)
+assert approvals.peek(_held, "C_OVF") is not None, "released after overflow, intact"
 for _k in approvals.ids("C_OVF"):
     approvals.pop(_k, "C_OVF")
 
@@ -479,12 +487,13 @@ admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1"
 assert "already acting on it" in _posted["text"], _posted
 assert "still live" not in _posted["text"], _posted
 
-approvals.pop(_flight, "C1")  # what _approve_command does before it executes
+assert approvals.pop(_flight, "C1") is None, "the text path cannot steal a held request (#105)"
+approvals.finish(_flight)  # what run_approved does before it executes
 _posted.clear()
 admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "client": _FakePost()}, "approve_command")
-assert "already acting on it" in _posted["text"], _posted
-assert "no longer pending" not in _posted["text"], _posted
-approvals.release(_flight)
+assert "no longer pending" in _posted["text"], "consumed is absent now, and the alert says so"
+approvals.release(_flight)  # no-op after finish (#105)
+assert approvals.status(_flight, "C1")[0] == "absent", "release after finish resurrects nothing"
 
 # the refusal dedupe is keyed by channel too: ids restart at 1 and cards outlive
 # the process, so a stale click on [N] in one channel must not silence the alert
@@ -515,6 +524,27 @@ _again = admin_tools.refuse_click(
 )
 assert _again.startswith("REFUSED"), _again
 assert _posted == {}, _posted
+
+# the #105 incident, end to end: a click holds the request; a trusted user
+# types `approve <id>` mid-run. The text path must say "in flight", never
+# "no pending request" -- and never run the command a second time.
+_race = approvals.add("echo race_marker_105", "C1", "mutating")
+_race_req = approvals.acquire(_race, "C1")           # the click side takes it
+_ans = admin_tools.dispatch("approve_command", {"request_id": _race},
+                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert "already being acted on" in _ans and "race_marker_105" not in _ans, _ans
+_ans = admin_tools.deny(_race, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert "already being acted on" in _ans, _ans
+# the click side finishes: the runner executes the request it was HANDED
+_out = admin_tools.run_approved(_race, _race_req, {"user_id": "U_TRUSTED", "channel": "C1"})
+assert "race_marker_105" in _out, _out
+approvals.release(_race)  # the finally in _resolve; no-op after finish
+assert approvals.status(_race, "C1")[0] == "absent" and approvals.ids("C1") == []
+# and a text approval that wins cleanly still works end to end
+_race2 = approvals.add("echo race2_marker", "C1", "mutating")
+_ans = admin_tools.dispatch("approve_command", {"request_id": _race2},
+                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+assert "race2_marker" in _ans and approvals.ids("C1") == [], _ans
 
 # a click on a stale card -- the request already claimed, denied, or cleared by
 # a restart -- must not claim it is "still parked". Being confidently wrong in
@@ -1317,6 +1347,12 @@ class _AlertClient:
 admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
 assert any("skill proposal `launchd-race`" in t and "Open PR" in t for t in _alerts), _alerts
 assert proposals.peek(_key, "C9") is not None
+# a held proposal refuses the text path the same way approvals do (#105)
+assert proposals.acquire(_key, "C9") is not None
+_ans = learning.propose(_key, {"user_id": "UT", "channel": "C9", "thread_ts": "1.1", "client": None})
+assert "already being acted on" in _ans, _ans
+proposals.release(_key)
+assert proposals.peek(_key, "C9") is not None, "released back pending"
 # a trusted user opens the PR: drafted from the record, pushed through gh api
 llm.complete = lambda messages, tools=None: _FakeMsg(content=(
     "```\n---\nname: launchd-race\ndescription: |\n  bootstrap races bootout\n---\n"

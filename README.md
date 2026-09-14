@@ -502,10 +502,13 @@ the directory shmobster runs from has them inside its tree, where the grant
 layer would treat `tee`/`sed -i`/`cp` onto one as an ordinary in-tree write and
 run it with no card -- letting the agent widen its own envelope. So a command
 naming either path is blocked by policy with a reason, and the sandbox denies
-the write in the kernel as well, which is what catches a path the shell
-resolves at runtime. Reads are blocked too: a config value is not something
-this agent posts into a channel. The route for changing a policy is
-`set_policy`, trusted users only.
+reads and writes of both files in the kernel -- which is what actually holds,
+since the textual guard cannot see a path a shell variable or a glob produces.
+Verified on Darwin 25: `mv`, `cp`, `sed -i`, `rm`, `ln -sf`, hardlink-then-
+rename and the same through `sh -c` all fail with "Operation not permitted",
+file byte-identical. Reads are denied for the same reason writes are: a config
+value is not something this agent posts into a channel. The route for changing
+a policy is `set_policy`, trusted users only.
 
 #### Run
 

@@ -152,14 +152,19 @@ def _check_self(command, policy):
     Writing one is a capability change -- the policy file is `cwd`,
     `allow_read`/`allow_write`, `exclude`, `env` and `env_passthrough` -- and
     the grant layer would run it as an ordinary in-tree write, with no card,
-    whenever a channel's cwd is the directory shmobster was started from. The
-    sandbox denies the write in the kernel too (sandbox.py); this runs first so
-    the agent gets a reason instead of "Operation not permitted".
+    whenever a channel's cwd is the directory shmobster was started from.
 
-    Reads are blocked as well, and deliberately: the values are `${VAR}`
-    references rather than literals (#73), but a config value is not something
-    this agent posts into a channel under any circumstances. Changing a
-    channel's policy has a route already -- set_policy, trusted users only."""
+    This is the readable reason, not the defence: it matches tokens, so a
+    shell variable, a glob or an `sh -c` hides the path from it. The sandbox
+    denies both operations on both files in the kernel (sandbox.py), which is
+    what actually holds. This runs first so the agent is told why instead of
+    reading "Operation not permitted" off a shell.
+
+    Reads are refused as well as writes, and deliberately: the values are
+    `${VAR}` references rather than literals (#73), but a config value is not
+    something this agent posts into a channel under any circumstances.
+    Changing a channel's policy has a route already -- set_policy, trusted
+    users only."""
     if not config.SELF_FILES:
         return (True, "")
     base = cwd_for(policy)

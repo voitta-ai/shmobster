@@ -1232,22 +1232,35 @@ assert policy.check("cat README.md", {"cwd": "."})[0], "an ordinary file in the 
 # the target of a write test
 import subprocess  # noqa: E402  (imported again below, where it is first needed in file order)
 
-_sf_dir = tempfile.mkdtemp()
-_sf_file = os.path.join(_sf_dir, "stand-in-config.json")
+_sf_dir = os.path.realpath(tempfile.mkdtemp())
+_sf_file = os.path.join(_sf_dir, "conf.json")
 with open(_sf_file, "w") as _f:
     _f.write("{}")
 _saved_self = config.SELF_FILES
 config.SELF_FILES = (os.path.realpath(_sf_file),)
 try:
-    assert f'(deny file-write* (literal "{os.path.realpath(_sf_file)}")' in sandbox.profile({"cwd": _sf_dir})
+    assert f'(deny file-read* file-write* (literal "{os.path.realpath(_sf_file)}")' in sandbox.profile({"cwd": _sf_dir})
     if _HAVE_SANDBOX:
-        _sf_proc = subprocess.run(
-            _REAL_WRAP(f"echo clobber > {_sf_file}", {"cwd": _sf_dir}),
-            capture_output=True, text=True, timeout=15,
-        )
-        assert _sf_proc.returncode != 0, _sf_proc
-        with open(_sf_file) as _f:
-            assert _f.read() == "{}", "the kernel deny must beat the in-tree write allow"
+        # every write vector, not just open-for-write: rename (mv, and sed -i,
+        # which renames its temp over the target), unlink, symlink, and the
+        # forms that hide the path from the textual guard -- a shell variable
+        # and an sh -c. file-write* covers them all; this is the assertion that
+        # says so, because the guard in policy.py cannot.
+        for _sf_cmd in ("echo clobber > conf.json", "mv src conf.json", "cp src conf.json",
+                        "sed -i '' s/x/y/ conf.json", "rm conf.json", "ln -sf /etc/hosts conf.json",
+                        'f=conf.json; tee "$f" < src', 'sh -c "tee conf.json < src"',
+                        "cat conf.json"):
+            with open(_sf_file, "w") as _f:
+                _f.write("{}")
+            with open(os.path.join(_sf_dir, "src"), "w") as _f:
+                _f.write("CLOBBER")
+            _sf_proc = subprocess.run(
+                _REAL_WRAP(_sf_cmd, {"cwd": _sf_dir}),
+                capture_output=True, text=True, timeout=15, cwd=_sf_dir,
+            )
+            assert _sf_proc.returncode != 0, (_sf_cmd, _sf_proc.stdout, _sf_proc.stderr)
+            with open(_sf_file) as _f:
+                assert _f.read() == "{}", f"{_sf_cmd}: the kernel deny must beat the in-tree write allow"
 finally:
     config.SELF_FILES = _saved_self
 # no sandbox-exec -> no run, never an unconfined fallback

@@ -64,6 +64,8 @@ _REAL_COMPLETE = llm.complete
 _REAL_YOLT = config.YOLT_CLASSIFIER
 # later sections stub classify() itself; section 26 is about the real one
 _REAL_CLASSIFY = yolt_gate.classify
+# ...and tools.dispatch, which section 28 needs unstubbed to test its routing
+_REAL_DISPATCH = tools.dispatch
 config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 # The sandbox (#116) is macOS sandbox-exec and fails closed without it, which
 # on ubuntu CI would fail every exec below for a reason unrelated to what the
@@ -1680,5 +1682,26 @@ assert _eg_out.startswith("NOT RUN") and "elsewhere.test" in _eg_out, _eg_out
 _eg_parked = approvals.claim_unsurfaced("C_EG")
 assert len(_eg_parked) == 1 and "elsewhere.test" in _eg_parked[0][1]["command"], _eg_parked
 assert "selfcheck_egress_marker" in tools.run_shell("echo selfcheck_egress_marker", _eg, "C_EG")
+
+# 28) the agent reports its real capabilities from the policy, not from prose
+# (#9). The live failure this replaces: asked what files it could reach, the
+# agent answered from its persona, because that was all it had to read.
+assert any(t["function"]["name"] == "describe_capabilities" for t in tools.TOOLS), tools.TOOLS
+_cap_pol = {"cwd": "/tmp/capability-probe", "github_repos": ["an-org/a-repo"],
+            "aws_profile": "a-profile", "allow_domains": ["api.example.com"],
+            "env": {"A_TOKEN": "value-that-must-not-appear-9f3a"},
+            "env_passthrough": ["HTTPS_PROXY"], "allow_read": ["/tmp/data"],
+            "exclude": ["/tmp/capability-probe/private"]}
+_cap = _REAL_DISPATCH("describe_capabilities", {}, _cap_pol, "C_CAP")
+for _needle in ("/tmp/capability-probe", "an-org/a-repo", "a-profile", "api.example.com",
+                "A_TOKEN", "HTTPS_PROXY", "/tmp/data", "private", "no approval card"):
+    assert _needle in _cap, (_needle, _cap)
+assert "value-that-must-not-appear-9f3a" not in _cap, "a policy env VALUE must never be reported"
+# a channel with nothing configured says so rather than implying reach it lacks
+_bare = _REAL_DISPATCH("describe_capabilities", {}, {"cwd": "/tmp"}, "C_BARE")
+assert "no repo restriction" in _bare and "every curl, wget or git remote fetch parks" in _bare, _bare
+assert "A_TOKEN" not in _bare, "one channel's credential names must not appear in another's report"
+# and the persona points at the tool rather than answering from itself
+assert "describe_capabilities" in spine.load_system_prompt(), "SOUL.md must name the tool"
 
 print(f"selfcheck OK -- shmobster {_b}")

@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, gitcfg, grant, policy as policy_mod, redact, sandbox, yolt_gate
+from . import approvals, config, gitcfg, grant, policy as policy_mod, redact, sandbox, skills, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -51,7 +51,24 @@ RUN_SHELL = {
     },
 }
 
-TOOLS = [RUN_SHELL]
+DESCRIBE = {
+    "type": "function",
+    "function": {
+        "name": "describe_capabilities",
+        "description": (
+            "Report what you can actually do in THIS channel: the working "
+            "directory, the git/AWS scope, which hosts you may reach without an "
+            "approval card, which credential names are injected (names only -- "
+            "never values), which skills are loadable here, and what runs without "
+            "a card. Call this before answering any question about your own "
+            "access, files, permissions or scope, instead of describing yourself "
+            "from memory."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+TOOLS = [RUN_SHELL, DESCRIBE]
 
 _MAX_OUTPUT = 4000
 
@@ -194,9 +211,60 @@ def execute(command, policy):
     return retval
 
 
+def _listed(values, none):
+    retval = ", ".join(str(v) for v in values) if values else none
+    return retval
+
+
+def capabilities(policy, channel=None):
+    """What this channel's envelope actually is, read from the policy (#9).
+
+    The improvisation this replaces was not a lie the model chose to tell: asked
+    what files it could reach, it had nothing to read but its own prose, so it
+    answered from the persona. The #134 spine rules cover the honesty half --
+    do not assert what you have not read -- and this is the other half: something
+    to read.
+
+    Names, never values. A policy `env` entry exists to inject a credential, so
+    the value is exactly what must not be reported; the name is what makes the
+    answer useful ("you have a VERCEL_TOKEN here"). Same for `env_passthrough`.
+    Nothing here reveals another channel's envelope."""
+    lines = [f"Capabilities in this channel ({channel or 'unknown'}), read from its policy:"]
+    lines.append(f"- working directory: {policy_mod.cwd_for(policy)}")
+    lines.append("- git and gh: " + _listed(
+        policy.get("github_repos"), "no repo restriction"))
+    lines.append("- AWS: " + (f"profile {policy['aws_profile']}" if policy.get("aws_profile")
+                              else "no profile; no AWS credentials unless a command brings its own"))
+    lines.append("- network without a card: " + _listed(
+        policy.get("allow_domains"),
+        "no hosts -- every curl, wget or git remote fetch parks for approval"))
+    lines.append("- credentials injected (names only, values never shown): " + _listed(
+        sorted(policy.get("env") or {}), "none"))
+    lines.append("- host variables passed through (names only): " + _listed(
+        sorted(policy.get("env_passthrough") or []), "none"))
+    lines.append("- readable beyond the tree: " + _listed(policy.get("allow_read"), "nothing"))
+    lines.append("- writable beyond the tree: " + _listed(policy.get("allow_write"), "nothing"))
+    lines.append("- kept off-limits inside it: " + _listed(policy.get("exclude"), "nothing"))
+    lines.append("- skills loadable here: " + _listed(skills.names(channel), "none"))
+    lines.append(
+        "- runs with no approval card: read-only commands; writes inside the tree "
+        f"({_listed(sorted(grant.FS_VERBS), 'none')}); a commit on a worktree branch "
+        "you authored. Everything else parks for a trusted user to approve by id."
+    )
+    lines.append(
+        "- always enforced: commands run under a sandbox confined to this tree, "
+        "this deployment's own config is unreachable, and every reply is scrubbed "
+        "for credentials."
+    )
+    retval = "\n".join(lines)
+    return retval
+
+
 def dispatch(name, args, policy, channel=None):
     if name == "run_shell":
         retval = run_shell(args.get("command", ""), policy, channel)
+    elif name == "describe_capabilities":
+        retval = capabilities(policy, channel)
     else:
         retval = f"unknown tool: {name}"
     return retval

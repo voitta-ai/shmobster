@@ -1,17 +1,41 @@
 # Handoff: what to do next, and why
 
-Written 2026-09-13 after the backlog triage that followed v0.7.2; **revised the
-same day**, once items 1 and 2 were done and item 2 turned one ticket into ten.
+Written 2026-09-13 after the backlog triage that followed v0.7.2; revised that
+same day when items 1 and 2 turned into ten issues, and **revised again
+2026-09-14**, with the first four of the new order done and a release owed.
 This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
-Current state: **v0.7.2** is live on the first instance. The exec path is
-YOLT -> grant layer (#117) -> seatbelt sandbox (#116) -> approval card (#48),
-every command is recorded (#129), a channel can load its own learned skills
-(#130), and a command's environment is now built from an allowlist rather than
-inherited (#112). Twenty-one issues are open -- ten of them are the security
-re-audit's findings, filed one per finding.
+Current state: **v0.7.2 is what is released; master is ahead of it and owes a
+release** (see below). The exec path is YOLT (its own rules only, #148) ->
+egress allow-list (#149) -> grant layer (#117) -> seatbelt sandbox (#116) ->
+approval card (#48). A command's environment is built from an allowlist (#112),
+the deployment's own config is unreachable from a channel (#147), every command
+is recorded (#129), a channel can load its own learned skills (#130), and the
+agent can report its envelope rather than improvise it (#9). 17 issues are
+open; seven of them are the security re-audit's remaining findings.
+
+## Before the next release
+
+**The release notes have to carry two things, or an upgrade breaks a channel
+quietly.** Both are consequences of what shipped 2026-09-14:
+
+1. **`allow_domains` must be added to each channel's policy** (#149). A channel
+   with no list cards *every* `curl`, `wget`, `git fetch`, `git pull` and
+   `git ls-remote`. That is the correct default for a channel nobody has
+   thought about, and a surprise for a channel whose normal work pulls from
+   GitHub -- so the notes give the shape:
+   `"allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]`.
+2. **The required voitta-yolt version, by release number** (#148). shmobster
+   passes `--no-user-allow`, which landed in voitta-yolt **1.2.0**
+   (voitta-ai/voitta-yolt#126). On anything older every command parks and the
+   log says so at startup. Link the yolt release, not just the number.
+
+Also worth a line: after this release, commands that used to run silently ask
+first -- `gh pr create`, `gh pr merge`, `git push`, `codex exec`, and any fetch
+to a host not in `allow_domains`. That is the change, not a fault, and saying so
+in the notes is cheaper than answering it once per channel.
 
 ## Done since this plan was written
 
@@ -30,88 +54,53 @@ re-audit's findings, filed one per finding.
   `git clone <url>`. The #122 re-check passes: `hosts.yml` holds no
   `oauth_token` on this host and `gh auth token` is denied inside the sandbox.
 
+### 2026-09-14
+
+- **#147, the deployment's own config** -- PR #158. `config.SELF_FILES` is
+  refused by `policy.check` with a reason and denied `file-read*`/`file-write*`
+  in the sandbox profile. The write deny covers rename, unlink and link:
+  `mv`, `cp`, `sed -i`, `rm`, `ln -sf`, hardlink-then-rename and the `$var` and
+  `sh -c` forms all fail with the file byte-identical.
+- **#148, the exec allow-list** -- PR #159, and voitta-ai/voitta-yolt#126
+  upstream first. `classify()` passes `--no-user-allow`; `yolt_gate.preflight()`
+  asserts at boot that `allow_patterns` came back `0`. 123 inherited patterns
+  before, 0 after; `gh pr merge` and `codex exec` now park.
+- **#149, egress** -- PR #160. A fetch runs uncarded only when every host it
+  names is in the channel's `allow_domains`. Enforced in `run_shell` *and* in
+  the grant layer's read-only fallback, which otherwise handed back the grant
+  the demotion had just refused. Covers the git subcommands that contact a
+  remote, which the adversarial review caught and I had missed.
+- **#9, report real capabilities** -- this PR. A `describe_capabilities` tool
+  reads the channel's envelope out of the policy; the persona points every
+  "what can you do" question at it. Names, never values.
+
 ## The order
 
 | # | Issue | Size | Why here |
 |---|---|---|---|
-| 1 | #147 deployment config writable from a channel | S | The re-audit's own new finding, and the only one where the agent widens its own envelope. Small, contained, and it undercuts every other guard while it stands |
-| 2 | #148 own the exec allow-list | M | 123 inherited `Bash()` patterns decide what auto-runs; `codex exec *`, `gh api*`, `gh pr merge*` classify `safe` today. The sandbox does not touch these -- they are network effects |
-| 3 | #149 egress allow-list | M | Caps what any successful injection can achieve, and settles what #62 should be before #62 is built |
-| 4 | #9 report real capabilities | S | Half-done by the #134 spine rules; the factual half is small and improves every turn |
-| 5 | #23 DM events | S | The last ingest gap in Slack; self-contained |
-| 6 | #62 web-fetch tool | M | Real capability gain. Take it after #149, which decides whether it is a tool or a policy |
-| 7 | #140 per-channel memory | L | Deliberately last: it is the piece with the injection surface |
+| 1 | #23 DM events | S | The last ingest gap in Slack; self-contained, and the smallest thing left |
+| 2 | #62 web-fetch tool | M | Take it now that #149 decided its shape: a tool-shaped front door that obeys `allow_domains` |
+| 3 | #140 per-channel memory | L | Deliberately last: it is the piece with the injection surface |
 
 Running in the background, no order among them: #150 (`github_repos` is a text
 guard -- document or enforce), #151 (ungated `slack_post`), #152 (lockfile,
 stale litellm/aiohttp), #153 (attachment bearer on redirect), #154 (repo
 governance), #155 (log perms, trajectory retention), #156 (telemetry flag).
-Each is self-contained and none blocks the seven above.
+Each is self-contained and none blocks the three above.
 
 Then decide, do not implement: #24, #16, #6, #1, #51 (see **Decide, do not
 build**).
 
-## 1. #147 -- a channel can rewrite the deployment's own policy file
+## Done: #9 -- report real capabilities
 
-The grant layer runs an in-tree write with no card and the sandbox's write root
-is the tree. When a channel's `cwd` is the directory shmobster is deployed
-from, that tree holds `shmobster-policies.json` -- the file that defines `cwd`,
-`allow_read`, `allow_write`, `exclude`, `env` and `env_passthrough`. Measured
-against `grant.check`: `tee`, `sed -i` and `cp` onto that filename all return
-`(True, 'in-tree write')`.
+Shipped as `describe_capabilities` (tools.py): a read-only tool returning the
+channel's `cwd`, `github_repos`, `aws_profile`, `allow_domains`, the **names**
+of its policy `env` and `env_passthrough`, its `allow_read`/`allow_write`/
+`exclude`, its skill menu, and what the grant layer runs without a card. A tool
+rather than a per-turn prompt block, so the standing prompt pays nothing for it;
+SOUL.md carries the one line that sends the question there.
 
-So the agent can widen its own envelope, including naming a host credential,
-with no human in the path; it takes effect at the next `reload_policies()` or
-restart, and the watchdog makes restarts routine.
-
-**Shape of the fix:** the two paths are already known at load
-(`config._PATH`, `config._POLICIES_PATH`). Deny both in the sandbox profile and
-refuse them in `grant.check`, so the disposition is a card rather than a silent
-write. Reading the policy file is a separate question and probably fine -- since
-#104 it holds `${VAR}` references, not values.
-
-**Done when:** a write to either path from a channel whose cwd contains them
-parks for approval instead of running, and selfcheck asserts it.
-
-## 2. #148 -- the exec gate inherits someone else's allow-list
-
-`grammar_classifier.py` promotes a command to `safe` on a `Bash()` pattern read
-from `~/.claude/settings.json`, `<cwd>/.claude/settings.json` and
-`<cwd>/.claude/settings.local.json`. `yolt_gate.classify` subprocesses it with
-the agent's own cwd, so the operator's interactive Claude Code permissions --
-and the repo's own `.claude/settings.local.json` -- decide what the Slack agent
-auto-runs. 123 patterns on the deployment host.
-
-**Shape of the fix:** pass the classifier an explicit settings list, or a flag
-that disables discovery, and give shmobster its own allow-list in its config
-where it is reviewable. Log the resolved pattern set at boot either way -- the
-auto-run surface should be readable, not implicit.
-
-## 3. #149 -- egress is auto-run
-
-`curl` and `wget` are read-only to the gate. The read half of the old exfil
-chain is closed (the sandbox denies every credential file outside the tree,
-#112 closed the environment), so what is left to exfiltrate is what the channel
-may legitimately read: the tree. A project `.env` or `terraform.tfvars` in the
-working copy is one auto-run `cat` plus one auto-run `curl` away.
-
-**Shape of the fix:** a per-channel domain allow-list, enforced in the gate for
-`curl`/`wget` and inherited by whatever #62 becomes. An off-list host should be
-*mutating* -- a card, not a block -- so the legitimate case still works with a
-human in the path.
-
-## 4. #9 -- report real capabilities
-
-The #134 spine rules cover the honesty half ("do not assert what you have not
-read"). The remaining half is factual: the agent should be able to answer
-"what can you do here?" from the policy rather than from prose -- channel
-`cwd`, `github_repos`, whether an `aws_profile` or policy `env` exists (names
-only, never values), which skills are on this channel's menu, and what the
-grant layer will run without a card. A single read-only tool returning that
-dict, or a block appended to the system prompt per turn. Small, and it makes
-every "can you..." exchange one turn instead of three.
-
-## 5. #23 -- DM events
+## 1. #23 -- DM events
 
 `message.im` is unhandled: `_ignore_message` acks and drops. The work is
 plumbing (route DMs to `handler.handle` with the DM's channel id, which
@@ -119,7 +108,7 @@ already resolves to `D...` policies -- one exists in the live policy file
 today), plus deciding whether a DM's trust tier differs from a channel's. It
 does not: `trusted_users` is per user, so a DM inherits the same authz.
 
-## 6. #62 -- web-fetch tool
+## 2. #62 -- web-fetch tool
 
 Firecrawl or similar, so a URL pasted into a channel can be read. Note three
 constraints that already exist: the sandbox blocks nothing network-wise (this
@@ -130,7 +119,7 @@ unrestricted outbound GET through auto-run `curl`, which is why #149 comes
 first. If #149 lands a per-channel domain allow-list, this issue is largely
 "give the existing capability a tool-shaped front door that obeys it".
 
-## 7. #140 -- per-channel memory
+## 3. #140 -- per-channel memory
 
 Deferred by decision 4 on #100 and kept last on purpose. When it is taken:
 per-channel `MEMORY.md` in the same `channels/<channel>/` dir of the private

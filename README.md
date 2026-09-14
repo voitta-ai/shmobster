@@ -650,6 +650,21 @@ A command has to clear all of these. The model's opinion is not one of them.
 Everything the agent then says is scrubbed on the way out
 ([Credential redaction](#credential-redaction-72)).
 
+### Asking it what it can do (#9)
+
+`describe_capabilities` is a read-only tool that reports this channel's envelope
+from the policy: working directory, repo and AWS scope, which hosts it may reach
+without a card, which credential **names** are injected, what it may read or
+write beyond the tree, which skills are loadable, and what runs uncarded. The
+persona tells it to answer any "what can you do / what can you reach" question
+from that tool rather than from prose -- the failure this replaces was an agent
+asked what files it could see and answering from its own persona file, citing a
+config key that no longer existed.
+
+Names, never values: a policy `env` entry exists to inject a credential, so its
+value is exactly what must not be reported, while the name is what makes the
+answer useful. One channel's report never mentions another's.
+
 ### Trust model
 
 Assumes **private channels and trusted invitees -- no bad actors.** The agent
@@ -1237,7 +1252,7 @@ One job per file. Start at the file that owns the thing you are changing.
 | `handler.py` | the turn -- an **ingest-agnostic** tool-calling loop that knows nothing about Slack |
 | `llm.py` | the vendor waterfall (a LiteLLM Router built from config) |
 | `codex_llm.py` | the codex-subscription rung, as an in-process `litellm.CustomLLM` |
-| `tools.py` | the model-callable tools; `run_shell` is the one that matters |
+| `tools.py` | the model-callable tools: `run_shell`, and `describe_capabilities` (#9) |
 | `slack_tools.py` | Slack-read tools (#28): another thread, channel history, a permalink |
 | `admin_tools.py` | the privileged tools: `set_policy`, `approve_command`, `reload_skills` |
 | `yolt_gate.py` | the mutating / read-only verdict, from voitta-yolt's classifier |

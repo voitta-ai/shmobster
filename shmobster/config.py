@@ -170,6 +170,18 @@ CHANNEL_POLICIES = _policies.get("channel_policies", {})
 DEFAULT_POLICY = _policies.get("default_policy", {})
 
 
+# This deployment's own files (#147). A channel whose `cwd` is the directory
+# shmobster runs from has them inside its tree, where the grant layer runs an
+# in-tree write with no card -- so `tee`/`sed -i`/`cp` onto the policy file
+# would let the agent widen its own envelope (`cwd`, `allow_*`, `env`,
+# `env_passthrough`) without a human in the path. Resolved once, here, because
+# both the textual guard (policy.py) and the sandbox profile (sandbox.py) need
+# the same answer. Relative paths resolve against the process cwd, which is
+# where they were loaded from.
+SELF_FILES = tuple(dict.fromkeys(
+    (os.path.realpath(_PATH), os.path.realpath(_POLICIES_PATH))
+))
+
 # Trusted users (Slack user IDs) who may change my restrictions via chat (#36).
 TRUSTED_USERS = set(_cfg.get("trusted_users", []))
 

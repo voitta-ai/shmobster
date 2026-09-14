@@ -46,7 +46,7 @@ import shutil
 import sys
 import tempfile
 
-from . import policy
+from . import config, policy
 
 # Under $HOME, readable by default: what git and gh read on every invocation,
 # and the toolchain roots. Nothing here holds a secret: gh's token is in the
@@ -184,6 +184,21 @@ def profile(pol):
         + " ".join(f"(subpath {_quote(p)})" for p in writes + reads)
         + ")"
     )
+    # After the write allow, so it wins: this deployment's own config and
+    # policy files are never writable from a channel, whatever its cwd (#147).
+    # Before the `exclude` deny rather than after it only so that the
+    # channel's own exclusions stay the profile's last word; two denies do
+    # not compete.
+    # The write, not the read -- a read-deny on two files inside the tree would
+    # make ordinary tree work (git, grep) fail on them, and policy._check_self
+    # already refuses to touch them textually. Literals, not subpaths: they are
+    # files, and realpath'd once at load.
+    if config.SELF_FILES:
+        lines.append(
+            "(deny file-write* "
+            + " ".join(f"(literal {_quote(p)})" for p in config.SELF_FILES)
+            + ")"
+        )
     if excludes:
         lines.append(
             "(deny file-read* file-write* "

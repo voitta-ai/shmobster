@@ -497,6 +497,16 @@ config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
 `default_policy` in the main config are still honored when no
 `shmobster-policies.json` exists.
 
+**Neither file is reachable from a channel** (#147). A channel whose `cwd` is
+the directory shmobster runs from has them inside its tree, where the grant
+layer would treat `tee`/`sed -i`/`cp` onto one as an ordinary in-tree write and
+run it with no card -- letting the agent widen its own envelope. So a command
+naming either path is blocked by policy with a reason, and the sandbox denies
+the write in the kernel as well, which is what catches a path the shell
+resolves at runtime. Reads are blocked too: a config value is not something
+this agent posts into a channel. The route for changing a policy is
+`set_policy`, trusted users only.
+
 #### Run
 
     python3 -m venv .venv && .venv/bin/pip install -r requirements.txt

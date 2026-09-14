@@ -1212,6 +1212,44 @@ _aw = sandbox.profile({"cwd": _sb_tree, "allow_write": ["scratch"]})
 assert _aw.count(f'(subpath "{_real_tree}/scratch")') == 2, _aw
 # a quote in a path cannot break out of the profile's string literal
 assert sandbox._quote('/a/b"c') == '"/a/b\\"c"'
+
+# this deployment's own config and policy files are never writable from a
+# channel, whatever its cwd (#147). Two layers: policy.check refuses the
+# command textually, with a reason; the sandbox denies the write in the kernel,
+# which is what catches a path the shell resolves at runtime.
+assert config.SELF_FILES, "SELF_FILES is the premise of both layers"
+for _self_pol, _cmd in (
+    ({"cwd": "examples"}, "sed -i '' s/a/b/ shmobster-policies-example.json"),
+    ({"cwd": "examples"}, "tee shmobster-config-example.json"),
+    ({"cwd": "examples"}, "cp /tmp/x shmobster-policies-example.json"),
+    ({"cwd": "."}, "cat examples/shmobster-policies-example.json"),
+    ({"cwd": "."}, f"cat {os.path.realpath('examples/shmobster-config-example.json')}"),
+):
+    _ok, _why = policy.check(_cmd, _self_pol)
+    assert not _ok and "own config" in _why, (_cmd, _ok, _why)
+assert policy.check("cat README.md", {"cwd": "."})[0], "an ordinary file in the same tree still passes"
+# ...and the kernel layer, proved against a stand-in so no real config is ever
+# the target of a write test
+import subprocess  # noqa: E402  (imported again below, where it is first needed in file order)
+
+_sf_dir = tempfile.mkdtemp()
+_sf_file = os.path.join(_sf_dir, "stand-in-config.json")
+with open(_sf_file, "w") as _f:
+    _f.write("{}")
+_saved_self = config.SELF_FILES
+config.SELF_FILES = (os.path.realpath(_sf_file),)
+try:
+    assert f'(deny file-write* (literal "{os.path.realpath(_sf_file)}")' in sandbox.profile({"cwd": _sf_dir})
+    if _HAVE_SANDBOX:
+        _sf_proc = subprocess.run(
+            _REAL_WRAP(f"echo clobber > {_sf_file}", {"cwd": _sf_dir}),
+            capture_output=True, text=True, timeout=15,
+        )
+        assert _sf_proc.returncode != 0, _sf_proc
+        with open(_sf_file) as _f:
+            assert _f.read() == "{}", "the kernel deny must beat the in-tree write allow"
+finally:
+    config.SELF_FILES = _saved_self
 # no sandbox-exec -> no run, never an unconfined fallback
 _real_which = shutil.which
 shutil.which = lambda name: None

@@ -137,15 +137,26 @@ with open(_pf) as _f:
 # now describe it -- put the example back before anything below reads them
 config.reload_policies()
 
-# ...and a name one channel scopes must not leak to another (#106). Since #104 a
-# policy env value has to be in the process environment to expand, and every
-# subprocess starts from a copy of that environment.
-assert "VERCEL_TOKEN" in config.SCOPED_ENV_NAMES, config.SCOPED_ENV_NAMES
+# ...and nothing the parent process happens to hold reaches a command (#112).
+# The child environment is built from an allowlist, so this covers both a name
+# another channel scopes through its policy `env` (#106, since #104 it has to
+# be in the process environment to expand) and a credential shmobster was
+# never told about -- the case a redactor cannot cover, because `printenv NAME`
+# returns a bare value with no shape.
+os.environ["SECRET_TOKEN"] = "planted-parent-secret-9f3a"
 assert "VERCEL_TOKEN" in os.environ, "the premise: it is in the process env to be expanded"
 _leak = tools.execute("printenv VERCEL_TOKEN || echo ABSENT", {})
 assert _leak.strip() == "ABSENT", f"another channel's scoped credential was readable: {_leak!r}"
+_planted = tools.execute("printenv SECRET_TOKEN || echo ABSENT", {})
+assert _planted.strip() == "ABSENT", f"an undeclared parent credential was readable: {_planted!r}"
 _mine = tools.execute("printenv VERCEL_TOKEN", {"env": {"VERCEL_TOKEN": "mine-only"}})
 assert _mine.strip() == "mine-only", _mine
+# The floor is there (PATH would break every command), and the deliberate
+# exception arrives for the channel that names it -- and only that one.
+_base = tools.execute("printenv PATH", {})
+assert _base.strip() == os.environ["PATH"], _base
+_pass = tools.execute("printenv SECRET_TOKEN", {"env_passthrough": ["SECRET_TOKEN"]})
+assert _pass.strip() == "planted-parent-secret-9f3a", _pass
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()

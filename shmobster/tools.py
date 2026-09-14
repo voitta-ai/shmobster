@@ -85,6 +85,50 @@ def run_shell(command, policy, channel=None):
     return retval
 
 
+# The floor every child environment is built up from (#112). The old code
+# copied os.environ and subtracted the names some channel had declared, which
+# could only ever remove what something declared: every other variable the
+# operator exported rode into every channel -- 192 of them on the live box,
+# 49 credential-shaped. `printenv SOME_TOKEN` is read-only, so it runs with no
+# card, and a bare token has no shape the redactor can catch. So the child
+# environment is built from an allowlist instead, the same inversion #116 made
+# for reads and #122 for secrets: a channel's own `env` and `env_passthrough`
+# are the only routes from the machine's environment into a command.
+#
+# The floor is what the toolchain genuinely needs, and holds no credential.
+# SSH_AUTH_SOCK is deliberately absent: it is a capability, not a value, and
+# git here runs over https (gitcfg.py).
+_BASE_ENV_NAMES = ("PATH", "HOME", "USER", "LANG", "TERM", "TMPDIR", "SHELL")
+_BASE_ENV_PREFIXES = ("LC_",)
+
+
+def child_env(policy):
+    """The environment a channel's command runs with: the floor, git's config,
+    the channel's AWS profile, and what its policy declares -- nothing else."""
+    retval = {
+        k: v for k, v in os.environ.items()
+        if k in _BASE_ENV_NAMES or k.startswith(_BASE_ENV_PREFIXES)
+    }
+    # Git over https with gh's keychain token, so no channel ever needs to
+    # read ~/.ssh (gitcfg.py). Per process: the operator's config is untouched.
+    retval.update(gitcfg.env())
+    prof = policy.get("aws_profile")
+    if prof:
+        retval["AWS_PROFILE"] = prof
+    # The rare host variable a channel's toolchain needs that is not a
+    # credential. Policy file only -- set_policy over chat cannot add one --
+    # so a name here is as deliberate as an `env` entry, written by a trusted
+    # user in the same file.
+    for _name in policy.get("env_passthrough") or ():
+        if _name in os.environ:
+            retval[_name] = os.environ[_name]
+    # Per-channel extra credentials (e.g. VERCEL_TOKEN, HEROKU_API_KEY). Values
+    # live in the gitignored shmobster-policies.json; injected only for this
+    # channel's commands.
+    retval.update(policy.get("env") or {})
+    return retval
+
+
 def execute(command, policy):
     """Run a command that has already cleared the YOLT gate or been approved.
     The channel policy is still enforced here -- approval is permission, policy
@@ -107,26 +151,7 @@ def execute(command, policy):
     # a trace too. The exit line repeats the command rather than relying on
     # adjacency -- Bolt handles events concurrently, so two turns interleave.
     logging.info("run_shell: running: %s", safe_cmd)
-    env = os.environ.copy()
-    # Git over https with gh's keychain token, so no channel ever needs to
-    # read ~/.ssh (gitcfg.py). Per process: the operator's config is untouched.
-    env.update(gitcfg.env())
-    prof = policy.get("aws_profile")
-    if prof:
-        env["AWS_PROFILE"] = prof
-    # A name any channel scopes through its policy env is not a global (#106).
-    # Drop every such name from the inherited copy first, then add back only
-    # this channel's -- otherwise a token another channel declares is readable
-    # here with a plain `printenv`, since a ${VAR} policy value has to be in the
-    # process environment to expand and every subprocess starts from a copy of
-    # it. Scoping that only holds while nobody looks is not scoping.
-    for _name in config.SCOPED_ENV_NAMES:
-        env.pop(_name, None)
-    # Per-channel extra credentials (e.g. VERCEL_TOKEN, HEROKU_API_KEY). Values
-    # live in the gitignored shmobster-policies.json; injected only for this
-    # channel's commands.
-    for _k, _v in (policy.get("env") or {}).items():
-        env[_k] = _v
+    env = child_env(policy)
     try:
         # Confined to the channel's tree at the kernel (#116). sandbox.wrap
         # raises when the sandbox is unavailable; that lands in the except

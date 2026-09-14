@@ -62,6 +62,8 @@ with open(os.path.join(_yolt_dir, "secret_redact.py"), "w") as _f:
 # reference before any of that happens.
 _REAL_COMPLETE = llm.complete
 _REAL_YOLT = config.YOLT_CLASSIFIER
+# later sections stub classify() itself; section 26 is about the real one
+_REAL_CLASSIFY = yolt_gate.classify
 config.YOLT_CLASSIFIER = os.path.join(_yolt_dir, "grammar_classifier.py")
 # The sandbox (#116) is macOS sandbox-exec and fails closed without it, which
 # on ubuntu CI would fail every exec below for a reason unrelated to what the
@@ -1571,5 +1573,57 @@ config.CHANNEL_POLICIES["C8"] = {"cwd": _sk_cwd, "skills": [_sk_dir], "allow_wri
 assert skills.channel_paths("C8") == [], "an allow_write dir cannot also be a skills dir"
 config.CHANNEL_POLICIES.clear(); config.CHANNEL_POLICIES.update(_saved_cps)
 sandbox.roots = _real_roots
+
+# 26) the auto-run set is YOLT's rules, not the operator's terminal permissions
+# (#148). classify() passes --no-user-allow, and preflight() refuses to let a
+# YOLT that cannot honor it pass silently -- silence here would mean the Slack
+# agent is auto-running whatever the operator once allowed themselves.
+_ya_dir = tempfile.mkdtemp()
+
+
+def _yolt_stub(name, body):
+    path = os.path.join(_ya_dir, name)
+    with open(path, "w") as f:
+        f.write("import json, sys\n" + body)
+    return path
+
+
+# honors the flag: command is the last argv, and it reports the count
+_ya_good = _yolt_stub("good.py", (
+    "flag = '--no-user-allow' in sys.argv[1:]\n"
+    "print(json.dumps({'decision': 'safe', 'reason': ' '.join(sys.argv[1:-1]),\n"
+    "                  'allow_patterns': 0 if flag else 106}))\n"
+))
+# pre-1.2.0: argv[1] is the command, so the flag is classified instead of it
+_ya_old = _yolt_stub("old.py", (
+    "cmd = sys.argv[1]\n"
+    "print(json.dumps({'decision': 'safe' if cmd.startswith('echo') else 'unknown',\n"
+    "                  'reason': 'stub'}))\n"
+))
+# answers, but says nothing about how many patterns were in play
+_ya_quiet = _yolt_stub("quiet.py", "print(json.dumps({'decision': 'safe', 'reason': 'stub'}))\n")
+# takes the flag and inherits anyway
+_ya_leaky = _yolt_stub("leaky.py", (
+    "print(json.dumps({'decision': 'safe', 'reason': 'stub', 'allow_patterns': 7}))\n"
+))
+_saved_yolt = config.YOLT_CLASSIFIER
+try:
+    config.YOLT_CLASSIFIER = _ya_good
+    assert yolt_gate.preflight() == [], yolt_gate.preflight()
+    # the flag reaches the classifier, ahead of the command
+    assert _REAL_CLASSIFY("cat x") == ("safe", "--no-user-allow"), _REAL_CLASSIFY("cat x")
+    config.YOLT_CLASSIFIER = _ya_old
+    assert "does not understand" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    config.YOLT_CLASSIFIER = _ya_quiet
+    assert "cannot be confirmed" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    config.YOLT_CLASSIFIER = _ya_leaky
+    assert "despite" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    config.YOLT_CLASSIFIER = ""
+    assert "not configured" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    # ...and an unrunnable classifier still fails closed, as it always did
+    config.YOLT_CLASSIFIER = os.path.join(_ya_dir, "nope.py")
+    assert _REAL_CLASSIFY("cat x")[0] == "unsafe", _REAL_CLASSIFY("cat x")
+finally:
+    config.YOLT_CLASSIFIER = _saved_yolt
 
 print(f"selfcheck OK -- shmobster {_b}")

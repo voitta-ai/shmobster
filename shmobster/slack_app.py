@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, proposals, redact, sandbox, skills, slack_blocks, watchdog
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, proposals, redact, sandbox, skills, slack_blocks, watchdog, yolt_gate
 
 # asctime is not in the default format (#102). Without it the disposition log
 # (#97) records order but not time, and "how long did that take" / "did this run
@@ -336,6 +336,11 @@ def main():
     # so now if this host cannot do that, instead of at the first push.
     for warning in gitcfg.preflight():
         logging.warning("git preflight: %s", warning)
+    # What auto-runs is YOLT's rules, not the operator's terminal permissions
+    # (#148). Say so at boot, and say it loudly if this host's YOLT is too old
+    # to be asked.
+    for warning in yolt_gate.preflight():
+        logging.warning("yolt preflight: %s", warning)
     if sandbox.gh_file_backed():
         logging.warning(
             "gh keeps its token in %s, not the keychain; the file is denied to every "

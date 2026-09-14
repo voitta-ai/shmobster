@@ -496,6 +496,15 @@ machine's channel layout is versioned separately from the token/key config:
     the credential it needs from its environment is a plain read-only command
     -- no `source`, so nothing trips the mutating gate and nothing needs
     approving.
+  - `allow_domains` -- hosts this channel's `curl`/`wget` may reach without an
+    approval card, as `fnmatch` globs (`["api.github.com", "*.githubusercontent.com"]`).
+    A fetch to any other host, or one whose host is not statically visible in
+    the command (`curl example.com` with no scheme, `curl "$URL"`), is treated
+    as **mutating**: it parks for a trusted user, who can still say yes. Omit
+    the key and every fetch parks -- which is the default on purpose, since a
+    built-in list would be wrong for somebody. This is a textual guard like
+    `exclude`, not containment: the sandbox confines the filesystem, never the
+    network (#149).
   - `env_passthrough` -- names of *host* variables a channel's commands may
     inherit from shmobster's own environment, for the rare tool that needs one
     (`["SSH_AUTH_SOCK"]`, a corporate `HTTPS_PROXY`). Values are not written
@@ -630,6 +639,7 @@ A command has to clear all of these. The model's opinion is not one of them.
 | Gate | Question it answers | Lives in |
 |---|---|---|
 | YOLT verdict | does this mutate anything? (YOLT's rules only, #148) | `yolt_gate.py` -> voitta-yolt |
+| Egress (#149) | ...or reach a host this channel was not given? | `policy.check_egress` |
 | Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
 | Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |
 | Sandbox (#116) | where may it reach on this disk? | `sandbox.py` -> `sandbox-exec` |

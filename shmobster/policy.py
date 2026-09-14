@@ -114,6 +114,47 @@ def _check_aws(command, policy):
     return (True, "")
 
 
+# A URL's host, from any scheme: what a channel's egress allow-list is checked
+# against. Stops at the first '/', strips userinfo and port.
+_URL_HOST = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://([^/\s'\"`]+)")
+
+_EGRESS_VERBS = ("curl", "wget")
+
+
+def check_egress(command, policy):
+    """(ok, reason) for the network reach of a read-only command (#149).
+
+    `curl` and `wget` are read-only to YOLT, so they auto-run with no card, to
+    any host. Everything else that leaves the box -- `nc`, `ssh`, `scp`, a
+    `curl -X POST` -- is already mutating and already parks. That left one
+    uncarded path off the machine, and the sandbox cannot help: it confines the
+    filesystem, not the network. What is left to send is whatever the channel
+    may legitimately read, which is its own tree -- a project `.env` or
+    `terraform.tfvars` is one `cat` and one `curl` away.
+
+    So a fetch is allowed without a card only when every host it names is in
+    the channel's `allow_domains`. Anything else is *mutating*, not blocked: it
+    parks for a trusted user, who can say yes. A channel with no
+    `allow_domains` cards every fetch, which is the honest default -- the
+    alternative is a built-in list that is wrong for somebody.
+
+    A host has to be statically visible in the command, which means a scheme.
+    `curl example.com` and `curl "$URL"` park rather than being guessed at:
+    this is a textual guard like `exclude`, and it says so instead of pretending
+    to parse a shell."""
+    tokens = _tokens(command)
+    if not any(os.path.basename(t) in _EGRESS_VERBS for t in tokens):
+        return (True, "")
+    hosts = [h.split("@")[-1].split(":")[0].lower() for h in _URL_HOST.findall(command)]
+    if not hosts:
+        return (False, "fetch: no statically known host (use an explicit https:// URL)")
+    allowed = [p.lower() for p in (policy.get("allow_domains") or [])]
+    for host in hosts:
+        if not any(fnmatch.fnmatch(host, pat) for pat in allowed):
+            return (False, f"fetch to '{host}' is not in this channel's allow_domains")
+    return (True, "")
+
+
 def _norm_path(p, base):
     p = os.path.expanduser(os.path.expandvars(p))
     if not os.path.isabs(p):

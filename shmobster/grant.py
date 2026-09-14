@@ -101,9 +101,10 @@ def _resolve(target, tracked):
 
 
 class _Walker:
-    def __init__(self, src, start_dir):
+    def __init__(self, src, start_dir, policy=None):
         self.src = src
         self.tracked = start_dir
+        self.policy = policy or {}
         self.probe = gitstate.GitProbe()
         self.reasons = []
 
@@ -197,7 +198,13 @@ class _Walker:
         if retval is None or (retval[0] is False and verb == "git"):
             decision, reason = yolt_gate.classify(text)
             if decision == "safe":
-                retval = (True, f"{verb}: read-only")
+                # "Read-only" is about this machine, and a fetch is read-only
+                # here while being an effect out there (#149). Without this the
+                # layer that exists to vouch for local writes would vouch for
+                # `touch f && curl https://elsewhere/...`, one segment at a
+                # time, and hand back the grant the egress check just refused.
+                allowed, why = policy_mod.check_egress(text, self.policy)
+                retval = (True, f"{verb}: read-only") if allowed else (False, why)
             elif retval is None:
                 retval = (False, reason)
         if retval[0]:
@@ -277,7 +284,7 @@ def check(command, policy):
     tree = tree_sitter.Parser(_LANG).parse(src)
     if tree.root_node.has_error:
         return (False, "command does not parse")
-    walker = _Walker(src, policy_mod.cwd_for(policy))
+    walker = _Walker(src, policy_mod.cwd_for(policy), policy)
     ok, why = walker.walk(tree.root_node)
     if ok and not walker.reasons:
         ok, why = (False, "empty command")

@@ -23,6 +23,10 @@
       "env_passthrough": [
         "HTTPS_PROXY"
       ],
+      "allow_domains": [
+        "api.github.com",
+        "*.githubusercontent.com"
+      ],
       "skills": [
         "~/g/skillz-private/channels/scoped-channel/skills"
       ]

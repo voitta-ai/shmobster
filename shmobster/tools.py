@@ -58,6 +58,15 @@ _MAX_OUTPUT = 4000
 
 def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command)
+    # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
+    # box, and a fetch to a host this channel was not given is a mutation of
+    # the world even when it reads nothing here (#149). Demote it to mutating
+    # and let the rest of this function do what it does with a mutation -- the
+    # grant layer will not vouch for a fetch, so it parks for a card.
+    if decision == "safe":
+        allowed, why = policy_mod.check_egress(command, policy)
+        if not allowed:
+            decision, reason = "unsafe", why
     if decision != "safe":
         # Not every mutation needs a human (#117): a write the sandbox keeps
         # in the tree, or a commit on the user's own worktree branch, runs on

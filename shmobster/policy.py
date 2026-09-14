@@ -114,6 +114,90 @@ def _check_aws(command, policy):
     return (True, "")
 
 
+# A URL's authority, from any scheme. Stops where the authority does -- at '/',
+# '?', '#', whitespace or a quote -- because `curl https://example.com?x=1`
+# contacts example.com, and a host of "example.com?x=1" would match nothing and
+# card a fetch the channel was given.
+_URL_HOST = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://([^/\s'\"`?#]+)")
+
+_EGRESS_VERBS = ("curl", "wget")
+
+# git talks to a remote over https without any of the above (#149 review). Only
+# these subcommands do: `git log --grep https://x` names a URL and contacts
+# nothing, and carding it would be a guard inventing work.
+_GIT_NET_SUBS = ("clone", "fetch", "pull", "push", "ls-remote", "submodule", "remote")
+
+
+def _host_of(authority):
+    """The host inside a URL authority: userinfo dropped, port dropped, IPv6
+    literal kept whole. `https://evil.test@example.com/` contacts example.com,
+    which is why userinfo goes before the port split rather than after."""
+    hostport = authority.rsplit("@", 1)[-1]
+    if hostport.startswith("["):          # [2001:db8::1]:443 -- the colons are the address
+        retval = hostport[: hostport.index("]") + 1] if "]" in hostport else hostport
+        return retval.lower()
+    retval = hostport.split(":", 1)[0].lower()
+    return retval
+
+
+def _git_subcommand(tokens):
+    """The subcommand in a `git` invocation, skipping git's own flags and the
+    values of the two that take one."""
+    retval = None
+    i = tokens.index("git") + 1 if "git" in tokens else len(tokens)
+    while i < len(tokens):
+        t = tokens[i]
+        if t in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            i += 2
+            continue
+        if t.startswith("-"):
+            i += 1
+            continue
+        retval = t
+        break
+    return retval
+
+
+def check_egress(command, policy):
+    """(ok, reason) for the network reach of a read-only command (#149).
+
+    `curl` and `wget` are read-only to YOLT, so they auto-run with no card, to
+    any host, and so does `git ls-remote https://<anywhere>`. Everything else that leaves the box -- `nc`, `ssh`, `scp`, a
+    `curl -X POST` -- is already mutating and already parks. That left one
+    uncarded path off the machine, and the sandbox cannot help: it confines the
+    filesystem, not the network. What is left to send is whatever the channel
+    may legitimately read, which is its own tree -- a project `.env` or
+    `terraform.tfvars` is one `cat` and one `curl` away.
+
+    So a fetch is allowed without a card only when every host it names is in
+    the channel's `allow_domains`. Anything else is *mutating*, not blocked: it
+    parks for a trusted user, who can say yes. A channel with no
+    `allow_domains` cards every fetch, which is the honest default -- the
+    alternative is a built-in list that is wrong for somebody.
+
+    The same applies to the git subcommands that contact a remote; the ones
+    that do not (`git log --grep https://x`) are left alone.
+
+    A host has to be statically visible in the command, which means a scheme.
+    `curl example.com` and `curl "$URL"` park rather than being guessed at:
+    this is a textual guard like `exclude`, and it says so instead of pretending
+    to parse a shell."""
+    tokens = _tokens(command)
+    fetches = any(os.path.basename(t) in _EGRESS_VERBS for t in tokens)
+    if not fetches and any(os.path.basename(t) == "git" for t in tokens):
+        fetches = _git_subcommand(tokens) in _GIT_NET_SUBS
+    if not fetches:
+        return (True, "")
+    hosts = [_host_of(h) for h in _URL_HOST.findall(command)]
+    if not hosts:
+        return (False, "fetch: no statically known host (use an explicit https:// URL)")
+    allowed = [p.lower() for p in (policy.get("allow_domains") or [])]
+    for host in hosts:
+        if not any(fnmatch.fnmatch(host, pat) for pat in allowed):
+            return (False, f"fetch to '{host}' is not in this channel's allow_domains")
+    return (True, "")
+
+
 def _norm_path(p, base):
     p = os.path.expanduser(os.path.expandvars(p))
     if not os.path.isabs(p):

@@ -1626,4 +1626,59 @@ try:
 finally:
     config.YOLT_CLASSIFIER = _saved_yolt
 
+# 27) egress allow-list (#149): curl/wget are read-only to YOLT, so they used to
+# auto-run to any host. A fetch is now uncarded only when every host it names is
+# in the channel's allow_domains; anything else is mutating -- a card, not a
+# block -- and a channel with no allow_domains cards every fetch.
+_eg = {"cwd": ".", "allow_domains": ["example.com", "*.githubusercontent.com"]}
+for _cmd, _want in (
+    ("curl https://example.com/x", True),
+    ("wget https://raw.githubusercontent.com/x", True),           # glob
+    ("curl https://user:pw@example.com:443/x", True),             # userinfo and port stripped
+    ("/usr/bin/curl https://example.com/x", True),                # a path, not a bare verb
+    ("cat README.md", True),                                      # not a fetch at all
+    ("curl https://elsewhere.test/x", False),
+    ("curl https://example.com/a https://elsewhere.test/b", False),  # every host must pass
+    ("curl example.com", False),                                  # no scheme -> not statically known
+    ("curl \"$URL\"", False),
+    # the authority ends at ? and #, or an allowed host would card itself
+    ("curl https://example.com?x=1", True),
+    ("curl https://example.com#frag", True),
+    ("curl https://example.com:8443/x", True),                    # port
+    ("curl https://evil.test@example.com/x", True),               # userinfo is not the host
+    ("curl https://[2001:db8::1]/x", False),                      # IPv6 literal, parsed whole
+    # git reaches a remote without curl (#149 review), but only on the
+    # subcommands that contact one
+    ("git ls-remote https://elsewhere.test/o/r", False),
+    ("git -C /tmp fetch https://elsewhere.test/o/r", False),
+    ("git ls-remote https://example.com/o/r", True),
+    ("git log --grep https://elsewhere.test", True),              # names a URL, contacts nothing
+    ("git commit -m x", True),
+):
+    _ok, _why = policy.check_egress(_cmd, _eg)
+    assert _ok == _want, (_cmd, _ok, _why)
+assert policy.check_egress("curl https://example.com/x", {"cwd": "."})[0] is False, \
+    "no allow_domains must card every fetch, not allow them"
+
+# the grant layer must not undo it: its read-only fallback would otherwise
+# vouch for the fetch segment of a compound command, one segment at a time
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+assert grant.check("touch f && curl https://example.com/x", _eg)[0], grant.check("touch f && curl https://example.com/x", _eg)
+_g_ok, _g_why = grant.check("touch f && curl https://elsewhere.test/x", _eg)
+assert not _g_ok and "elsewhere.test" in _g_why, (_g_ok, _g_why)
+# ...and a fetch YOLT itself calls mutating refuses on its own grounds rather
+# than slipping through beside a granted write (#149 review, finding 2)
+yolt_gate.classify = lambda cmd: ("safe", "read-only") if "curl" not in cmd else ("unsafe", "curl: flag -X POST")
+_g2_ok, _g2_why = grant.check("mkdir -p x && curl -X POST https://elsewhere.test/x", _eg)
+assert not _g2_ok, (_g2_ok, _g2_why)
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
+
+# ...and end to end: an off-list fetch parks with the host in its reason, while
+# a read-only command in the same channel still runs
+_eg_out = tools.run_shell("curl https://elsewhere.test/x", _eg, "C_EG")
+assert _eg_out.startswith("NOT RUN") and "elsewhere.test" in _eg_out, _eg_out
+_eg_parked = approvals.claim_unsurfaced("C_EG")
+assert len(_eg_parked) == 1 and "elsewhere.test" in _eg_parked[0][1]["command"], _eg_parked
+assert "selfcheck_egress_marker" in tools.run_shell("echo selfcheck_egress_marker", _eg, "C_EG")
+
 print(f"selfcheck OK -- shmobster {_b}")

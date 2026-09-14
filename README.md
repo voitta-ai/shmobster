@@ -496,8 +496,10 @@ machine's channel layout is versioned separately from the token/key config:
     the credential it needs from its environment is a plain read-only command
     -- no `source`, so nothing trips the mutating gate and nothing needs
     approving.
-  - `allow_domains` -- hosts this channel's `curl`/`wget` may reach without an
-    approval card, as `fnmatch` globs (`["api.github.com", "*.githubusercontent.com"]`).
+  - `allow_domains` -- hosts this channel's `curl`/`wget`, and the `git`
+    subcommands that contact a remote (`clone`, `fetch`, `pull`, `push`,
+    `ls-remote`, `submodule`, `remote`), may reach without an approval card, as
+    `fnmatch` globs (`["api.github.com", "*.githubusercontent.com"]`).
     A fetch to any other host, or one whose host is not statically visible in
     the command (`curl example.com` with no scheme, `curl "$URL"`), is treated
     as **mutating**: it parks for a trusted user, who can still say yes. Omit

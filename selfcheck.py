@@ -1641,6 +1641,19 @@ for _cmd, _want in (
     ("curl https://example.com/a https://elsewhere.test/b", False),  # every host must pass
     ("curl example.com", False),                                  # no scheme -> not statically known
     ("curl \"$URL\"", False),
+    # the authority ends at ? and #, or an allowed host would card itself
+    ("curl https://example.com?x=1", True),
+    ("curl https://example.com#frag", True),
+    ("curl https://example.com:8443/x", True),                    # port
+    ("curl https://evil.test@example.com/x", True),               # userinfo is not the host
+    ("curl https://[2001:db8::1]/x", False),                      # IPv6 literal, parsed whole
+    # git reaches a remote without curl (#149 review), but only on the
+    # subcommands that contact one
+    ("git ls-remote https://elsewhere.test/o/r", False),
+    ("git -C /tmp fetch https://elsewhere.test/o/r", False),
+    ("git ls-remote https://example.com/o/r", True),
+    ("git log --grep https://elsewhere.test", True),              # names a URL, contacts nothing
+    ("git commit -m x", True),
 ):
     _ok, _why = policy.check_egress(_cmd, _eg)
     assert _ok == _want, (_cmd, _ok, _why)
@@ -1653,6 +1666,12 @@ yolt_gate.classify = lambda cmd: ("safe", "read-only")
 assert grant.check("touch f && curl https://example.com/x", _eg)[0], grant.check("touch f && curl https://example.com/x", _eg)
 _g_ok, _g_why = grant.check("touch f && curl https://elsewhere.test/x", _eg)
 assert not _g_ok and "elsewhere.test" in _g_why, (_g_ok, _g_why)
+# ...and a fetch YOLT itself calls mutating refuses on its own grounds rather
+# than slipping through beside a granted write (#149 review, finding 2)
+yolt_gate.classify = lambda cmd: ("safe", "read-only") if "curl" not in cmd else ("unsafe", "curl: flag -X POST")
+_g2_ok, _g2_why = grant.check("mkdir -p x && curl -X POST https://elsewhere.test/x", _eg)
+assert not _g2_ok, (_g2_ok, _g2_why)
+yolt_gate.classify = lambda cmd: ("safe", "read-only")
 
 # ...and end to end: an off-list fetch parks with the host in its reason, while
 # a read-only command in the same channel still runs

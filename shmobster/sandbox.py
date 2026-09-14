@@ -46,7 +46,7 @@ import shutil
 import sys
 import tempfile
 
-from . import policy
+from . import config, policy
 
 # Under $HOME, readable by default: what git and gh read on every invocation,
 # and the toolchain roots. Nothing here holds a secret: gh's token is in the
@@ -184,6 +184,31 @@ def profile(pol):
         + " ".join(f"(subpath {_quote(p)})" for p in writes + reads)
         + ")"
     )
+    # After the write allow, so it wins: this deployment's own config and
+    # policy files are neither readable nor writable from a channel, whatever
+    # its cwd (#147). Before the `exclude` deny rather than after it only so
+    # that the channel's own exclusions stay the profile's last word; two
+    # denies do not compete.
+    #
+    # `file-write*` is the whole write surface, not just open-for-write:
+    # verified on Darwin 25 that `mv`, `cp`, `sed -i` (which renames its temp
+    # over the target), `rm`, `ln -sf`, a hardlink-then-rename, and the same
+    # through `sh -c` or a shell variable all fail with "Operation not
+    # permitted" and leave the file byte-identical. That is what makes the
+    # textual guard in policy.py a courtesy message rather than the defence.
+    #
+    # The read deny costs a "Operation not permitted" line from `ls -l` and
+    # `git status` on these two files and nothing else -- measured -- and buys
+    # the read half the same independence from text matching.
+    # Literals, not subpaths: they are files, realpath'd once at load, and an
+    # absent path (no policy file yet, inline back-compat) still resolves, so
+    # planting one later is denied too.
+    if config.SELF_FILES:
+        lines.append(
+            "(deny file-read* file-write* "
+            + " ".join(f"(literal {_quote(p)})" for p in config.SELF_FILES)
+            + ")"
+        )
     if excludes:
         lines.append(
             "(deny file-read* file-write* "

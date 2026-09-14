@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt >= 1.0.0   # a clone, not a package: exec classifier + secret_redact
+  - voitta-ai/voitta-yolt >= 1.2.0   # a clone, not a package: exec classifier + secret_redact
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -378,6 +378,17 @@ One JSON config, no `.env`. Copy the example and fill it in:
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
 
+  The classifier is invoked with `--no-user-allow` (#148), so "read-only" means
+  what YOLT's own rules say. Without it, YOLT also promotes anything matching a
+  `Bash(...)` entry in `~/.claude/settings.json` or a project
+  `.claude/settings*.json` -- the operator's *interactive* Claude Code
+  permissions, written for a human at a terminal, applied here to commands a
+  channel asked for. On one deployment that was 123 patterns, among them
+  `gh pr merge*`, `gh api*` and `codex exec *`: mutating, and auto-run. That
+  flag needs voitta-yolt >= 1.2.0; on an older one every command parks and
+  startup says so (`yolt preflight:` in the log). A boot line also reports how
+  many allow patterns were in play, which should be `0`.
+
 #### Secrets: reference the environment, don't paste keys (opinionated)
 
 Any string value in the config may contain `${VAR}`, expanded from the process
@@ -618,7 +629,7 @@ A command has to clear all of these. The model's opinion is not one of them.
 
 | Gate | Question it answers | Lives in |
 |---|---|---|
-| YOLT verdict | does this mutate anything? | `yolt_gate.py` -> voitta-yolt |
+| YOLT verdict | does this mutate anything? (YOLT's rules only, #148) | `yolt_gate.py` -> voitta-yolt |
 | Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
 | Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |
 | Sandbox (#116) | where may it reach on this disk? | `sandbox.py` -> `sandbox-exec` |

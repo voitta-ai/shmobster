@@ -477,14 +477,20 @@ machine's channel layout is versioned separately from the token/key config:
         "env": { "FIGMA_TOKEN": "${FIGMA_TOKEN}" }
 
     This is also how you give one channel an API token *without* handing it to
-    every channel. A name that appears in any channel's `env` is treated as
-    channel-scoped: it is stripped from the environment every command inherits,
-    and added back only for the channel that declares it. So the `${VAR}` the
-    process needs in order to expand the reference is not readable from another
-    channel with a plain `printenv`. And a
-    command that can read the credential it needs from its environment is a
-    plain read-only command -- no `source`, so nothing trips the mutating gate
-    and nothing needs approving.
+    every channel: a command's environment is built from a fixed floor
+    (`PATH`, `HOME`, `USER`, `LANG`/`LC_*`, `TERM`, `TMPDIR`, `SHELL`, plus
+    git's per-process config), not inherited from the machine (#112), so the
+    `${VAR}` the process needs in order to expand the reference is not readable
+    from another channel with a plain `printenv`. And a command that can read
+    the credential it needs from its environment is a plain read-only command
+    -- no `source`, so nothing trips the mutating gate and nothing needs
+    approving.
+  - `env_passthrough` -- names of *host* variables a channel's commands may
+    inherit from shmobster's own environment, for the rare tool that needs one
+    (`["SSH_AUTH_SOCK"]`, a corporate `HTTPS_PROXY`). Values are not written
+    here, only names -- and a name in this list is as deliberate a grant as an
+    `env` entry, so do not list a credential a channel should not hold.
+    Policy-file only: `set_policy` over chat cannot add one.
 
 Because `env` may hold secrets, treat `shmobster-policies.json` like the main
 config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
@@ -843,6 +849,14 @@ Two layers:
   Every Slack token, waterfall `api_key` and per-channel policy `env` value is
   matched exactly, so a credential in a format nobody anticipated is still caught
   when it is one of ours.
+
+The redactor is the second line here, not the first. `printenv SOME_TOKEN`
+returns a bare value with no shape to match and no name beside it, so a
+credential shmobster was never told about could not be caught by any redactor.
+That is why a command's environment is built from an allowlist rather than
+inherited (#112): the floor above, this channel's `env` and its
+`env_passthrough` names. On the first deployment that took it, a command went
+from seeing 152 variables to 20, none of them credential-shaped.
 
 Scrubbing happens **at collection** -- the tool result, before it enters the
 model's context -- so every downstream copy inherits it: the vendor's logs, the

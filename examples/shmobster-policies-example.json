@@ -20,6 +20,9 @@
         "VERCEL_TOKEN": "${VERCEL_TOKEN}",
         "HEROKU_API_KEY": "${HEROKU_API_KEY}"
       },
+      "env_passthrough": [
+        "HTTPS_PROXY"
+      ],
       "skills": [
         "~/g/skillz-private/channels/scoped-channel/skills"
       ]

@@ -701,6 +701,12 @@ Two tiers:
 The `trusted_users` gate protects **config changes and approvals**, not general
 use.
 
+Reporting something that gets past the gates: [SECURITY.md](SECURITY.md). It
+lists what counts (a mutating command classifying as read-only, a fetch off the
+allow-list running uncarded, a write escaping the seatbelt, an approval id
+surviving a restart) and what does not (an invited user using the agent as
+designed).
+
 #### Multiple instances in one channel (#60)
 
 Two instances (e.g. a bot per machine) can share a channel. Each is its own

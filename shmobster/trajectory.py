@@ -107,7 +107,12 @@ def prune(days):
     by a clock change mid-file."""
     if not days:
         return 0
-    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    # UTC, because record() names the file in UTC (`now(timezone.utc)` above).
+    # A naive local now() here would put the cutoff up to a day out of step with
+    # the names it is compared against -- deleting a day early east of UTC and
+    # keeping one late west of it.
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
     dropped = 0
     for path in glob.glob(os.path.join(_DIR, "*", "*.jsonl")):
         if os.path.basename(path)[:10] >= cutoff:

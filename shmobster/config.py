@@ -182,6 +182,21 @@ SELF_FILES = tuple(dict.fromkeys(
     (os.path.realpath(_PATH), os.path.realpath(_POLICIES_PATH))
 ))
 
+# Logging (#155). Empty path keeps the old behavior: log to stderr and let the
+# supervisor redirect it, which is fine in a terminal and unbounded under
+# launchd -- the live deployment's error log reached 185 MB of mostly reconnect
+# noise, world-readable, with nothing to rotate it. With a path set, the agent
+# owns its own file: 0600, in a 0700 directory, rotated by size.
+_logging = _cfg.get("logging", {})
+LOG_PATH = _logging.get("path", "")
+LOG_MAX_BYTES = _logging.get("max_bytes", 10 * 1024 * 1024)
+LOG_BACKUPS = _logging.get("backups", 5)
+
+# How long a turn's trajectory is kept (#155). trajectory.thread() already only
+# reads 14 days back, so anything older was storage nobody queries -- holding
+# the request text, the tool calls and the answer of every turn since install.
+TRAJECTORY_DAYS = _learning.get("trajectory_days", 14)
+
 # Trusted users (Slack user IDs) who may change my restrictions via chat (#36).
 TRUSTED_USERS = set(_cfg.get("trusted_users", []))
 
@@ -278,6 +293,10 @@ def _positive_int(name, v):
         raise SystemExit(f"config {name} must be a positive integer (got {v!r})")
 
 
+_positive_int("logging.max_bytes", LOG_MAX_BYTES)
+_positive_int("learning.trajectory_days", TRAJECTORY_DAYS)
+if isinstance(LOG_BACKUPS, bool) or not isinstance(LOG_BACKUPS, int) or LOG_BACKUPS < 0:
+    raise SystemExit(f"config logging.backups must be a non-negative integer (got {LOG_BACKUPS!r})")
 _positive_int("max_tool_steps", MAX_TOOL_STEPS)
 _positive_int("warn_tool_steps", WARN_TOOL_STEPS)
 if WARN_TOOL_STEPS >= MAX_TOOL_STEPS:

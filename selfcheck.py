@@ -9,6 +9,7 @@ import glob
 import itertools
 import json
 import logging
+import logging.handlers
 import datetime
 import os
 import tempfile
@@ -1743,5 +1744,83 @@ try:
     raise AssertionError("a redirect off slack.com must not be followed")
 except urllib.error.HTTPError as _exc:
     assert "not sending the bot token" in str(_exc), _exc
+
+# 31) the agent's own log is 0600 in a 0700 dir and rotates by size, and a
+# trajectory older than the window it is read back over is deleted (#155). The
+# live deployment's launchd-redirected log reached 185 MB, mode 0644, with
+# nothing to rotate it; trajectories had no retention at all.
+from shmobster import logsetup, trajectory  # noqa: E402
+
+_log_dir = os.path.join(tempfile.mkdtemp(), "nested", "logs")
+_saved_log = (config.LOG_PATH, config.LOG_MAX_BYTES, config.LOG_BACKUPS)
+config.LOG_PATH = os.path.join(_log_dir, "shmobster.log")
+config.LOG_MAX_BYTES, config.LOG_BACKUPS = 200, 2
+try:
+    # a permissive umask is the point: every file the handler opens has to be
+    # 0600 in spite of it, and the first one being right is not evidence -- each
+    # rollover opens a NEW file, so the mode has to be re-applied every time
+    _saved_umask = os.umask(0o022)
+    try:
+        _h = logsetup.handler()
+        assert isinstance(_h, logging.handlers.RotatingFileHandler), _h
+        assert oct(os.stat(_log_dir).st_mode & 0o777) == "0o700", oct(os.stat(_log_dir).st_mode & 0o777)
+        for _i in range(40):
+            _h.emit(logging.LogRecord("t", logging.INFO, "selfcheck", 1, "x" * 50, None, None))
+        _h.close()
+    finally:
+        os.umask(_saved_umask)
+    assert os.path.exists(config.LOG_PATH + ".1"), "the handler must rotate, not grow"
+    assert not os.path.exists(config.LOG_PATH + ".3"), "and keep only `backups` of them"
+    for _f in sorted(os.listdir(_log_dir)):
+        _mode = oct(os.stat(os.path.join(_log_dir, _f)).st_mode & 0o777)
+        assert _mode == "0o600", f"{_f} is {_mode}; a rotated log is as readable as the live one"
+    # no path configured -> stderr, exactly as before
+    config.LOG_PATH = ""
+    assert isinstance(logsetup.handler(), logging.StreamHandler)
+finally:
+    config.LOG_PATH, config.LOG_MAX_BYTES, config.LOG_BACKUPS = _saved_log
+
+_tj_dir = tempfile.mkdtemp()
+_saved_tj = trajectory._DIR
+trajectory._DIR = _tj_dir
+try:
+    _old = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
+    _new = datetime.datetime.now().strftime("%Y-%m-%d")
+    for _ch in ("C1", "C2"):
+        os.makedirs(os.path.join(_tj_dir, _ch))
+        for _day in (_old, _new):
+            with open(os.path.join(_tj_dir, _ch, _day + ".jsonl"), "w") as _f:
+                _f.write("{}\n")
+    assert trajectory.prune(14) == 2, "one stale day per channel, both gone"
+    for _ch in ("C1", "C2"):
+        assert os.listdir(os.path.join(_tj_dir, _ch)) == [_new + ".jsonl"], _ch
+    assert trajectory.prune(0) == 0, "0 days means keep everything, not delete everything"
+    # record() names files in UTC, so prune's cutoff is UTC too. Asserted by
+    # moving the process's local time a day away from it: a naive local now()
+    # here deletes a file that is still inside the window.
+    # The file exactly ON the boundary is the one that can tell the two apart:
+    # under TZ=UTC+14 a naive local now() puts the cutoff a day late and deletes
+    # it, while a UTC cutoff keeps it. Anything newer survives either way, which
+    # is why asserting on today's file proves nothing.
+    _boundary = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    os.makedirs(os.path.join(_tj_dir, "C3"))
+    with open(os.path.join(_tj_dir, "C3", _boundary + ".jsonl"), "w") as _f:
+        _f.write("{}\n")
+    _saved_tz = os.environ.get("TZ")
+    for _tz in ("Pacific/Kiritimati", "Pacific/Midway"):  # UTC+14 and UTC-11
+        os.environ["TZ"] = _tz
+        time.tzset()
+        assert trajectory.prune(1) == 0, (
+            f"the boundary day must survive prune(1) under TZ={_tz}: record() names "
+            "files in UTC, so the cutoff has to be UTC"
+        )
+    if _saved_tz is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = _saved_tz
+    time.tzset()
+finally:
+    trajectory._DIR = _saved_tj
 
 print(f"selfcheck OK -- shmobster {_b}")

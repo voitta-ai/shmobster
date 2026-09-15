@@ -97,6 +97,35 @@ def record(channel, user_id, thread_ts, text, steps, answer):
     return retval
 
 
+def prune(days):
+    """Delete day files older than `days`, returning how many went (#155).
+
+    `thread()` reads a 14-day window, so everything behind it was storage
+    nobody queries -- and it is not inert storage: a record holds the request
+    text, every tool call and the answer, scrubbed but durable. The filename is
+    the date, so this needs no parsing of the contents and cannot be confused
+    by a clock change mid-file."""
+    if not days:
+        return 0
+    # UTC, because record() names the file in UTC (`now(timezone.utc)` above).
+    # A naive local now() here would put the cutoff up to a day out of step with
+    # the names it is compared against -- deleting a day early east of UTC and
+    # keeping one late west of it.
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+    dropped = 0
+    for path in glob.glob(os.path.join(_DIR, "*", "*.jsonl")):
+        if os.path.basename(path)[:10] >= cutoff:
+            continue
+        try:
+            os.remove(path)
+            dropped += 1
+        except OSError as exc:
+            logging.warning("trajectories: could not remove %s: %s", path, exc)
+    retval = dropped
+    return retval
+
+
 def thread(channel, thread_ts, days=14):
     """Every record of one thread, oldest first, from the last `days` files."""
     out = []

@@ -13,6 +13,8 @@ import datetime
 import os
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 os.environ["SHMOBSTER_CONFIG"] = "examples/shmobster-config-example.json"
 # ...and the example POLICIES too. The default path is ./shmobster-policies.json,
@@ -1709,5 +1711,37 @@ assert "describe_capabilities" in spine.load_system_prompt(), "SOUL.md must name
 # the cost of noticing late is traffic nobody chose.
 assert litellm.telemetry is False, litellm.telemetry
 assert litellm.set_verbose is False and litellm.suppress_debug_info is True
+# 30) the attachment bearer is workspace-wide, so it goes to slack.com over
+# https and nowhere else (#153). urlopen follows redirects and copies the
+# request headers to the next hop, so the check has to hold on every hop, not
+# just the first.
+from shmobster import attachments  # noqa: E402
+
+for _u, _want in (
+    ("https://files.slack.com/files-pri/x", True),
+    ("https://slack.com/x", True),
+    ("https://elsewhere.test/x", False),
+    ("https://slack.com.elsewhere.test/x", False),      # suffix, not subdomain
+    ("https://elsewhere.test/?u=https://slack.com/x", False),
+    ("http://files.slack.com/x", False),                # not in the clear
+    ("", False),
+):
+    assert attachments._is_slack(_u) is _want, (_u, _want)
+try:
+    attachments._fetch("https://elsewhere.test/file.png")
+    raise AssertionError("_fetch must refuse a non-Slack url before opening it")
+except ValueError as _exc:
+    assert "not a slack.com url" in str(_exc), _exc
+# ...and the redirect handler refuses the hop rather than following it with the
+# token attached
+_redir = attachments._SlackOnlyRedirect()
+try:
+    _redir.redirect_request(
+        urllib.request.Request("https://files.slack.com/x"), io.BytesIO(b""), 302, "Found",
+        {}, "https://elsewhere.test/x",
+    )
+    raise AssertionError("a redirect off slack.com must not be followed")
+except urllib.error.HTTPError as _exc:
+    assert "not sending the bot token" in str(_exc), _exc
 
 print(f"selfcheck OK -- shmobster {_b}")

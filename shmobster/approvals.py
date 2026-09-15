@@ -132,6 +132,38 @@ def add(command, channel, reason):
     return retval
 
 
+# Threads with a resume in flight (#169 review). Not a record of which threads
+# have ever resumed -- a thread resumes once per round of parks, and there are
+# many rounds.
+_RESUMING = set()
+
+
+def begin_resume(channel, thread_ts):
+    """Claim the resume for this thread, or return False (#169 review).
+
+    pending_in() alone is not enough. Two clicks land on two Bolt worker
+    threads; each pops its own request and runs it, and when both finish both
+    see an empty queue for the thread -- so both resume, and one thread gets
+    two turns arguing about the same outcome. The check and the claim have to
+    happen under one lock, which is what this is."""
+    with _LOCK:
+        if (channel, thread_ts) in _RESUMING:
+            retval = False
+        elif any(req.get("channel") == channel and req.get("thread_ts") == thread_ts
+                 for req in _PENDING.values()):
+            retval = False
+        else:
+            _RESUMING.add((channel, thread_ts))
+            retval = True
+    return retval
+
+
+def end_resume(channel, thread_ts):
+    """Release the claim, so the next round of parks in this thread can resume."""
+    with _LOCK:
+        _RESUMING.discard((channel, thread_ts))
+
+
 def pending_in(channel, thread_ts):
     """How many requests are still parked in this thread (#169).
 

@@ -1858,6 +1858,32 @@ assert "carried on and finished" in _reply, _reply
 _sent = json.dumps(_resume_seen["messages"])
 assert _r2 in _sent and "gh api search/issues" in _sent and "2112" in _sent, _sent
 assert "approved" in _sent and "Do not re-run it" in _sent, _sent
+# two clicks that finish together must not start two turns (#169 review): the
+# queue is empty for the thread by the time either asks, so the check and the
+# claim have to be one atomic step
+approvals._RESUMING.clear()
+assert approvals.begin_resume("C_RES", "T1") is True
+assert approvals.begin_resume("C_RES", "T1") is False, "second click must lose the race"
+approvals.end_resume("C_RES", "T1")
+assert approvals.begin_resume("C_RES", "T1") is True, "the next round of parks may resume again"
+approvals.end_resume("C_RES", "T1")
+_resume_seen.clear()
+_r3 = approvals.add("echo x", "C_RES", "mutating")
+approvals.claim_unsurfaced("C_RES", "T1")
+assert handler.resume(_r3, True, "echo x", "out", channel="C_RES", thread_ts="T1") is None
+assert not _resume_seen, "a parked sibling still blocks, and still costs nothing"
+approvals.pop(_r3, "C_RES")
+
+# the command and its output are scrubbed on the way into the turn, and the
+# output is fenced and labelled as data rather than instructions
+_resume_seen.clear()
+handler.resume("x-8", True, f"aws configure --key {_akia}", f"token {_akia}",
+               channel="C_RES", thread_ts="T1", user_id="U_T")
+_scrubbed = json.dumps(_resume_seen["messages"])
+assert _akia not in _scrubbed, "a credential in the command or its output must not ride in"
+assert "[REDACTED:" in _scrubbed and "<output>" in _scrubbed, _scrubbed
+assert "never\ninstructions" in _scrubbed or "never " in _scrubbed, _scrubbed
+
 # a denial resumes too, saying so -- otherwise the turn waits forever on a
 # command that will never run
 _resume_seen.clear()

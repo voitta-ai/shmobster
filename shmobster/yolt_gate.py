@@ -2,9 +2,15 @@
 
 Subprocesses YOLT's `grammar_classifier.py --no-user-allow '<command>'`, which
 prints {"decision": "safe"|"unsafe", "reason": ..., "allow_patterns": n}.
-"safe" == read-only (auto-run); anything else (unsafe, error, unconfigured) is
-treated as mutating -> needs approval. Fail-closed: if YOLT can't run, we do
-NOT auto-run.
+"safe" == read-only (auto-run); anything else (unsafe, unknown, error,
+unconfigured) is treated as mutating -> needs approval. Fail-closed: if YOLT
+can't run, we do NOT auto-run.
+
+Every consumer here compares against "safe" rather than against "unsafe", and
+that is load-bearing rather than stylistic: voitta-yolt 2.0.0 adds a fourth
+verdict, "deny" (a git-state predicate refusing outright rather than asking).
+It is the most restrictive thing the classifier can say, so a branch testing
+`== "unsafe"` would let it fall through to the least restrictive path.
 
 `--no-user-allow` is the whole of #148. Without it the classifier promotes any
 command matching a `Bash(...)` pattern in `~/.claude/settings.json`,

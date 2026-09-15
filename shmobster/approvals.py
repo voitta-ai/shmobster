@@ -132,7 +132,54 @@ def add(command, channel, reason):
     return retval
 
 
-def claim_unsurfaced(channel):
+# Threads with a resume in flight (#169 review). Not a record of which threads
+# have ever resumed -- a thread resumes once per round of parks, and there are
+# many rounds.
+_RESUMING = set()
+
+
+def begin_resume(channel, thread_ts):
+    """Claim the resume for this thread, or return False (#169 review).
+
+    pending_in() alone is not enough. Two clicks land on two Bolt worker
+    threads; each pops its own request and runs it, and when both finish both
+    see an empty queue for the thread -- so both resume, and one thread gets
+    two turns arguing about the same outcome. The check and the claim have to
+    happen under one lock, which is what this is."""
+    with _LOCK:
+        if (channel, thread_ts) in _RESUMING:
+            retval = False
+        elif any(req.get("channel") == channel and req.get("thread_ts") == thread_ts
+                 for req in _PENDING.values()):
+            retval = False
+        else:
+            _RESUMING.add((channel, thread_ts))
+            retval = True
+    return retval
+
+
+def end_resume(channel, thread_ts):
+    """Release the claim, so the next round of parks in this thread can resume."""
+    with _LOCK:
+        _RESUMING.discard((channel, thread_ts))
+
+
+def pending_in(channel, thread_ts):
+    """How many requests are still parked in this thread (#169).
+
+    A turn can park several commands, and each gets its own card. Resuming the
+    turn on the first click would start a turn per click, in the same thread,
+    each one seeing a different half of the outcome -- so the ingest asks this
+    and resumes only when the answer is 0. A request being run right now is
+    held, which means it is out of _PENDING entirely (#105) and correctly not
+    counted here: the click that is resolving it is the one asking."""
+    with _LOCK:
+        retval = sum(1 for req in _PENDING.values()
+                     if req.get("channel") == channel and req.get("thread_ts") == thread_ts)
+    return retval
+
+
+def claim_unsurfaced(channel, thread_ts=None):
     """Requests in this channel that no ingest has rendered yet, marked as
     surfaced so a second call (or a second reply in the same thread) doesn't
     post duplicate buttons. Returns [(id, request), ...].
@@ -147,6 +194,11 @@ def claim_unsurfaced(channel):
         for key, req in list(_PENDING.items()):
             if req.get("channel") == channel and not req.get("surfaced"):
                 req["surfaced"] = True
+                # Where it was surfaced, so pending_in() can answer "is this
+                # thread still waiting on anything?" (#169). Recorded here
+                # rather than at add() because the queue is ingest-agnostic:
+                # add() is called from the tool loop, which has no thread.
+                req["thread_ts"] = thread_ts
                 out.append((key, req))
     retval = out
     return retval

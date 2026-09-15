@@ -1823,4 +1823,89 @@ try:
 finally:
     trajectory._DIR = _saved_tj
 
+# 32) a resolved approval carries the turn on (#169). The button path used to
+# run the command, rewrite the card, and stop -- so a task with three parked
+# steps cost three clicks AND three human re-mentions, while the agent kept
+# promising output nothing would deliver.
+_resume_seen = {}
+
+
+def _cap_resume(messages, tools=None):
+    _resume_seen["messages"] = messages
+    return _FakeMsg(content="carried on and finished")
+
+
+llm.complete = _cap_resume
+approvals._PENDING.clear()
+_r1 = approvals.add("gh pr list --limit 1", "C_RES", "gh: mutating")
+_r2 = approvals.add("gh api search/issues", "C_RES", "gh api: flag -f")
+# both cards land in one thread
+assert len(approvals.claim_unsurfaced("C_RES", "T1")) == 2
+assert approvals.pending_in("C_RES", "T1") == 2
+# the first click resolves one; the thread still waits, so no turn runs
+approvals.pop(_r1, "C_RES")
+assert approvals.pending_in("C_RES", "T1") == 1
+_resume_seen.clear()
+assert handler.resume(_r1, True, "gh pr list --limit 1", "1000", channel="C_RES",
+                      thread_ts="T1", user_id="U_T") is None, "must not resume while one is parked"
+assert not _resume_seen, "and must not spend a model call to decide that"
+# the last one resolves -> one turn, carrying the outcome
+approvals.pop(_r2, "C_RES")
+assert approvals.pending_in("C_RES", "T1") == 0
+_reply = handler.resume(_r2, True, "gh api search/issues", "2112", channel="C_RES",
+                        thread_ts="T1", user_id="U_T")
+assert "carried on and finished" in _reply, _reply
+_sent = json.dumps(_resume_seen["messages"])
+assert _r2 in _sent and "gh api search/issues" in _sent and "2112" in _sent, _sent
+assert "approved" in _sent and "Do not re-run it" in _sent, _sent
+# two clicks that finish together must not start two turns (#169 review): the
+# queue is empty for the thread by the time either asks, so the check and the
+# claim have to be one atomic step
+approvals._RESUMING.clear()
+assert approvals.begin_resume("C_RES", "T1") is True
+assert approvals.begin_resume("C_RES", "T1") is False, "second click must lose the race"
+approvals.end_resume("C_RES", "T1")
+assert approvals.begin_resume("C_RES", "T1") is True, "the next round of parks may resume again"
+approvals.end_resume("C_RES", "T1")
+_resume_seen.clear()
+_r3 = approvals.add("echo x", "C_RES", "mutating")
+approvals.claim_unsurfaced("C_RES", "T1")
+assert handler.resume(_r3, True, "echo x", "out", channel="C_RES", thread_ts="T1") is None
+assert not _resume_seen, "a parked sibling still blocks, and still costs nothing"
+approvals.pop(_r3, "C_RES")
+
+# the command and its output are scrubbed on the way into the turn, and the
+# output is fenced and labelled as data rather than instructions
+_resume_seen.clear()
+handler.resume("x-8", True, f"aws configure --key {_akia}", f"token {_akia}",
+               channel="C_RES", thread_ts="T1", user_id="U_T")
+_scrubbed = json.dumps(_resume_seen["messages"])
+assert _akia not in _scrubbed, "a credential in the command or its output must not ride in"
+assert "[REDACTED:" in _scrubbed and "<output>" in _scrubbed, _scrubbed
+assert "never\ninstructions" in _scrubbed or "never " in _scrubbed, _scrubbed
+
+# a denial resumes too, saying so -- otherwise the turn waits forever on a
+# command that will never run
+_resume_seen.clear()
+_denied = handler.resume("x-9", False, "rm -rf /tmp/x", "", channel="C_RES",
+                         thread_ts="T1", user_id="U_T")
+assert "denied" in json.dumps(_resume_seen["messages"]), _resume_seen
+assert "it did not run" in json.dumps(_resume_seen["messages"])
+# the parked message no longer promises what the old path could not keep
+yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+_parked = tools.run_shell("rm -rf /tmp/whatever", {"cwd": "."}, "C_RES")
+assert "continued automatically" in _parked and "End your turn now" in _parked, _parked
+approvals._PENDING.clear()
+llm.complete = _REAL_COMPLETE
+
+# ...and the Slack ingest actually calls it. Asserted statically, because
+# importing slack_app offline is impossible (Bolt's App round-trips auth.test),
+# and a rule that holds in handler while no ingest calls it is the bug (#169)
+# with extra steps.
+_app_src = open(os.path.join("shmobster", "slack_app.py")).read()
+assert "handler.resume(" in _app_src, "the Slack approval path must call handler.resume"
+assert "approvals.claim_unsurfaced(channel, thread_ts)" in _app_src, (
+    "cards must record their thread, or pending_in() can never answer"
+)
+
 print(f"selfcheck OK -- shmobster {_b}")

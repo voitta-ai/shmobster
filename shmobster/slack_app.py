@@ -8,12 +8,8 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, proposals, redact, sandbox, skills, slack_blocks, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, proposals, redact, sandbox, skills, slack_blocks, trajectory, watchdog, yolt_gate
 
-# asctime is not in the default format (#102). Without it the disposition log
-# (#97) records order but not time, and "how long did that take" / "did this run
-# before or after the click" are exactly the questions it exists to answer.
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s:%(message)s")
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
 # request details attached -- so there must be no window in which an exception is
@@ -23,7 +19,11 @@ redact.require()
 redact.install_logging()
 app = App(token=config.SLACK_BOT_TOKEN)
 
-
+# asctime is not in the default format (#102). Without it the disposition log
+# (#97) records order but not time, and "how long did that take" / "did this run
+# before or after the click" are exactly the questions it exists to answer.
+# Where those lines land -- stderr, or the agent's own rotated 0600 file -- is
+# logsetup's business, decided in main() (#155).
 _MAX_THREAD_MSGS = 25  # ponytail: cap history; raise if threads need deeper recall
 
 
@@ -273,6 +273,7 @@ def _resolve_label(client):
 
 
 def main():
+    logsetup.setup()
     if not config.AGENT_LABEL:
         config.AGENT_LABEL = _resolve_label(app.client)
     try:
@@ -334,6 +335,10 @@ def main():
     announce.check(_post)
     # Git runs over https with gh's token in every channel (gitcfg.py). Say
     # so now if this host cannot do that, instead of at the first push.
+    # Trajectories are appended per turn and only ever read 14 days back (#155).
+    dropped = trajectory.prune(config.TRAJECTORY_DAYS)
+    if dropped:
+        logging.info("trajectories: pruned %s file(s) older than %s days", dropped, config.TRAJECTORY_DAYS)
     for warning in gitcfg.preflight():
         logging.warning("git preflight: %s", warning)
     # What auto-runs is YOLT's rules, not the operator's terminal permissions

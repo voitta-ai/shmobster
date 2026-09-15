@@ -370,6 +370,23 @@ One JSON config, no `.env`. Copy the example and fill it in:
   that accepts the connection and never answers holds the turn for litellm's
   600s default and the fallbacks never run. A timeout logs a `waterfall:` line
   and fails over.
+- `logging` -- where the agent's own log goes (#155). With `path` set it owns
+  the file: created **0600** inside a **0700** directory and rotated by size
+  (`max_bytes`, default 10 MB; `backups`, default 5). Omit the block and
+  logging goes to stderr, which under launchd means the supervisor's redirect
+  decides everything -- on one deployment that reached **185 MB, mode 0644**,
+  of mostly reconnect noise, with nothing rotating it. The contents are
+  redacted at emission, so what an unbounded world-readable log exposes is not
+  credentials; it is every command every channel asked for.
+  **Adopting this on a running deployment:** set `logging.path`, `chmod 600`
+  the existing log once (launchd's `Umask` only applies to files it creates),
+  and restart. The plist's `StandardErrorPath` then catches only what escapes
+  logging.
+- `learning.trajectory_days` -- how long a turn's trajectory is kept (default
+  14, matching the window `trajectory.thread()` reads back over). Pruned at
+  startup. `0` keeps everything, which is what the deployment did until #155 --
+  a record holds the request, every tool call and the answer, scrubbed but
+  durable.
 - `exec` -- shell-exec gate (Iter 1). `yolt_classifier`: path to
   [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)'s
   `hooks/grammar_classifier.py` -- read-only commands auto-run, mutating ones

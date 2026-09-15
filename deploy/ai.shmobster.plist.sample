@@ -15,6 +15,13 @@
   such command dies with exit 127 "command not found", which reads like a
   permission gate but isn't. Adjust for Intel Macs (/usr/local/bin) or add
   version-manager shims as needed.
+
+  Umask=63 is 0o077 in decimal, which launchd wants as a number: the files it
+  creates for the two paths below are then 0600 rather than world-readable
+  (#155). It applies to files launchd CREATES -- an existing 0644 log keeps its
+  mode, so chmod it once when adopting this. Better still, set `logging.path`
+  in the config and let the agent own a rotated 0600 file; these two then only
+  catch what escapes logging.
 -->
 <plist version="1.0">
 <dict>
@@ -33,6 +40,8 @@
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
+  <key>Umask</key>
+  <integer>63</integer>
   <key>KeepAlive</key>
   <true/>
   <key>ThrottleInterval</key>

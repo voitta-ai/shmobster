@@ -68,7 +68,7 @@ def _seen(ts):
 
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
-    for req_id, req in approvals.claim_unsurfaced(channel):
+    for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
         try:
             client.chat_postMessage(
                 channel=channel,
@@ -178,6 +178,41 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
     except Exception:
         logging.exception("could not update approval message")
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=result[:2900])
+    if queue is approvals:
+        _resume_thread(client, channel, thread_ts, req_id, req,
+                       approved=action.get("action_id") == "approve_command",
+                       result=result, user_id=ctx["user_id"])
+
+
+def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, user_id):
+    """Carry the turn on after a click resolved a parked command (#169).
+
+    handler.resume decides whether this is the moment -- it returns None while
+    the thread still has a parked request, so a turn that parked three commands
+    resumes once, on the last click, rather than three times over.
+
+    Best-effort by construction. The click is acked, the command has run and
+    its output is on the card, so a failure in here costs the continuation and
+    nothing else; it must never look like the approval failed."""
+    try:
+        context = _thread_context(client, channel, thread_ts, None)
+        reply = handler.resume(
+            req_id, approved, req.get("command", ""), result,
+            thread_context=context, channel=channel, thread_ts=thread_ts,
+            # The clicking trusted user, matching the text path: "approve <id>"
+            # runs inside that user's own turn, so the resumed turn carries the
+            # same identity a typed approval would.
+            user_id=user_id, slack_client=client,
+        )
+        if reply is None:
+            return  # something else in this thread is still waiting on a human
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=reply)
+        # The resumed turn can park the next step, so its cards need posting
+        # too -- otherwise the task stops one command later, for the same
+        # reason it used to stop here.
+        _post_pending(client, channel, thread_ts)
+    except Exception:
+        logging.exception("could not resume the thread after [%s]", req_id)
 
 
 @app.action("approve_command")

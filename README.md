@@ -667,6 +667,23 @@ A command has to clear all of these. The model's opinion is not one of them.
 Everything the agent then says is scrubbed on the way out
 ([Credential redaction](#credential-redaction-72)).
 
+### After an approval, the turn carries on (#169)
+
+Approving a parked command -- by button or by asking -- runs it **and continues
+the task it was part of**. The agent is resumed with the command's output as a
+`[system]` turn, finishes the step, and parks the next one if there is a next
+one.
+
+This is one model call per resolved approval, and it replaces a human
+round-trip: before it, a button click ran the command, posted the output on the
+card, and stopped, so a task with three parked steps cost three clicks *plus*
+three "why did we stop?" mentions. A denial resumes too, saying the command did
+not run, so the agent stops planning around it instead of waiting.
+
+When one turn parks several commands, the thread resumes **once**, on the click
+that leaves nothing parked -- not once per click, which would run several turns
+in one thread, each seeing part of the outcome.
+
 ### Asking it what it can do (#9)
 
 `describe_capabilities` is a read-only tool that reports this channel's envelope

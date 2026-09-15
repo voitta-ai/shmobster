@@ -100,11 +100,20 @@ def run_shell(command, policy, channel=None):
         # The whole id, nonce and all (#109). It is what a human types back, and
         # a shortened one would mean a different request after the next restart
         # while reading identically on the card they typed it from.
+        # What happens next, stated exactly (#169). The old wording -- "it will
+        # run on approval" -- was true and incomplete: the command ran, its
+        # output landed on the card, and nothing resumed the turn, so every
+        # reply that promised "approve and I'll give you the answer" was a
+        # promise the system did not keep (#134). It keeps it now, and the
+        # instruction is to stop rather than to wait, because the turn ends
+        # here either way.
         retval = (
             f"NOT RUN -- pending approval [{req_id}] ({reason}): {command}\n"
-            f"Tell the user: a trusted user can approve it by asking you to "
-            f"approve request {req_id} (approve_command), quoting the id exactly. "
-            f"Do not retry the command; it will run on approval."
+            f"Tell the user: a trusted user can approve it with the card's button "
+            f"or by asking you to approve request {req_id} (approve_command), "
+            f"quoting the id exactly. Do not retry the command. End your turn now: "
+            f"once it is approved and runs, you are continued automatically with "
+            f"its output and can finish the task from there."
         )
         return retval
     retval = execute(command, policy)

@@ -132,7 +132,22 @@ def add(command, channel, reason):
     return retval
 
 
-def claim_unsurfaced(channel):
+def pending_in(channel, thread_ts):
+    """How many requests are still parked in this thread (#169).
+
+    A turn can park several commands, and each gets its own card. Resuming the
+    turn on the first click would start a turn per click, in the same thread,
+    each one seeing a different half of the outcome -- so the ingest asks this
+    and resumes only when the answer is 0. A request being run right now is
+    held, which means it is out of _PENDING entirely (#105) and correctly not
+    counted here: the click that is resolving it is the one asking."""
+    with _LOCK:
+        retval = sum(1 for req in _PENDING.values()
+                     if req.get("channel") == channel and req.get("thread_ts") == thread_ts)
+    return retval
+
+
+def claim_unsurfaced(channel, thread_ts=None):
     """Requests in this channel that no ingest has rendered yet, marked as
     surfaced so a second call (or a second reply in the same thread) doesn't
     post duplicate buttons. Returns [(id, request), ...].
@@ -147,6 +162,11 @@ def claim_unsurfaced(channel):
         for key, req in list(_PENDING.items()):
             if req.get("channel") == channel and not req.get("surfaced"):
                 req["surfaced"] = True
+                # Where it was surfaced, so pending_in() can answer "is this
+                # thread still waiting on anything?" (#169). Recorded here
+                # rather than at add() because the queue is ingest-agnostic:
+                # add() is called from the tool loop, which has no thread.
+                req["thread_ts"] = thread_ts
                 out.append((key, req))
     retval = out
     return retval

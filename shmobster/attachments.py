@@ -8,7 +8,9 @@ words and nothing else, and the honest answer was "there is nothing attached".
 Two things about Slack file URLs are worth knowing before touching this:
 
 - They are not public. The bot token has to ride along as a bearer header, and
-  fetching one needs the `files:read` scope.
+  fetching one needs the `files:read` scope. That token is workspace-wide, so
+  it goes only to slack.com and its subdomains, and only for as long as the
+  redirect chain stays there (#153).
 - An unauthorized fetch does NOT fail. Slack answers **200 with the HTML
   sign-in page**, so a naive reader hands the model a login form and calls it a
   PNG. The content-type check below is what turns that into an error.
@@ -16,6 +18,7 @@ Two things about Slack file URLs are worth knowing before touching this:
 import base64
 import logging
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import config
@@ -25,12 +28,52 @@ _TIMEOUT = 20
 _MAX_BYTES = 5 * 1024 * 1024
 
 
+def _is_slack(url):
+    """True for a URL whose host is slack.com or a subdomain of it.
+
+    The bearer is workspace-wide, so the question "may this URL have it" has to
+    be asked of the URL rather than assumed from where it came: the download
+    link arrives inside a Slack event, and an event is data."""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    # https only: a workspace-wide bearer does not travel in the clear, and
+    # Slack does not serve these over http anyway.
+    retval = parts.scheme == "https" and (host == "slack.com" or host.endswith(".slack.com"))
+    return retval
+
+
+class _SlackOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """urlopen follows redirects by default and copies the request headers into
+    the next hop -- including Authorization, to whatever host the redirect
+    names (confirmed on this box's Python 3.14: a 302 to another host received
+    the bearer). Slack normally controls these URLs, so the likelihood is low
+    and the credential is workspace-wide, which is the wrong pair of odds to
+    accept for free.
+
+    Redirects within Slack still work, because a CDN hop is how a file download
+    actually resolves; a redirect that leaves Slack fails instead of paying the
+    token to whoever asked for it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_slack(newurl):
+            raise urllib.error.HTTPError(
+                newurl, code, "redirect off slack.com; not sending the bot token", headers, fp
+            )
+        retval = super().redirect_request(req, fp, code, msg, headers, newurl)
+        return retval
+
+
+_OPENER = urllib.request.build_opener(_SlackOnlyRedirect)
+
+
 def _fetch(url):
     """Download one Slack-hosted file as bytes, or raise."""
+    if not _is_slack(url):
+        raise ValueError(f"not a slack.com url: {urllib.parse.urlsplit(url).hostname!r}")
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {config.SLACK_BOT_TOKEN}"}
     )
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+    with _OPENER.open(req, timeout=_TIMEOUT) as resp:
         ctype = (resp.headers.get("content-type") or "").lower()
         blob = resp.read(_MAX_BYTES + 1)
     if ctype.startswith("text/html"):

@@ -18,8 +18,28 @@ open; seven of them are the security re-audit's remaining findings.
 
 ## Before the next release
 
-**The release notes have to carry two things, or an upgrade breaks a channel
-quietly.** Both are consequences of what shipped 2026-09-14:
+**The release waits on voitta-yolt 2.0.0.** Decided 2026-09-15: the
+`feature/auto-mode-realignment` pivot is landing over there, it carries a major
+bump, and rather than release against 1.2.0 and re-release a week later we pin
+the major and cut behind it. The yolt session pings this one when it is tagged.
+
+What we depend on across that bump, and what it costs if either half goes:
+
+- `grammar_classifier.py --no-user-allow '<command>'` is how every command is
+  classified. **Flag rejected or removed** -> the classifier reads the flag as
+  the command, every verdict becomes a verdict about the string, and every
+  command in every channel parks. Fail-closed and useless, with one startup
+  warning naming the version.
+- The JSON's `allow_patterns`, asserted `0` at boot. **Key dropped, flag kept**
+  -> preflight logs `cannot be confirmed` and the agent runs on. Degraded, not
+  broken.
+
+Both are on the yolt side's reconciliation list for 2.0.0: the flag accepted as
+a no-op, the key retained and honestly `0` (the allow path is deleted there, so
+zero is true rather than a placeholder).
+
+**The release notes have to carry three things, or an upgrade breaks a channel
+quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
 
 1. **`allow_domains` must be added to each channel's policy** (#149). A channel
    with no list cards *every* `curl`, `wget`, `git fetch`, `git pull` and
@@ -28,9 +48,17 @@ quietly.** Both are consequences of what shipped 2026-09-14:
    GitHub -- so the notes give the shape:
    `"allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]`.
 2. **The required voitta-yolt version, by release number** (#148). shmobster
-   passes `--no-user-allow`, which landed in voitta-yolt **1.2.0**
-   (voitta-ai/voitta-yolt#126). On anything older every command parks and the
-   log says so at startup. Link the yolt release, not just the number.
+   passes `--no-user-allow`, which landed in voitta-yolt 1.2.0
+   (voitta-ai/voitta-yolt#126) -- but per the hold above this release pins
+   **2.0.0**. Link the yolt release, not just the number.
+3. **`logging.path`, and one `chmod 600` of the existing log** (#155). With the
+   key set the agent owns a rotated 0600 file; without it, nothing changes and
+   the launchd-redirected log keeps growing -- it was **185 MB, mode 0644** on
+   the live box when this was written. launchd's `Umask` (now in the plist
+   sample) only applies to files it creates, so the existing log keeps its mode
+   until someone chmods or deletes it. Trajectories are pruned to
+   `learning.trajectory_days` (default 14) at startup, which needs no action
+   but is worth naming, since the first restart after this deletes files.
 
 Also worth a line: after this release, commands that used to run silently ask
 first -- `gh pr create`, `gh pr merge`, `git push`, `codex exec`, and any fetch

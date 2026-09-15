@@ -1704,4 +1704,10 @@ assert "A_TOKEN" not in _bare, "one channel's credential names must not appear i
 # and the persona points at the tool rather than answering from itself
 assert "describe_capabilities" in spine.load_system_prompt(), "SOUL.md must name the tool"
 
+# 29) the rented router does not phone home (#156). Asserted rather than
+# assumed: it is a library default that a dependency bump could flip back, and
+# the cost of noticing late is traffic nobody chose.
+assert litellm.telemetry is False, litellm.telemetry
+assert litellm.set_verbose is False and litellm.suppress_debug_info is True
+
 print(f"selfcheck OK -- shmobster {_b}")

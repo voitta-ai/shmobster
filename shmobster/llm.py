@@ -45,6 +45,11 @@ from . import codex_llm, config, state
 # credential into the logs. (Redaction lesson from voitta-yolt#84.)
 litellm.set_verbose = False
 litellm.suppress_debug_info = True
+# ...and do not phone home (#156). Defence in depth, not a known leak: nothing
+# in this version was found calling out, but "the rented router decides what
+# leaves this process" is not a property to leave at a library default when one
+# assignment settles it.
+litellm.telemetry = False
 # Cap ALL THREE LiteLLM loggers: _turn_on_debug() flips every one to DEBUG, and
 # it is "LiteLLM Router" (not "LiteLLM") that services the Router used here.
 for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):

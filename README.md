@@ -881,7 +881,22 @@ Fail closed: no `sandbox-exec`, no command -- never a fallback to running
 unconfined. Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST`
 are external effects and stay behind the approval card.
 
-### Credential redaction (#72)
+#### Where channel content goes (#156)
+
+A turn's text reaches whichever waterfall rung answers it, so "which vendor
+sees this channel" is a deployment decision the config makes and the README
+should not leave implicit:
+
+- `litellm.telemetry = False` alongside the logging caps in `llm.py`: the
+  router reports nothing about this deployment.
+- The **codex rung is a personal ChatGPT subscription**, not an API key. With
+  it enabled, channel content reaches OpenAI under the operator's own plan.
+  `store: false` is set on every request, so it is not retained for training,
+  but the traffic is still a person's subscription carrying a workspace's
+  conversations. Leave the rung out of `waterfall` if that is not what you
+  want.
+
+## Credential redaction (#72)
 
 Everything this agent says is scrubbed before it leaves the process. The bug
 class is the one that bit [voitta-yolt](https://github.com/voitta-ai/voitta-yolt)

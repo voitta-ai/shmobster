@@ -1,0 +1,20 @@
+# Dependency updates (#154). Weekly rather than daily: this repo's whole test
+# surface is one offline selfcheck, so a PR here is cheap to judge but still
+# costs a human the look.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine bumps; anything with its own advisory still
+      # arrives on its own, because security updates bypass grouping.
+      all-dependencies:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

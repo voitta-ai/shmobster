@@ -2628,8 +2628,30 @@ for _c in ("cd vendor && git push",
            "cd inscope && cd ../vendor && git push"):
     _ok, _why = policy.check(_c, _cd_pol)
     assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+_cd_ven = os.path.join(_cd_root, "vendor")
+_cd_ins = os.path.join(_cd_root, "inscope")
+os.symlink(_cd_ven, os.path.join(_cd_root, "link"))
+# git is retargeted by more than `cd` and `-C`: two flags and two environment
+# variables say the same thing, and each was reachable past the first fix.
+for _c in (f"git --git-dir={_cd_ven}/.git push",
+           f"git --git-dir {_cd_ven}/.git push",
+           f"GIT_DIR={_cd_ven}/.git git push",
+           f"git --work-tree={_cd_ven} --git-dir={_cd_ven}/.git push",
+           f"GIT_WORK_TREE={_cd_ven} git push",
+           "cd vendor ; git push",          # a list, not just &&
+           "(cd vendor && git push)",       # a subshell: shlex yields `(cd`
+           "pushd vendor && git push",      # pushd moves the shell too
+           "cd link && git push"):          # a symlink -- git resolves it for us
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+# ...and a path this cannot expand fails closed rather than being waved through
+for _c in ("cd $HOME/nowhere && git push", "cd && git push"):
+    assert not policy.check(_c, _cd_pol)[0], _c
 for _c in ("cd inscope && git push", "git push", "cd inscope && git log",
            "git -C inscope push", "cd . && git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+for _c in (f"git --git-dir={_cd_ins}/.git push", "(cd inscope && git push)"):
     _ok, _why = policy.check(_c, _cd_pol)
     assert _ok, (_c, _why)
 

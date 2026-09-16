@@ -118,24 +118,39 @@ def _git_dirs(tokens, base):
     its segments "the" directory is would be guessing; requiring all of them is
     not."""
     def _resolve(d, at):
-        return os.path.normpath(d if os.path.isabs(d) else os.path.join(at, d))
+        d = os.path.expanduser(d)
+        p = os.path.normpath(d if os.path.isabs(d) else os.path.join(at, d))
+        # A gitdir names its worktree's parent; `git -C` wants the worktree.
+        if os.path.basename(p) == ".git":
+            p = os.path.dirname(p)
+        return p
 
     out = []
     cur = base
     i = 0
     while i < len(tokens):
-        t = tokens[i]
-        # `cd` moves the shell, and every later segment inherits it: in
-        # `cd a && cd ../b && git push`, the `../b` is relative to `a`, not to
-        # the channel root. Resolving each against the root independently
-        # lands somewhere that does not exist, which fails closed and names
-        # the wrong reason.
-        if t == "cd" and i + 1 < len(tokens):
+        # A subshell or a list puts punctuation on the front of the word:
+        # shlex hands back `(cd`, not `(` and `cd`.
+        t = tokens[i].lstrip("({;&|")
+        # `cd` and `pushd` both move the shell, and every later segment
+        # inherits it.
+        if t in ("cd", "pushd") and i + 1 < len(tokens):
             if tokens[i + 1] not in ("-", "~"):
                 cur = _resolve(tokens[i + 1], cur)
                 out.append(cur)
             i += 2
             continue
+        # `--git-dir` / `--work-tree`, and the environment spellings of the
+        # same two, retarget git without moving the shell -- exactly like -C.
+        # Each was reachable past the cd-and-C check (#186).
+        for flag in ("--git-dir", "--work-tree"):
+            if t == flag and i + 1 < len(tokens):
+                out.append(_resolve(tokens[i + 1], cur))
+            elif t.startswith(flag + "="):
+                out.append(_resolve(t.split("=", 1)[1], cur))
+        for var in ("GIT_DIR=", "GIT_WORK_TREE="):
+            if t.startswith(var):
+                out.append(_resolve(t.split("=", 1)[1], cur))
         # `-C` retargets one command without moving the shell, so it does not
         # become the base for what follows.
         if t == "-C" and i + 1 < len(tokens):

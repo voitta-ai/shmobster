@@ -104,19 +104,24 @@ def _gh_repos(tokens):
     return (repos, unresolvable)
 
 
+_SEGMENT_BREAK = frozenset(("&&", "||", ";", "|", "&"))
+
+
 def _git_dirs(tokens, base):
-    """Every directory this command could run git in, resolved against `base`.
+    """Every directory a git/gh command in this line would actually run in.
 
-    Two spellings retarget a git command and only one used to be read: `git -C
-    <dir>` (#150) and a plain `cd <dir> &&` before it (#186). They are the same
-    move, and checking one while ignoring the other means the whitelist is one
-    keystroke from irrelevant -- `cd vendor && git push` reached a repo that
-    `git -C vendor push` was refused for.
+    Not every directory the line *visits*: `pushd vendor && popd && git push`
+    runs git at home, and recording `vendor` as a target refuses work that
+    never touched it. So the line is walked as segments, the shell's directory
+    is tracked across them, and a directory is recorded only where a git or gh
+    command sits.
 
-    All of them are returned rather than the last, and the caller requires each
-    to be in scope. A command can `cd` more than once, and deciding which of
-    its segments "the" directory is would be guessing; requiring all of them is
-    not."""
+    Four spellings retarget such a command and all of them were reachable past
+    an earlier version of this check (#150, #186): `cd`/`pushd` move the shell,
+    while `-C`, `--git-dir`/`--work-tree` and their `GIT_DIR=`/`GIT_WORK_TREE=`
+    environment forms retarget one command without moving anything. git chains
+    its own `-C` options -- `git -C a -C b` is `a/b` -- and only where the
+    chain ends is a target."""
     def _resolve(d, at):
         d = os.path.expanduser(d)
         p = os.path.normpath(d if os.path.isabs(d) else os.path.join(at, d))
@@ -125,41 +130,61 @@ def _git_dirs(tokens, base):
             p = os.path.dirname(p)
         return p
 
+    segments = [[]]
+    for raw in tokens:
+        if raw in _SEGMENT_BREAK:
+            segments.append([])
+            continue
+        segments[-1].append(raw.lstrip("({;&|").rstrip(")"))
+
     out = []
     cur = base
-    i = 0
-    while i < len(tokens):
-        # A subshell or a list puts punctuation on the front of the word:
-        # shlex hands back `(cd`, not `(` and `cd`.
-        t = tokens[i].lstrip("({;&|")
-        # `cd` and `pushd` both move the shell, and every later segment
-        # inherits it.
-        if t in ("cd", "pushd") and i + 1 < len(tokens):
-            if tokens[i + 1] not in ("-", "~"):
-                cur = _resolve(tokens[i + 1], cur)
-                out.append(cur)
-            i += 2
+    last = None
+    stack = []
+    for seg in segments:
+        if not seg:
             continue
-        # `--git-dir` / `--work-tree`, and the environment spellings of the
-        # same two, retarget git without moving the shell -- exactly like -C.
-        # Each was reachable past the cd-and-C check (#186).
-        for flag in ("--git-dir", "--work-tree"):
-            if t == flag and i + 1 < len(tokens):
-                out.append(_resolve(tokens[i + 1], cur))
-            elif t.startswith(flag + "="):
-                out.append(_resolve(t.split("=", 1)[1], cur))
-        for var in ("GIT_DIR=", "GIT_WORK_TREE="):
-            if t.startswith(var):
-                out.append(_resolve(t.split("=", 1)[1], cur))
-        # `-C` retargets one command without moving the shell, so it does not
-        # become the base for what follows.
-        if t == "-C" and i + 1 < len(tokens):
-            out.append(_resolve(tokens[i + 1], cur))
-            i += 2
+        verb = seg[0]
+        if verb == "popd":
+            if stack:
+                cur = stack.pop()
             continue
-        if t.startswith("-C") and len(t) > 2:
-            out.append(_resolve(t[2:], cur))
-        i += 1
+        if verb in ("cd", "pushd"):
+            if verb == "pushd":
+                stack.append(cur)
+            prev = cur
+            # `cd` with no argument, or `cd ~`, is home -- the same rule the
+            # grant layer's own cd tracking uses. `cd -` is the last place the
+            # shell was.
+            if len(seg) == 1 or seg[1] == "~":
+                cur = os.path.expanduser("~")
+            elif seg[1] == "-":
+                cur = last if last is not None else cur
+            else:
+                cur = _resolve(seg[1], cur)
+            last = prev
+            continue
+        target = None
+        i = 0
+        while i < len(seg):
+            t = seg[i]
+            if t == "-C" and i + 1 < len(seg):
+                target = _resolve(seg[i + 1], target or cur)
+                i += 2
+                continue
+            if t.startswith("-C") and len(t) > 2:
+                target = _resolve(t[2:], target or cur)
+            for flag in ("--git-dir", "--work-tree"):
+                if t == flag and i + 1 < len(seg):
+                    target = _resolve(seg[i + 1], cur)
+                elif t.startswith(flag + "="):
+                    target = _resolve(t.split("=", 1)[1], cur)
+            for var in ("GIT_DIR=", "GIT_WORK_TREE="):
+                if t.startswith(var):
+                    target = _resolve(t.split("=", 1)[1], cur)
+            i += 1
+        if any(t in ("git", "gh") for t in seg):
+            out.append(target or cur)
     return out
 
 

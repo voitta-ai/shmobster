@@ -2655,6 +2655,22 @@ for _c in (f"git --git-dir={_cd_ins}/.git push", "(cd inscope && git push)"):
     _ok, _why = policy.check(_c, _cd_pol)
     assert _ok, (_c, _why)
 
+# A directory is a target where a git command RUNS, not everywhere the line
+# visits. `pushd vendor && popd && git push` runs git at home, and recording
+# vendor refuses work that never touched it. git also chains its own -C --
+# `git -C a -C b` is `a/b` -- so only where the chain ends is a target.
+_cd_deep = os.path.join(_cd_ins, "deep")
+os.makedirs(_cd_deep, exist_ok=True)
+subprocess.run(["git", "init", "-q", "."], cwd=_cd_deep, check=True)
+subprocess.run(["git", "remote", "add", "origin", "https://github.com/other/secret.git"],
+               cwd=_cd_deep, check=True)
+assert not policy.check("git -C inscope -C deep push", _cd_pol)[0], "the chain ends out of scope"
+for _c in ("pushd vendor && popd && git push",      # popd puts the shell back
+           "git -C vendor -C ../inscope push",      # the chain ends in scope
+           "cd vendor && cd - && git push"):        # cd - is the last place
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+
 # 41) #186 as filed said a channel could `git init` in TMPDIR, plant a hook
 # there and commit, reaching what #184 closed by another door. It cannot: #184
 # denies `.git/hooks/` and `.git/config` by regex, which is not anchored to the

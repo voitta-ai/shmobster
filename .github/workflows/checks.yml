@@ -33,7 +33,10 @@ jobs:
       - name: pip-audit
         run: |
           pip install pip-audit
-          pip-audit
+          # --strict so a package pip-audit cannot resolve fails the build
+          # instead of being skipped. Without it the gate is quietly narrower
+          # than it looks: the audit passes having audited less than everything.
+          pip-audit --strict
 
       # The repo's whole test surface. Offline by design: no Slack, no network,
       # no real keys -- it stubs the env refs the example config makes.

@@ -2466,8 +2466,13 @@ if os.path.exists(_req_in):
     def _req_name(line):
         return re.split(r"[<>=!~\[]", line.strip(), maxsplit=1)[0].strip().lower().replace("_", "-")
 
-    def _ver_tuple(v):
-        return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
+    # PEP 440, not a tuple of the digits in the string. `re.findall(r"\d+")`
+    # gets the common cases right and the uncommon ones wrong -- an epoch is
+    # the clearest: it reads `1!2.0` as (1, 2, 0) and calls it *below* 3.14.3,
+    # when PEP 440 puts any epoch-1 version above every epoch-0 one. packaging
+    # is already pinned in the lock as a litellm dependency, so this costs an
+    # import and nothing else.
+    from packaging.version import Version as _Ver
 
     _pins = {}
     for _ln in open(_req_lock):
@@ -2483,13 +2488,13 @@ if os.path.exists(_req_in):
         assert _n in _pins, f"{_n} is in requirements.in but not pinned in requirements.txt"
         _floor = re.search(r">=\s*([0-9][0-9a-zA-Z.]*)", _ln)
         if _floor:
-            assert _ver_tuple(_pins[_n]) >= _ver_tuple(_floor.group(1)), (
+            assert _Ver(_pins[_n]) >= _Ver(_floor.group(1)), (
                 f"{_n} pinned at {_pins[_n]}, below the {_floor.group(1)} floor requirements.in asks for"
             )
     # the floor that is the whole point of the issue: aiohttp arrives
     # transitively, so nothing here would otherwise hold a line under it
     assert "aiohttp" in _pins, "aiohttp should be pinned in the lock"
-    assert _ver_tuple(_pins["aiohttp"]) >= (3, 14), _pins["aiohttp"]
+    assert _Ver(_pins["aiohttp"]) >= _Ver("3.14"), _pins["aiohttp"]
     # ...and the lock is hashed, which is what --require-hashes enforces
     assert "--hash=sha256:" in open(_req_lock).read(), "the lock carries no hashes"
 

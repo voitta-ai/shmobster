@@ -73,12 +73,15 @@ def _gh_repo(tokens):
         if t.startswith("-R") and len(t) > 2:
             return t[2:]
     # `gh api repos/o/r/...` reaches any repo the token reaches, which is the
-    # whole of this issue: read or write, and never through -R.
-    if "api" in tokens:
-        for t in tokens:
-            m = _GH_API_PATH.match(t)
-            if m:
-                return m.group(1)
+    # whole of this issue: read or write, and never through -R. Not gated on
+    # the literal `api` token -- a user-defined `gh alias` expands to it inside
+    # gh, so the word need never appear in what this sees. We are already
+    # inside a `gh` command here, so a token spelling `repos/OWNER/REPO` is an
+    # API path rather than a coincidence.
+    for t in tokens:
+        m = _GH_API_PATH.match(t)
+        if m:
+            return m.group(1)
     # positional owner/repo, e.g. `gh repo view owner/repo`
     for t in tokens[1:]:
         if re.match(r"^[\w.-]+/[\w.-]+$", t):
@@ -143,7 +146,15 @@ def _check_github(command, policy):
     if not repo:
         # `git -C <dir>` runs somewhere else, so the origin to check is that
         # directory's, not the channel cwd's.
-        repo = _git_origin(_git_dir_flag(tokens) or cwd_for(policy)) if not is_gh else None
+        # `-C <dir>` is relative to where the command runs -- the channel's
+        # cwd -- not to wherever this agent process happens to be. Left
+        # unresolved it fails closed with "undeterminable", which is safe and
+        # also blocks a legitimate in-scope subdirectory for the wrong reason.
+        _cd = _git_dir_flag(tokens)
+        _base = cwd_for(policy)
+        if _cd:
+            _cd = _cd if os.path.isabs(_cd) else os.path.join(_base, _cd)
+        repo = _git_origin(_cd or _base) if not is_gh else None
         if repo is None and is_gh:
             repo = _git_origin(cwd_for(policy))
     if not repo:

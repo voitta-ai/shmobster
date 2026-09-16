@@ -2538,4 +2538,26 @@ for _c in ("gh pr list", "gh api repos/mine/repo/issues", "gh issue list --repo=
 # default and stays the default
 assert policy.check("gh api repos/any/thing", {"cwd": _gh_root})[0]
 
+# `-C <dir>` is relative to where the command RUNS -- the channel's cwd -- not
+# to wherever this agent process sits. Unresolved it failed closed with
+# "undeterminable", which is safe and also blocks a legitimate in-scope
+# subdirectory for the wrong reason.
+os.makedirs(os.path.join(_gh_root, "vendor"), exist_ok=True)
+os.makedirs(os.path.join(_gh_root, "inscope"), exist_ok=True)
+for _sub, _remote in (("vendor", "https://github.com/other/secret.git"),
+                      ("inscope", "https://github.com/mine/other.git")):
+    _d = os.path.join(_gh_root, _sub)
+    subprocess.run(["git", "init", "-q", "."], cwd=_d, check=True)
+    subprocess.run(["git", "remote", "add", "origin", _remote], cwd=_d, check=True)
+for _c in ("git -C vendor push", "git -C ./vendor push"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+_ok, _why = policy.check("git -C inscope push", _gh_pol)
+assert _ok, ("an in-scope subdirectory must still work", _why)
+
+# a user-defined `gh alias` expands to `api` inside gh, so the literal token
+# need never appear in what this sees. The path is what gives the target away.
+_ok, _why = policy.check("gh myalias repos/other/secret/issues", _gh_pol)
+assert not _ok and "other/secret" in _why, (_ok, _why)
+
 print(f"selfcheck OK -- shmobster {_b}")

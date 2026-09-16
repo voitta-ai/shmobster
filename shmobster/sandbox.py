@@ -220,6 +220,34 @@ def profile(pol):
             + " ".join(f"(literal {_quote(p)})" for p in _spine)
             + ")"
         )
+    # git's own directory is not data, it is code git will run (#184). The
+    # grant layer vouches for an in-tree write on the verb alone, and `.git/`
+    # is in the tree, so `tee .git/hooks/pre-commit` + `chmod +x` + `git commit`
+    # -- three commands the layer already grants -- executed arbitrary code with
+    # no card. Writing `.git/config` reaches the same place without a commit:
+    # `diff.external` runs on the next `git diff --ext-diff`, which is a read.
+    # #183 refused that command spelled as `git -c diff.external=CMD`; refusing
+    # the flag while leaving the file writable would close the door and leave
+    # the window.
+    #
+    # Regexes rather than literals because the tree has more than one gitdir:
+    # the channel's repo, every worktree under `<cwd>.worktrees` (whose `.git`
+    # is a *file* naming its real gitdir, so overwriting it repoints the repo),
+    # and each `config.worktree` beside it.
+    #
+    # Deliberately NOT all of `.git/`: `git add` and `git commit` are granted
+    # and have to write `index`, `objects` and `refs`. Denying those would
+    # break the grant layer's own local-write tier rather than the hazard.
+    lines.append(
+        "(deny file-write* "
+        + " ".join((
+            r'(regex #"/\.git/hooks/")',
+            r'(regex #"/\.git/config$")',
+            r'(regex #"/\.git$")',
+            r'(regex #"/config\.worktree$")',
+        ))
+        + ")"
+    )
     if excludes:
         lines.append(
             "(deny file-read* file-write* "

@@ -2234,4 +2234,69 @@ try:
 finally:
     yolt_gate.classify = _saved_classify
 
+# 37) git's own directory is code git will run, not data (#184). The grant
+# layer vouches for an in-tree write on the verb alone and `.git/` is in the
+# tree, so `tee .git/hooks/pre-commit` + `chmod +x` + `git commit` -- three
+# commands it already grants -- executed arbitrary code with no card. Closed in
+# the sandbox rather than in a text guard, because the text guard is the thing
+# #150 is open about: every spelling below is refused by the kernel, and none
+# of them is enumerated anywhere.
+_gd_root = os.path.realpath(tempfile.mkdtemp())
+_gd_saved_ws = config.WORKSPACE
+try:
+    config.WORKSPACE = _gd_root
+    subprocess.run(["git", "init", "-q", "."], cwd=_gd_root, check=True)
+    with open(os.path.join(_gd_root, "f.txt"), "w") as _f:
+        _f.write("x\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=_gd_root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-qm", "x"],
+        cwd=_gd_root, check=True,
+    )
+    _gd_pol = {"cwd": _gd_root, "allow_write": [_gd_root]}
+
+    def _gd_run(cmd, cwd=_gd_root):
+        _p = subprocess.run(
+            _REAL_WRAP(cmd, _gd_pol), capture_output=True, text=True, timeout=20, cwd=cwd,
+        )
+        return _p.returncode
+
+    _gd_payload = os.path.join(_gd_root, "payload")
+    with open(_gd_payload, "w") as _f:
+        _f.write("#!/bin/sh\ntouch PWNED\n")
+    # Every route to a hook or to the config, not just the redirect. `sed -i`
+    # renames its temp over the target and `ln -sf` never opens it, which is why
+    # the deny is file-write* rather than an open() guard.
+    for _cmd in (
+        "echo x > .git/hooks/pre-commit",
+        f"cp {_gd_payload} .git/hooks/pre-commit",
+        f"ln -sf {_gd_payload} .git/hooks/pre-commit",
+        "tee .git/hooks/pre-commit < payload",
+        "sh -c 'echo x > .git/config'",
+        "T=.git/hooks/pre-commit; echo x > $T",
+        "echo x > .git/hooks/../hooks/pre-commit",
+        "python3 -c \"open('.git/config','a').write('x')\"",
+        "sed -i '' s/a/b/ .git/config",
+    ):
+        assert _gd_run(_cmd) != 0, _cmd
+    assert not os.path.exists(os.path.join(_gd_root, ".git", "hooks", "pre-commit"))
+    # ...and the local-write tier the grant layer actually exists for is
+    # untouched: git has to write index, objects and refs, so this is not a
+    # blanket deny on .git/
+    for _cmd in ("echo ok > ok.txt", "git add ok.txt", "git status --porcelain",
+                 "git log --oneline -1"):
+        assert _gd_run(_cmd) == 0, _cmd
+    # a worktree's `.git` is a FILE naming its real gitdir, so overwriting it
+    # repoints the repository at one whose hooks the channel does own
+    subprocess.run(
+        ["git", "worktree", "add", "-q", _gd_root + ".worktrees/w", "-b", "w"],
+        cwd=_gd_root, check=True,
+    )
+    _gd_wt = _gd_root + ".worktrees/w"
+    assert os.path.isfile(os.path.join(_gd_wt, ".git")), "worktree .git should be a file"
+    assert _gd_run("printf 'gitdir: /evil' > .git", _gd_wt) != 0
+    assert _gd_run("echo x > .git/hooks/pre-commit", _gd_wt) != 0
+finally:
+    config.WORKSPACE = _gd_saved_ws
+
 print(f"selfcheck OK -- shmobster {_b}")

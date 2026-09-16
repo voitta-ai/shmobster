@@ -1,28 +1,34 @@
 # Handoff: what to do next, and why
 
 Written 2026-09-13 after the backlog triage that followed v0.7.2; revised that
-same day when items 1 and 2 turned into ten issues, and **revised again
-2026-09-14**, with the first four of the new order done and a release owed.
+same day when items 1 and 2 turned into ten issues, revised again 2026-09-14
+with the first four of the new order done, and **revised 2026-09-15, when the
+owed release was cut as v0.8.0**.
 This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
-Current state: **v0.7.2 is what is released; master is ahead of it and owes a
-release** (see below). The exec path is YOLT (its own rules only, #148) ->
+Current state: **v0.8.0 is cut; the live box is still on v0.7.2 until someone
+upgrades it** (see below). The exec path is YOLT (its own rules only, #148) ->
 egress allow-list (#149) -> grant layer (#117) -> seatbelt sandbox (#116) ->
 approval card (#48). A command's environment is built from an allowlist (#112),
 the deployment's own config is unreachable from a channel (#147), every command
 is recorded (#129), a channel can load its own learned skills (#130), and the
-agent can report its envelope rather than improvise it (#9). 17 issues are
-open; seven of them are the security re-audit's remaining findings.
+agent can report its envelope rather than improvise it (#9). 12 issues are
+open; five of them carry the `security` label and are the re-audit's remaining
+findings.
 
-## Before the next release
+## The v0.8.0 release, and the range it pinned
 
-**The release waits on a voitta-yolt 2.0.x that can say what it delegated.**
-Revised 2026-09-15, after 2.0.0 was tagged and measured: adopting it would make
-every ordinary read in a channel park for an approval card, so the hold moved
-from "wait for the tag" to "wait for the fix". Tracked as #177 against
-voitta-yolt#144; the yolt session pings this one either way.
+**Cut 2026-09-15 against voitta-yolt `>= 1.6.0, < 2.0.0`** -- that is option 3
+of the checklist below, taken deliberately, and not a resolved #177. 2.0.0 was
+tagged and measured: adopting it would make every ordinary read in a channel
+park for an approval card, so the hold on adoption stands, tracked as #177
+against voitta-yolt#144; the yolt session pings this one either way. **Adopting
+2.0.x is the next release's question, not a debt this one left behind.**
+
+The rest of this section is why that range is the supported one. It is what the
+next release inherits, so it stays.
 
 Phase 3 cut `rules/shell.json` from 136 entries to 28 -- the file now carries
 only what YOLT refuses to delegate. For the PreToolUse hook that costs nothing,
@@ -72,9 +78,9 @@ rather than queued). The general shape is worth remembering beyond this bump:
 restrictive path**, which is why the comparison is against `"safe"` and not
 against `"unsafe"`.
 
-The number is **v0.8.0** (see **Versioning** below for why it is not 1.0.0).
+The number was **v0.8.0** (see **Versioning** below for why it was not 1.0.0).
 
-**Before cutting, with 2.0.0 in hand:**
+**The pre-cut checklist, as it ran:**
 
 1. ~~Re-verify #172 against the real classifier~~ -- done, and it found
    something else: `deny` is unreachable from `run_cli()`, which builds the
@@ -84,40 +90,20 @@ The number is **v0.8.0** (see **Versioning** below for why it is not 1.0.0).
 2. ~~Read the yolt side's unsafe-to-safe list~~ -- done, and the question was
    the wrong one. Nothing moved *to* `safe`; everything useful moved *off* it.
    Ask both directions next time.
-3. #177 resolved, or a decision to ship against `>= 1.6.0, < 2.0.0` and adopt
-   2.0.x later.
-4. Then the three operator notes below.
+3. ~~#177 resolved, or a decision to ship against `>= 1.6.0, < 2.0.0` and
+   adopt 2.0.x later~~ -- the decision, not the resolution. #178 made the range
+   a startup probe rather than a pin nobody checks, and #179 corrected the
+   floor to 1.6.0.
+4. ~~Then the three operator notes~~ -- done, in the release notes.
 
-**The release notes have to carry three things, or an upgrade breaks a channel
-quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
-
-1. **`allow_domains` must be added to each channel's policy** (#149). A channel
-   with no list cards *every* `curl`, `wget`, `git fetch`, `git pull` and
-   `git ls-remote`. That is the correct default for a channel nobody has
-   thought about, and a surprise for a channel whose normal work pulls from
-   GitHub -- so the notes give the shape:
-   `"allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]`.
-2. **The required voitta-yolt version, by release number** (#148, #177).
-   shmobster passes `--no-user-allow`, which landed in voitta-yolt 1.2.0
-   (voitta-ai/voitta-yolt#126), but the supported floor is **1.6.0** -- four
-   write-target fixes closed between them, one of which (#128) was an active
-   grant on `$HOME/...` redirect targets. 2.0.0 is **not** supported, for the
-   reason above. State the range -- `>= 1.6.0, < 2.0.0` -- and link the 1.6.0
-   release, so an operator who runs `claude plugin update` knows why the newest
-   is the wrong one here.
-3. **`logging.path`, and one `chmod 600` of the existing log** (#155). With the
-   key set the agent owns a rotated 0600 file; without it, nothing changes and
-   the launchd-redirected log keeps growing -- it was **185 MB, mode 0644** on
-   the live box when this was written. launchd's `Umask` (now in the plist
-   sample) only applies to files it creates, so the existing log keeps its mode
-   until someone chmods or deletes it. Trajectories are pruned to
-   `learning.trajectory_days` (default 14) at startup, which needs no action
-   but is worth naming, since the first restart after this deletes files.
-
-Also worth a line: after this release, commands that used to run silently ask
-first -- `gh pr create`, `gh pr merge`, `git push`, `codex exec`, and any fetch
-to a host not in `allow_domains`. That is the change, not a fault, and saying so
-in the notes is cheaper than answering it once per channel.
+**The release notes carry the three things that break a channel quietly**, and
+`docs/release-notes/v0.8.0.md` is where they now live rather than here, so the
+two copies cannot drift: `allow_domains` in every channel policy (#149), the
+supported voitta-yolt range with the reason 2.0.0 is excluded (#148, #177), and
+`logging.path` plus one `chmod 600` of the existing log (#155). The notes also
+say the thing that is a change rather than a fault: after this release
+`gh pr create`, `gh pr merge`, `git push`, `codex exec` and any fetch to a host
+outside `allow_domains` ask first.
 
 ## Done since this plan was written
 
@@ -259,9 +245,9 @@ Four things, all checkable, none of them "it feels ready":
 3. **The re-audit's remaining findings closed or explicitly accepted** --
    #150, #151, #152 and the rest of #123's list. Shipping 1.0 with the security
    review's own list open is a claim the review does not support.
-4. **The deployment actually on the released build.** The live box has been on
-   v0.7.2 through all of this; a contract that has never run is not stable, it
-   is untested.
+4. **The deployment actually on the released build.** The live box ran v0.7.2
+   through all of this; v0.8.0 is cut but not yet deployed. A contract that has
+   never run is not stable, it is untested.
 
 The argument *for* 1.0 is real and worth recording too: the security model
 arrived this cycle -- five gates, each documented and covered by selfcheck,

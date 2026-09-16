@@ -594,6 +594,17 @@ machine's channel layout is versioned separately from the token/key config:
     built-in list would be wrong for somebody. This is a textual guard like
     `exclude`, not containment: the sandbox confines the filesystem, never the
     network (#149).
+  - `slack_channels` -- other Slack channels this channel's `slack_post` and
+    `slack_read_*` tools may reach, as exact channel ids (`["C0123ABCD"]`).
+    Omit the key and those tools reach **this channel only**, which is the
+    default on purpose. They used to take an arbitrary `channel_id` straight to
+    the Slack client -- past `policy.check`, past the grant layer, past the
+    approval card -- so the agent could read any channel the bot belongs to and
+    post, or `<@mention>` someone, into any of them, with nobody in the path
+    (#151). A permalink is scoped by the channel inside the URL, not just by
+    the argument. This is #149's shape rather than a card's: whether a channel
+    may reach outside itself at all is an operator's decision made once, not a
+    question asked per message.
   - `env_passthrough` -- names of *host* variables a channel's commands may
     inherit from shmobster's own environment, for the rare tool that needs one
     (`["SSH_AUTH_SOCK"]`, a corporate `HTTPS_PROXY`). Values are not written

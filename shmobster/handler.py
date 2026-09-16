@@ -198,7 +198,13 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             elif name in skills.NAMES:
                 result = skills.dispatch(name, args, channel)
             elif name in slack_tools.NAMES:
-                result = slack_tools.dispatch(name, args, slack_client)
+                # The turn's channel and policy, so a slack tool is scoped to
+                # where the turn is happening rather than to any channel the
+                # bot belongs to (#151).
+                result = slack_tools.dispatch(
+                    name, args, slack_client,
+                    {"channel": channel, "policy": policy, "thread_ts": thread_ts},
+                )
             else:
                 result = tools.dispatch(name, args, policy, channel)
             # Redact at collection (#72): every downstream copy -- this context,

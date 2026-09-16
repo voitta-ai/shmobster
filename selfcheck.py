@@ -2606,4 +2606,70 @@ if _HAVE_SANDBOX:
     finally:
         config.WORKSPACE = _al_saved
 
+# 40) `cd <dir> &&` retargets git exactly as `git -C <dir>` does, and only one
+# of them was read (#186). `cd vendor && git push` reached a repo that
+# `git -C vendor push` was refused for -- the whitelist one keystroke from
+# irrelevant. Every directory a command names is checked now, not the last:
+# deciding which segment "the" directory is would be guessing.
+_cd_root = os.path.realpath(tempfile.mkdtemp())
+subprocess.run(["git", "init", "-q", "."], cwd=_cd_root, check=True)
+subprocess.run(["git", "remote", "add", "origin", "https://github.com/mine/repo.git"],
+               cwd=_cd_root, check=True)
+for _sub, _rem in (("vendor", "https://github.com/other/secret.git"),
+                   ("inscope", "https://github.com/mine/other.git")):
+    _d = os.path.join(_cd_root, _sub)
+    os.makedirs(_d, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=_d, check=True)
+    subprocess.run(["git", "remote", "add", "origin", _rem], cwd=_d, check=True)
+_cd_pol = {"cwd": _cd_root, "github_repos": ["mine/*"]}
+for _c in ("cd vendor && git push",
+           "cd ./vendor && git push",
+           "cd vendor && git fetch",
+           "cd inscope && cd ../vendor && git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+for _c in ("cd inscope && git push", "git push", "cd inscope && git log",
+           "git -C inscope push", "cd . && git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+
+# 41) #186 as filed said a channel could `git init` in TMPDIR, plant a hook
+# there and commit, reaching what #184 closed by another door. It cannot: #184
+# denies `.git/hooks/` and `.git/config` by regex, which is not anchored to the
+# channel's tree and therefore covers a repository anywhere -- TMPDIR included.
+# Asserted rather than believed, because the whole issue turned on it.
+if _HAVE_SANDBOX:
+    _tm_chan = os.path.realpath(tempfile.mkdtemp())
+    _tm_saved = config.WORKSPACE
+    try:
+        config.WORKSPACE = _tm_chan
+        _tm_evil = os.path.join(os.path.realpath(tempfile.gettempdir()), "shm_tmp_probe")
+        subprocess.run(["rm", "-rf", _tm_evil], check=True)
+        os.makedirs(_tm_evil)
+        subprocess.run(["git", "init", "-q", "."], cwd=_tm_evil, check=True)
+        _tm_pol = {"cwd": _tm_chan, "allow_write": [_tm_chan]}
+
+        def _tm_run(cmd):
+            return subprocess.run(_REAL_WRAP(cmd, _tm_pol), capture_output=True,
+                                  text=True, timeout=20, cwd=_tm_chan).returncode
+
+        for _cmd in (f"echo x > {_tm_evil}/.git/hooks/pre-commit",
+                     f"echo x > {_tm_evil}/.git/hooks/post-checkout",
+                     f"cp /etc/hosts {_tm_evil}/.git/hooks/pre-commit",
+                     f"echo x > {_tm_evil}/.git/config"):
+            assert _tm_run(_cmd) != 0, _cmd
+        # ...and the other way to the same place, a hooksPath in a config the
+        # channel would have to own. Every one of these is outside its tree.
+        for _cmd in ("echo '[core]' >> ~/.gitconfig",
+                     "git config --global core.hooksPath /tmp/h",
+                     "mkdir -p ~/.config/git && echo x > ~/.config/git/config"):
+            assert _tm_run(_cmd) != 0, _cmd
+        # TMPDIR itself stays writable -- it is a writable root on purpose, and
+        # this is about what may be *executed* from there, not what may be
+        # written
+        assert _tm_run(f"echo x > {_tm_evil}/ordinary.txt") == 0
+        subprocess.run(["rm", "-rf", _tm_evil], check=True)
+    finally:
+        config.WORKSPACE = _tm_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

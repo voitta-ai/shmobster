@@ -104,16 +104,48 @@ def _gh_repos(tokens):
     return (repos, unresolvable)
 
 
-def _git_dir_flag(tokens):
-    """The directory a `git -C <dir>` retargets to, or None. Without this the
-    origin is read from the channel's cwd while the command runs somewhere
-    else entirely (#150)."""
-    for i, t in enumerate(tokens):
+def _git_dirs(tokens, base):
+    """Every directory this command could run git in, resolved against `base`.
+
+    Two spellings retarget a git command and only one used to be read: `git -C
+    <dir>` (#150) and a plain `cd <dir> &&` before it (#186). They are the same
+    move, and checking one while ignoring the other means the whitelist is one
+    keystroke from irrelevant -- `cd vendor && git push` reached a repo that
+    `git -C vendor push` was refused for.
+
+    All of them are returned rather than the last, and the caller requires each
+    to be in scope. A command can `cd` more than once, and deciding which of
+    its segments "the" directory is would be guessing; requiring all of them is
+    not."""
+    def _resolve(d, at):
+        return os.path.normpath(d if os.path.isabs(d) else os.path.join(at, d))
+
+    out = []
+    cur = base
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        # `cd` moves the shell, and every later segment inherits it: in
+        # `cd a && cd ../b && git push`, the `../b` is relative to `a`, not to
+        # the channel root. Resolving each against the root independently
+        # lands somewhere that does not exist, which fails closed and names
+        # the wrong reason.
+        if t == "cd" and i + 1 < len(tokens):
+            if tokens[i + 1] not in ("-", "~"):
+                cur = _resolve(tokens[i + 1], cur)
+                out.append(cur)
+            i += 2
+            continue
+        # `-C` retargets one command without moving the shell, so it does not
+        # become the base for what follows.
         if t == "-C" and i + 1 < len(tokens):
-            return tokens[i + 1]
+            out.append(_resolve(tokens[i + 1], cur))
+            i += 2
+            continue
         if t.startswith("-C") and len(t) > 2:
-            return t[2:]
-    return None
+            out.append(_resolve(t[2:], cur))
+        i += 1
+    return out
 
 
 # A GitHub repo named as a URL, in the three forms git accepts for it.
@@ -174,15 +206,16 @@ def _check_github(command, policy):
         return (True, "")
     repo = None
     if not is_gh:
-        # `-C <dir>` is relative to where the command runs -- the channel's
-        # cwd -- not to wherever this agent process happens to be. Left
-        # unresolved it fails closed with "undeterminable", which is safe and
-        # also blocks a legitimate in-scope subdirectory for the wrong reason.
-        _cd = _git_dir_flag(tokens)
+        # Every directory the command names, not just the channel's cwd: a
+        # `cd` and a `-C` retarget git identically (#186). Each one's origin
+        # has to be in scope, because the command reaches all of them.
         _base = cwd_for(policy)
-        if _cd:
-            _cd = _cd if os.path.isabs(_cd) else os.path.join(_base, _cd)
-        repo = _git_origin(_cd or _base)
+        _dirs = _git_dirs(tokens, _base)
+        for _d in _dirs:
+            _r = _git_origin(_d)
+            if _r and not _in_scope(_r):
+                return (False, f"repo '{_r}' not in channel whitelist {allowed}")
+        repo = _git_origin(_dirs[-1] if _dirs else _base)
     else:
         repo = _git_origin(cwd_for(policy))
     if not repo:

@@ -2190,6 +2190,17 @@ try:
                "aws logs describe-log-groups"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # a read that hands back a credential is not one this layer auto-runs. It
+    # does not mutate, so the argument is #149's rather than the mutation one:
+    # the effect is outward, into a channel, and a bare token has no shape the
+    # redactor catches. Stricter than 1.6.0, where all of these were `safe`.
+    for _c in ("aws secretsmanager get-secret-value --secret-id s",
+               "aws ecr get-login-password",
+               "aws sts get-session-token",
+               "aws ssm get-parameter --name n --with-decryption",
+               "aws sso get-role-credentials --role-name r"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
 finally:
     yolt_gate.classify = _saved_classify
 

@@ -108,6 +108,26 @@ AWS_READ_PREFIXES = ("list-", "get-", "describe-")
 # a command "read-only" while it writes.
 AWS_WRITES_OUTFILE = frozenset(("get-object", "get-object-torrent", "get-media"))
 
+# ...and these, which read nothing on this machine and hand back credentials.
+# They do not mutate, so calling them "not a read" needs the #149 argument
+# rather than the mutation one: a fetch is read-only here while being an effect
+# out there, and these are read-only here while putting secret material into a
+# channel. The redactor is not a second line for this -- `tools.py` says it
+# where it matters: "a bare token has no shape the redactor can catch" -- so a
+# secret this layer auto-runs is a secret in the transcript, which no later
+# denial undoes.
+#
+# Stricter than voitta-yolt 1.6.0 on purpose. Measured there: get-secret-value,
+# get-login-password, get-session-token and get-parameter --with-decryption all
+# classified `safe`, which on this side meant auto-run with no card. Inheriting
+# that was defensible while the classifier owned the read-only list. Asserting
+# it here is not.
+AWS_RETURNS_SECRET = frozenset((
+    "get-login-password", "get-authorization-token", "get-secret-value",
+    "get-parameter", "get-parameters", "get-parameters-by-path",
+    "get-session-token", "get-federation-token", "get-role-credentials",
+))
+
 # Global flags that take a separate value. Without these the value is read as
 # the subcommand -- `gh --repo o/r pr list` looks like `gh o/r r...`, which then
 # matches nothing and parks. That is the safe direction but it parks a real
@@ -438,7 +458,7 @@ class _Walker:
         retval = None
         if words is not None and len(words) >= 2 and not self.writes_file:
             op = words[1]
-            if op in AWS_WRITES_OUTFILE:
+            if op in AWS_WRITES_OUTFILE or op in AWS_RETURNS_SECRET:
                 return None
             if op == "ls" or op.startswith(AWS_READ_PREFIXES):
                 retval = (True, f"aws {words[0]} {op}: read-only")

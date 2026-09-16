@@ -47,14 +47,54 @@ def _git_origin(cwd):
     return retval
 
 
+# `gh api` addresses a repo by path: `repos/OWNER/REPO/...`, with or without a
+# leading slash, and optionally as a full URL.
+_GH_API_PATH = re.compile(
+    r"^(?:https://api\.github\.com/)?/?repos/([\w.-]+/[\w.-]+)(?:/|$)"
+)
+
+
 def _gh_repo(tokens):
+    """The repo a `gh` command targets, or None when it cannot be read.
+
+    None is not "no repo": it is "this agent could not tell", and the caller
+    fails closed on it. Every spelling below was reachable past the old check,
+    which knew only `-R X`, `--repo X` and a bare positional (#150)."""
     for i, t in enumerate(tokens):
+        # `GH_REPO=o/r gh issue list` -- an environment prefix retargets the
+        # whole command, and shlex hands it to us as an ordinary token.
+        if t.startswith("GH_REPO="):
+            return t.split("=", 1)[1]
         if t in ("-R", "--repo") and i + 1 < len(tokens):
             return tokens[i + 1]
+        # the attached spellings of the same flag
+        if t.startswith("--repo="):
+            return t.split("=", 1)[1]
+        if t.startswith("-R") and len(t) > 2:
+            return t[2:]
+    # `gh api repos/o/r/...` reaches any repo the token reaches, which is the
+    # whole of this issue: read or write, and never through -R.
+    if "api" in tokens:
+        for t in tokens:
+            m = _GH_API_PATH.match(t)
+            if m:
+                return m.group(1)
     # positional owner/repo, e.g. `gh repo view owner/repo`
     for t in tokens[1:]:
         if re.match(r"^[\w.-]+/[\w.-]+$", t):
             return t
+    return None
+
+
+def _git_dir_flag(tokens):
+    """The directory a `git -C <dir>` retargets to, or None. Without this the
+    origin is read from the channel's cwd while the command runs somewhere
+    else entirely (#150)."""
+    for i, t in enumerate(tokens):
+        if t == "-C" and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if t.startswith("-C") and len(t) > 2:
+            return t[2:]
     return None
 
 
@@ -93,8 +133,19 @@ def _check_github(command, policy):
     if named and not is_gh:
         return (True, "")
     repo = _gh_repo(tokens) if is_gh else None
+    # `gh api` that names no repo -- `gh api graphql`, `gh api user` -- is
+    # refused rather than waved through when a whitelist exists. The target may
+    # be inside a GraphQL document or absent entirely, and "I could not tell"
+    # has to mean no while `github_repos` is set, or the one command that
+    # reaches every repo is the one command that is never checked.
+    if is_gh and repo is None and "api" in tokens:
+        return (False, "gh api names no repo this policy can resolve; blocked by channel policy")
     if not repo:
-        repo = _git_origin(cwd_for(policy))
+        # `git -C <dir>` runs somewhere else, so the origin to check is that
+        # directory's, not the channel cwd's.
+        repo = _git_origin(_git_dir_flag(tokens) or cwd_for(policy)) if not is_gh else None
+        if repo is None and is_gh:
+            repo = _git_origin(cwd_for(policy))
     if not repo:
         return (False, "target github repo undeterminable; blocked by channel policy")
     if any(fnmatch.fnmatch(repo, pat) for pat in allowed):

@@ -48,6 +48,8 @@ rather than queued). The general shape is worth remembering beyond this bump:
 restrictive path**, which is why the comparison is against `"safe"` and not
 against `"unsafe"`.
 
+The number is **v0.8.0** (see **Versioning** below for why it is not 1.0.0).
+
 **Before cutting, with 2.0.0 in hand:**
 
 1. Re-verify #172 against the real classifier rather than the stubbed verdict:
@@ -191,6 +193,49 @@ threat model is #52's memory-poisoning section and it has not changed.
 - **#51** remaining Router knobs (context-window fallback, budgets) -- real but
   low: the two that mattered (#80 parking, first-429 cooldown) are in, and
   #125 took the timeout. Pick it up only when a live failure asks for it.
+
+## Versioning: what each number means here
+
+Settled 2026-09-15, while deciding whether the release after v0.7.2 was 0.8.0
+or 1.0.0. It was 0.8.0. Writing the argument down so the next release does not
+re-run it.
+
+- **PATCH** (`0.7.1` -> `0.7.2`) -- nothing an operator has to do or notice. A
+  fix, a doc, a log line.
+- **MINOR** (`0.7.2` -> `0.8.0`) -- new behavior, including behavior that
+  breaks an existing deployment. While this is 0.x that is the normal case, and
+  the release notes carry the operator's to-do list rather than the version
+  number doing it. v0.8.0 requires a dependency bump, needs a new policy key in
+  every channel, and turns several commands that used to run silently into
+  cards -- all of it minor.
+- **MAJOR** (`0.x` -> `1.0.0`) -- **not a bigger changelog: a promise.** That
+  the config schema and the gate contract are stable enough that the next break
+  costs a major. Everything after 1.0 inherits that promise.
+
+### What 1.0.0 is waiting for
+
+Four things, all checkable, none of them "it feels ready":
+
+1. **A release cycle that adds no config key.** v0.8.0 added four in seven days
+   -- `env_passthrough` (#112), `allow_domains` (#149), `logging.*` and
+   `learning.trajectory_days` (#155). A schema still moving that fast is not
+   one to freeze.
+2. **voitta-yolt 2.0.0 running live underneath it** for a couple of weeks. We
+   are pinning a version that is not tagged yet and implementing its `deny`
+   semantics from a description; declaring our own contract stable on top of a
+   contract still being written is a promise about someone else's work.
+3. **The re-audit's remaining findings closed or explicitly accepted** --
+   #150, #151, #152 and the rest of #123's list. Shipping 1.0 with the security
+   review's own list open is a claim the review does not support.
+4. **The deployment actually on the released build.** The live box has been on
+   v0.7.2 through all of this; a contract that has never run is not stable, it
+   is untested.
+
+The argument *for* 1.0 is real and worth recording too: the security model
+arrived this cycle -- five gates, each documented and covered by selfcheck,
+self-modification closed at the config (#147) and at the prompt (#174),
+governance enabled (#154). That is the thing 1.0 would be declaring. It earns
+the number after it survives contact with the live box, not before.
 
 ## How the work is done here
 

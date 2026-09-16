@@ -12,6 +12,7 @@ import logging
 import logging.handlers
 import datetime
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -1099,6 +1100,46 @@ _dep = llm._deployment("primary", {"name": "x", "model": "openai/gpt", "api_key"
 assert _dep["litellm_params"]["timeout"] == 45, _dep
 _dep = llm._deployment("fb0", {"name": "y", "model": "openai/gpt", "timeout_sec": 12})
 assert _dep["litellm_params"]["timeout"] == 12, "a slow rung may say so per-row"
+
+# 20c) the Router actually builds against the installed litellm (#152). The
+# rest of this file stubs `llm.complete`, so nothing else here would notice
+# litellm renaming a Router kwarg, moving CustomLogger, or changing the failure
+# callback's signature -- all of which are import- or construction-time breaks
+# that would otherwise be found by a channel at 3am rather than by CI.
+# Construction is offline: Router() resolves deployments, it does not dial out.
+_rt_saved_wf = config.WATERFALL
+try:
+    config.WATERFALL = [
+        {"name": "primary-v", "model": "openai/gpt-4o", "api_key": "k"},
+        {"name": "fallback-v", "model": "gemini/gemini-flash-latest", "api_key": "k"},
+    ]
+    llm._invalidate()
+    _router = llm._build()
+    _names = [m["model_name"] for m in _router.model_list]
+    assert _names == ["primary", "fb0"], _names
+    # the fallback wiring is positional, and a rename here is a silent
+    # single-vendor waterfall rather than an error
+    assert _router.fallbacks == [{"primary": ["fb0"]}], _router.fallbacks
+    # the failure callback is what parks a vendor (#80); it hangs off litellm's
+    # global callback list, so the base class has to keep resolving
+    llm._watch()
+    assert any(isinstance(_cb, llm._BudgetWatch) for _cb in litellm.callbacks), litellm.callbacks
+    assert hasattr(llm._BudgetWatch, "async_log_failure_event")
+    # ...and the gate has teeth: Router rejects a kwarg it does not know, so a
+    # rename upstream is a TypeError here rather than a silently ignored
+    # setting. Asserted against the installed litellm, because "does it still
+    # validate" is exactly the thing a version bump can change.
+    try:
+        litellm.Router(model_list=[{
+            "model_name": "p",
+            "litellm_params": {"model": "openai/gpt-4o", "api_key": "k"},
+        }], allowed_fails_this_kwarg_does_not_exist=0)
+        raise AssertionError("Router accepted an unknown kwarg; 20c would miss a rename")
+    except TypeError:
+        pass
+finally:
+    config.WATERFALL = _rt_saved_wf
+    llm._invalidate()
 
 # 21) budget parking (#80): a vendor that reports no budget is skipped until its
 # window expires, instead of being re-dialled every turn
@@ -2410,5 +2451,51 @@ try:
         assert _gd_run("echo x > vendor/dep/src.txt") == 0
 finally:
     config.WORKSPACE = _gd_saved_ws
+
+# 38) the lock describes the .in (#152). No network: CI re-compiling the lock
+# would have to resolve against live PyPI and would go red the moment any
+# transitive package published a release -- someone else's upload failing our
+# build. This asks the answerable half instead: every requirement named in
+# requirements.in is pinned in requirements.txt, and the pin satisfies the
+# floor. That is the case that actually happens -- a dependency added to the
+# .in and never compiled -- and it is deterministic and offline.
+_req_root = os.path.dirname(os.path.abspath(__file__))
+_req_in = os.path.join(_req_root, "requirements.in")
+_req_lock = os.path.join(_req_root, "requirements.txt")
+if os.path.exists(_req_in):
+    def _req_name(line):
+        return re.split(r"[<>=!~\[]", line.strip(), maxsplit=1)[0].strip().lower().replace("_", "-")
+
+    # PEP 440, not a tuple of the digits in the string. `re.findall(r"\d+")`
+    # gets the common cases right and the uncommon ones wrong -- an epoch is
+    # the clearest: it reads `1!2.0` as (1, 2, 0) and calls it *below* 3.14.3,
+    # when PEP 440 puts any epoch-1 version above every epoch-0 one. packaging
+    # is already pinned in the lock as a litellm dependency, so this costs an
+    # import and nothing else.
+    from packaging.version import Version as _Ver
+
+    _pins = {}
+    for _ln in open(_req_lock):
+        _m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\]+)", _ln)
+        if _m:
+            _pins[_m.group(1).lower().replace("_", "-")] = _m.group(2)
+    assert _pins, "requirements.txt has no pins -- is it still a lock?"
+    for _ln in open(_req_in):
+        _ln = _ln.strip()
+        if not _ln or _ln.startswith("#"):
+            continue
+        _n = _req_name(_ln)
+        assert _n in _pins, f"{_n} is in requirements.in but not pinned in requirements.txt"
+        _floor = re.search(r">=\s*([0-9][0-9a-zA-Z.]*)", _ln)
+        if _floor:
+            assert _Ver(_pins[_n]) >= _Ver(_floor.group(1)), (
+                f"{_n} pinned at {_pins[_n]}, below the {_floor.group(1)} floor requirements.in asks for"
+            )
+    # the floor that is the whole point of the issue: aiohttp arrives
+    # transitively, so nothing here would otherwise hold a line under it
+    assert "aiohttp" in _pins, "aiohttp should be pinned in the lock"
+    assert _Ver(_pins["aiohttp"]) >= _Ver("3.14"), _pins["aiohttp"]
+    # ...and the lock is hashed, which is what --require-hashes enforces
+    assert "--hash=sha256:" in open(_req_lock).read(), "the lock carries no hashes"
 
 print(f"selfcheck OK -- shmobster {_b}")

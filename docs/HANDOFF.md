@@ -18,10 +18,30 @@ open; seven of them are the security re-audit's remaining findings.
 
 ## Before the next release
 
-**The release waits on voitta-yolt 2.0.0.** Decided 2026-09-15: the
-`feature/auto-mode-realignment` pivot is landing over there, it carries a major
-bump, and rather than release against 1.2.0 and re-release a week later we pin
-the major and cut behind it. The yolt session pings this one when it is tagged.
+**The release waits on a voitta-yolt 2.0.x that can say what it delegated.**
+Revised 2026-09-15, after 2.0.0 was tagged and measured: adopting it would make
+every ordinary read in a channel park for an approval card, so the hold moved
+from "wait for the tag" to "wait for the fix". Tracked as #177 against
+voitta-yolt#144; the yolt session pings this one either way.
+
+Phase 3 cut `rules/shell.json` from 136 entries to 28 -- the file now carries
+only what YOLT refuses to delegate. For the PreToolUse hook that costs nothing,
+because `safe` and `unknown` are both a silent exit. Here they are opposite
+verdicts, so `cat`, `ls`, `grep`, `head`, `git status`, `git diff`, `gh pr
+list`, `aws s3 ls` and `curl` all moved off the auto-run tier; `pwd`, `echo`
+and `python3 -c` are what is left. Measured end to end: `cat README.md | head
+-1` -> `NOT RUN -- pending approval`.
+
+The one-sentence version, which is the part worth carrying: **2.0.0 collapses
+"we deliberately delegate this" and "we could not classify this" into one
+`unknown`, and a consumer that must fail closed on the second has no choice but
+to fail closed on the first.**
+
+Until #177 resolves, the supported range is **voitta-yolt >= 1.2.0 and <
+2.0.0**, and startup says so: the preflight probe is `cat /dev/null`, a command
+Phase 3 delegated, rather than the `echo` it used to be -- `echo` is one of the
+three things 2.0.0 still calls safe, so the old probe would have passed on a
+classifier that cards every read.
 
 What we depend on across that bump, and what it costs if either half goes:
 
@@ -52,13 +72,17 @@ The number is **v0.8.0** (see **Versioning** below for why it is not 1.0.0).
 
 **Before cutting, with 2.0.0 in hand:**
 
-1. Re-verify #172 against the real classifier rather than the stubbed verdict:
-   a genuinely denied command parks, is not offered to the grant layer, and
-   renders as a refusal.
-2. Read the yolt side's unsafe-to-safe list. Anything moving *to* `safe` starts
-   auto-running in a channel with no card, so it is judged per command, not per
-   release. They send it before tagging, not after.
-3. Then the three operator notes below.
+1. ~~Re-verify #172 against the real classifier~~ -- done, and it found
+   something else: `deny` is unreachable from `run_cli()`, which builds the
+   classifier without `policy=`, so `git push` on the default branch returns
+   `unsafe` rather than `deny` (voitta-yolt#143). #172's handling is correct
+   and inert until that is wired. Not a blocker; the direction is safe.
+2. ~~Read the yolt side's unsafe-to-safe list~~ -- done, and the question was
+   the wrong one. Nothing moved *to* `safe`; everything useful moved *off* it.
+   Ask both directions next time.
+3. #177 resolved, or a decision to ship against `>= 1.2.0, < 2.0.0` and adopt
+   2.0.x later.
+4. Then the three operator notes below.
 
 **The release notes have to carry three things, or an upgrade breaks a channel
 quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
@@ -69,10 +93,12 @@ quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
    thought about, and a surprise for a channel whose normal work pulls from
    GitHub -- so the notes give the shape:
    `"allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]`.
-2. **The required voitta-yolt version, by release number** (#148). shmobster
-   passes `--no-user-allow`, which landed in voitta-yolt 1.2.0
-   (voitta-ai/voitta-yolt#126) -- but per the hold above this release pins
-   **2.0.0**. Link the yolt release, not just the number.
+2. **The required voitta-yolt version, by release number** (#148, #177).
+   shmobster passes `--no-user-allow`, which landed in voitta-yolt 1.2.0
+   (voitta-ai/voitta-yolt#126); 2.0.0 is **not** supported yet, for the reason
+   above. State the range -- `>= 1.2.0, < 2.0.0` -- and link both releases, so
+   an operator who runs `claude plugin update` knows why the newest is the
+   wrong one here.
 3. **`logging.path`, and one `chmod 600` of the existing log** (#155). With the
    key set the agent owns a rotated 0600 file; without it, nothing changes and
    the launchd-redirected log keeps growing -- it was **185 MB, mode 0644** on

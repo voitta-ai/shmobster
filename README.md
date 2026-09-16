@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt >= 1.2.0   # a clone, not a package: exec classifier + secret_redact
+  - voitta-ai/voitta-yolt >= 1.2.0, < 2.0.0   # a clone, not a package: exec classifier + secret_redact
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -394,6 +394,14 @@ One JSON config, no `.env`. Copy the example and fill it in:
   `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
+
+  **Supported range: >= 1.2.0 and < 2.0.0** (#177). 2.0.0's Phase 3 cut
+  `rules/shell.json` from 136 entries to 28 -- it now carries only what YOLT
+  refuses to delegate -- so `cat`, `ls`, `grep`, `git status` and `gh pr list`
+  come back `unknown` rather than `safe`. For the PreToolUse hook those are the
+  same silent exit; here they are opposite verdicts, so on 2.0.0 every ordinary
+  read in a channel parks for a card. Startup probes `cat /dev/null` and says so
+  rather than letting it be discovered a command at a time.
 
   The classifier is invoked with `--no-user-allow` (#148), so "read-only" means
   what YOLT's own rules say. Without it, YOLT also promotes anything matching a

@@ -140,7 +140,10 @@ def _scope(target, ctx):
         named = [named]
     elif not isinstance(named, (list, tuple, set)):
         named = []
-    if target in named:
+    # Surrounding whitespace in a hand-written policy entry is a typo, not a
+    # different channel. Case is left alone on purpose: Slack ids are already
+    # uppercase, and folding could only ever widen what matches.
+    if str(target).strip() in {str(n).strip() for n in named}:
         return (True, "")
     retval = (
         False,

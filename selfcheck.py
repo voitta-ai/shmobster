@@ -349,6 +349,11 @@ for _pol, _want_ok in (({"slack_channels": "C9"}, True),
     _r = slack_tools.dispatch(
         "slack_post", {"channel_id": "C9", "text": "x"}, _fs, {"channel": _ex_ch, "policy": _pol})
     assert (_fs.last is not None) == _want_ok, (_pol, _r)
+# whitespace around a hand-written entry is a typo, not a different channel
+_fs.last = None
+slack_tools.dispatch("slack_post", {"channel_id": "C9", "text": "x"}, _fs,
+                     {"channel": _ex_ch, "policy": {"slack_channels": [" C9 "]}})
+assert _fs.last is not None, "a padded policy entry should still name C9"
 
 # a falsy channel_id never reaches the client, however it is spelled
 for _a in ({"channel_id": "", "text": "x"}, {"channel_id": None, "text": "x"}, {"text": "x"}):

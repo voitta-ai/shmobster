@@ -18,36 +18,54 @@ pairs do, and that is #16, still open).
 - `selfcheck.py` is the whole test surface and runs offline. Run it before and
   after anything.
 
-## The version hold, and the one thing you must not do
+## The version floor, and why it moved
 
-**voitta-yolt must be `>= 1.6.0` and `< 2.0.0`.** Both ends are load-bearing.
+**voitta-yolt must be `>= 2.0.1`.**
 
-**Do not upgrade voitta-yolt to 2.x on this machine**, and do not let
-`claude plugin update` do it for the copy shmobster points at. 2.0.0's Phase 3
-cut `rules/shell.json` from 136 entries to 28 -- it now carries only what YOLT
-refuses to delegate. For the Claude Code hook that costs nothing, because
-`safe` and `unknown` are both a silent exit. Here they are opposite verdicts:
-`safe` means run without asking, anything else parks. Under 2.x, `cat`, `ls`,
-`grep`, `git status`, `git diff`, `gh pr list` and `curl` all return `unknown`,
-so **every ordinary read in a channel would wait for a human**. Three commands
-still classify safe: `pwd`, `echo`, and `python3 -c`.
+This replaces an earlier hold that said the opposite -- "do not upgrade past
+1.6.0" -- so if you are working from memory or from a machine set up before
+2026-09-16, read this section rather than trusting it.
 
-The floor is 1.6.0 rather than 1.2.0 (where `--no-user-allow` landed) because
-four write-target fixes closed in between. One mattered here: voitta-yolt#128
-(1.3.0) read `$HOME/...` as a redirect target -- before it, `echo x >
-$HOME/.ssh/authorized_keys` classified **safe**, which in this agent means
-auto-run with no card.
+Two things changed. The first is that **2.0.x stopped answering "is this
+read-only", by design.** Phase 3 cut `rules/shell.json` from 136 entries to 28;
+it now carries only what YOLT refuses to delegate. For the Claude Code hook that
+costs nothing, because `safe` and `unknown` are both a silent exit. Here they
+are opposite verdicts, so under 2.x `cat`, `ls`, `grep`, `git status` and
+`gh pr list` all come back `unknown` and would park for a human. That was the
+reason for the hold.
+
+It is no longer a reason, because **the read-only set now lives in this repo**
+(`grant.READ_VERBS`, #177) rather than being asked of the classifier. Waiting
+for upstream to separate "delegated" from "unclassifiable" turned out to be
+waiting for something that cannot arrive: delegation there is defined by the
+*absence* of a rule, so `cat` and a command YOLT never heard of are the same
+answer, and telling them apart would mean restoring the list 2.0.0 deleted.
+
+The second is `--cwd`, which arrived in **2.0.1** (voitta-yolt#145) together
+with the `deny` verdict becoming reachable from the CLI. `deny` comes from
+git-state predicates read from the directory the command would run in, so
+without the flag the classifier judges whichever directory the agent process
+happens to be in -- a false deny naming a branch from a repository the channel
+never mentioned, or no deny at all from a non-git directory. Neither announces
+itself. This is why the floor is 2.0.1 and not 2.0.0.
+
+Everything inherited from the old floor still holds: four write-target fixes
+closed between 1.2.0 (where `--no-user-allow` landed) and 1.6.0, one of which
+mattered here -- voitta-yolt#128 (1.3.0) read `$HOME/...` as a redirect target,
+and before it `echo x > $HOME/.ssh/authorized_keys` classified **safe**, which
+in this agent means auto-run with no card. All four are below the new floor.
 
 Check both ends before you start:
 
-    grep '"version"' /path/to/voitta-yolt/.claude-plugin/plugin.json     # expect 1.6.0
+    grep '"version"' /path/to/voitta-yolt/.claude-plugin/plugin.json     # expect >= 2.0.1
     python3 /path/to/voitta-yolt/hooks/grammar_classifier.py \
-        --no-user-allow 'cat /dev/null'                                  # expect "safe"
+        --no-user-allow --cwd / 'rm -rf /tmp/probe'                      # expect "unsafe"
 
-The second is the real check: startup runs it too (`yolt_gate.preflight`), and
-a classifier that cannot call `cat` read-only is one this agent cannot use,
-whatever its version string says. Tracked as #177; when upstream ships a way to
-point the CLI at a read-only rules file, adoption is one PR.
+The second is the real check, and startup runs it too (`yolt_gate.preflight`).
+It asks about a command no version has ever called anything but unsafe, so the
+only way to get another answer is for `--cwd` to have been taken as the command:
+a classifier predating 2.0.1 replies `unknown | no rule: --cwd`, having never
+looked at the `rm` at all. Checking a version string would not catch it.
 
 ## Install
 
@@ -104,7 +122,8 @@ If instead you see any of these, stop and fix before using it:
 
 | line | meaning |
 |---|---|
-| `yolt called 'cat /dev/null' 'unknown' rather than safe` | yolt is 2.x (or predates 1.2.0). Every read will park. Use 1.6.0 |
+| `yolt called 'rm -rf ...' ... rather than unsafe` | yolt predates `--cwd` (2.0.1). It classified the flag, not the command; every command will park |
+| `yolt exited <n>: <message>` | the classifier refused its arguments. The message is its own, from stderr |
 | `yolt does not report allow_patterns` | yolt predates 1.2.0; the opt-out cannot be confirmed |
 | `git preflight: gh is not logged in` | every channel's `git push` will fail |
 | `gh keeps its token in ~/.config/gh/hosts.yml` | re-run `gh auth login` on a host with a working keychain |
@@ -147,7 +166,7 @@ If instead you see any of these, stop and fix before using it:
 
 ## Do not
 
-- Upgrade voitta-yolt past 1.6.0 (above).
+- Run voitta-yolt below 2.0.1 (above).
 - Write `~/.claude/yolt/shell.json` to change this agent's behavior -- it is the
   operator's own global config and changes their interactive hook too.
 - Put a channel's `skills` directory inside that channel's writable tree.

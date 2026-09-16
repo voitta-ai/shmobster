@@ -37,26 +37,47 @@ from . import config
 _NO_USER_ALLOW = "--no-user-allow"
 
 
-def _classify_raw(command, flags=(_NO_USER_ALLOW,)):
+def _classify_raw(command, flags=(_NO_USER_ALLOW,), cwd=None):
     """(dict, error). The dict is YOLT's parsed output; error is a string when
-    it could not be obtained."""
+    it could not be obtained.
+
+    `cwd` is passed as `--cwd`, not as the subprocess's own directory, and the
+    difference is the whole point (#182). voitta-yolt 2.0.x's `deny` verdict is
+    produced by git-state predicates -- "would push to the default branch" --
+    evaluated against the directory the command would run in. Left unsaid, that
+    directory is whatever this agent process happens to be in, so the predicate
+    reads one repository and answers about another: a false deny citing a branch
+    the channel never named, or no deny at all from a non-git directory. The
+    flag exists from 2.0.1 and `preflight` refuses to run without it.
+
+    Errors are signalled out of band. On a rejected invocation the classifier
+    exits non-zero and writes the reason to stderr, leaving stdout empty -- so a
+    caller that only parses stdout reports a JSON decode error where the real
+    event was a refusal with a named cause. Check the code, and say what stderr
+    said."""
     path = config.YOLT_CLASSIFIER
     if not path:
         return (None, "yolt not configured (exec.yolt_classifier)")
+    argv = [sys.executable, path, *flags]
+    if cwd:
+        argv += ["--cwd", cwd]
+    argv.append(command)
     try:
-        proc = subprocess.run(
-            [sys.executable, path, *flags, command],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+    except Exception as exc:
+        return (None, f"yolt error: {exc}")
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        why = detail[0] if detail else "no message on stderr"
+        return (None, f"yolt exited {proc.returncode}: {why}")
+    try:
         return (json.loads(proc.stdout), None)
     except Exception as exc:
         return (None, f"yolt error: {exc}")
 
 
-def classify(command):
-    data, err = _classify_raw(command)
+def classify(command, cwd=None):
+    data, err = _classify_raw(command, cwd=cwd)
     if err:  # fail closed -> mutating
         retval = ("unsafe", err)
         return retval
@@ -64,15 +85,24 @@ def classify(command):
     return retval
 
 
-# The probe command, and the choice matters (#177). `echo` is one of three
-# things still classified `safe` by voitta-yolt 2.0.0, whose Phase 3 cut
-# rules/shell.json from 136 entries to 28 -- so a preflight probing `echo`
-# passes on a classifier under which `cat`, `ls`, `grep`, `git status` and
-# `gh pr list` all come back `unknown` and every ordinary read in a channel
-# parks for a card. `cat` is the probe because it is the read this agent
-# actually runs most, and because a classifier that cannot call it read-only
-# is one this agent cannot use, whatever its version string says.
-_PROBE = "cat /dev/null"
+# The probe, and the choice matters (#182). It used to be `cat /dev/null`, a
+# read, asserted to come back `safe` -- which is precisely the assertion #177
+# removed: under voitta-yolt 2.0.x every ordinary read is `unknown`, delegated
+# to a host classifier this agent does not have, and the read-only set now lives
+# in grant.READ_VERBS instead. So the probe stopped asking "do you still call
+# reads safe" and started asking the question we actually depend on: "do you
+# accept --cwd".
+#
+# It asks with a command no version has ever called anything but unsafe. A
+# classifier predating 2.0.1 takes its command from the first non-flag argument,
+# so `--cwd` becomes the command and the verdict is `unknown | no rule: --cwd` --
+# a verdict about a flag string, with the `rm` never examined. That is the same
+# family as handing `--no-user-allow` to a pre-1.2.0 classifier, and it fails
+# closed and silent: every command in every channel parks, with nothing saying
+# why. From 2.1.0 the classifier rejects the unknown flag outright and exits
+# non-zero, which `_classify_raw` now reports with its stderr.
+_PROBE = "rm -rf /tmp/shmobster-preflight-probe"
+_PROBE_CWD = "/"
 
 
 def preflight():
@@ -80,29 +110,28 @@ def preflight():
 
     Three failure modes, all silent, all ending in "every command parks":
 
-    An older classifier takes its command from argv[1], so `--no-user-allow`
-    lands there and every verdict becomes a verdict about that string. One that
-    accepts the flag and inherits the allow-lists anyway is worse -- the old
-    auto-run surface with nothing to show for it, which is why the count has to
-    be reported and has to be zero.
+    An older classifier takes its command from argv[1], so a flag it does not
+    know lands there and every verdict becomes a verdict about that string. One
+    that accepts the flags and inherits the allow-lists anyway is worse -- the
+    old auto-run surface with nothing to show for it, which is why the count has
+    to be reported and has to be zero.
 
-    And one that no longer answers "is this read-only" for ordinary reads
-    (#177). That is not a malfunction upstream: for the PreToolUse hook `safe`
-    and `unknown` are the same silent exit, so delegating a command costs
-    nothing there. Here they are opposite verdicts, so the probe asks about a
-    command that was delegated rather than one that survived."""
+    And one that does not accept `--cwd`, which this agent depends on for a
+    reason no verdict reveals: without it voitta-yolt 2.0.x's git-state
+    predicates judge whichever directory this process is in rather than the
+    channel's, and a `deny` layer asked about the wrong repository does not
+    error or warn, it simply never denies (#182)."""
     retval = []
-    data, err = _classify_raw(_PROBE)
+    data, err = _classify_raw(_PROBE, cwd=_PROBE_CWD)
     if err:
         retval.append(err)
         return retval
-    if data.get("decision") != "safe":
+    if data.get("decision") != "unsafe":
         retval.append(
-            f"yolt called {_PROBE!r} {data.get('decision')!r} rather than safe, so every "
-            "ordinary read in a channel will park for an approval card. Either this yolt "
-            f"predates {_NO_USER_ALLOW} (1.2.0+) and classified the flag instead of the "
-            "command, or it is 2.0.0+, which delegates reads to the host instead of "
-            "classifying them (#177). Use voitta-yolt 1.6.0 until #177 says otherwise"
+            f"yolt called {_PROBE!r} {data.get('decision')!r} rather than unsafe when asked "
+            f"with --cwd, so it is classifying the flag instead of the command and every "
+            f"command in every channel will park. This yolt predates --cwd (2.0.1+); "
+            f"upgrade it"
         )
     elif "allow_patterns" not in data:
         retval.append(
@@ -120,13 +149,7 @@ def preflight():
     return retval
 
 
-def is_read_only(command):
-    decision, _ = classify(command)
-    retval = decision == "safe"
-    return retval
-
-
-def is_read_only(command):
-    decision, _ = classify(command)
+def is_read_only(command, cwd=None):
+    decision, _ = classify(command, cwd=cwd)
     retval = decision == "safe"
     return retval

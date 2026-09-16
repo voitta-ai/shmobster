@@ -2582,4 +2582,28 @@ for _c in ("gh api repos/MINE/REPO/issues", "gh repo view MINE/repo"):
     assert _ok, (_c, _why)
 assert not policy.check("gh api repos/OTHER/SECRET/x", _gh_pol)[0]
 
+# A repo-less `gh` command falls back to the checkout's origin, and that is
+# correct rather than a hole: `gh pr list` is the common case and it names no
+# repo. Refusing every repo-less gh command -- the tempting "fail closed"
+# reading -- would card the most-used command in the tool.
+assert policy.check("gh pr list", _gh_pol)[0], "gh pr list must resolve through origin"
+# What makes that safe is that the one way to hide a target from this check --
+# a `gh alias` expanding to `api ...` inside gh, where the word never reaches
+# us -- is not something a channel can create. The sandbox denies gh's config,
+# including through gh itself. That is the fact the argument rests on, so it is
+# asserted rather than assumed.
+if _HAVE_SANDBOX:
+    _al_root = os.path.realpath(tempfile.mkdtemp())
+    _al_saved = config.WORKSPACE
+    try:
+        config.WORKSPACE = _al_root
+        _al_pol = {"cwd": _al_root, "allow_write": [_al_root]}
+        for _cmd in ("mkdir -p ~/.config/gh && echo aliases: > ~/.config/gh/config.yml",
+                     "echo x >> ~/.config/gh/config.yml"):
+            _p = subprocess.run(_REAL_WRAP(_cmd, _al_pol), capture_output=True,
+                                text=True, timeout=15, cwd=_al_root)
+            assert _p.returncode != 0, _cmd
+    finally:
+        config.WORKSPACE = _al_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

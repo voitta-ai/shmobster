@@ -102,8 +102,7 @@ def preflight():
             "ordinary read in a channel will park for an approval card. Either this yolt "
             f"predates {_NO_USER_ALLOW} (1.2.0+) and classified the flag instead of the "
             "command, or it is 2.0.0+, which delegates reads to the host instead of "
-            "classifying them (#177). Use a yolt between 1.2.0 and 1.6.0 until #177 says "
-            "otherwise"
+            "classifying them (#177). Use voitta-yolt 1.6.0 until #177 says otherwise"
         )
     elif "allow_patterns" not in data:
         retval.append(

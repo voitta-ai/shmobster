@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt >= 1.2.0, < 2.0.0   # a clone, not a package: exec classifier + secret_redact
+  - voitta-ai/voitta-yolt >= 1.6.0, < 2.0.0   # a clone, not a package: exec classifier + secret_redact
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -395,7 +395,21 @@ One JSON config, no `.env`. Copy the example and fill it in:
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
 
-  **Supported range: >= 1.2.0 and < 2.0.0** (#177). 2.0.0's Phase 3 cut
+  **Supported range: >= 1.6.0 and < 2.0.0.**
+
+  The floor is 1.6.0 rather than 1.2.0 -- which is where `--no-user-allow`
+  landed -- because four write-target holes closed between them, and one of
+  them mattered here. voitta-yolt#128 (1.3.0) read `$HOME/...` as a redirect
+  target: before it, `echo x > $HOME/.ssh/authorized_keys` classified **safe**,
+  and safe means this agent auto-runs it with no card. #127 (1.4.0) covers
+  agent-steering writes; #136 (1.5.0) and #138 (1.6.0) were silent upstream
+  rather than granted, so on this side they parked -- but pinning 1.6.0 takes
+  all four without anyone having to reason about which. Verified on 1.6.0:
+
+      echo x > $HOME/.ssh/authorized_keys   unsafe | writes to protected path
+      echo x > ~/.ssh/authorized_keys       unsafe | writes to protected path
+
+  The ceiling is 2.0.0 (#177). 2.0.0's Phase 3 cut
   `rules/shell.json` from 136 entries to 28 -- it now carries only what YOLT
   refuses to delegate -- so `cat`, `ls`, `grep`, `git status` and `gh pr list`
   come back `unknown` rather than `safe`. For the PreToolUse hook those are the
@@ -410,7 +424,8 @@ One JSON config, no `.env`. Copy the example and fill it in:
   permissions, written for a human at a terminal, applied here to commands a
   channel asked for. On one deployment that was 123 patterns, among them
   `gh pr merge*`, `gh api*` and `codex exec *`: mutating, and auto-run. That
-  flag needs voitta-yolt >= 1.2.0; on an older one every command parks and
+  flag needs voitta-yolt >= 1.2.0 (the floor above is higher for other
+  reasons); on an older one every command parks and
   startup says so (`yolt preflight:` in the log). A boot line also reports how
   many allow patterns were in play, which should be `0`.
 

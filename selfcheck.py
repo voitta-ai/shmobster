@@ -2144,6 +2144,25 @@ try:
     for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x ."):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # process substitution runs a command, in an argument or as a redirect
+    # target, and a promoted read verb must not carry one either way
+    for _c in ("cat <(rm -rf x)", "diff <(ls) <(ls)", "cat > >(sh)", "cat < <(sh)"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+    # every spelling of a config override is refused, not just the spaced one
+    for _c in ("git -c core.fsmonitor=touch status",
+               "git -ccore.fsmonitor=touch status",
+               "git --config-env core.fsmonitor=EV status",
+               "git --config-env=core.fsmonitor=EV status"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok and "-c" in _why, (_c, _ok, _why)
+    # ...while `-c` AFTER the subcommand stays granted on purpose: it is not a
+    # config override there, it is the subcommand's own flag (`git log -c` is a
+    # combined diff), and real git answers `unknown switch \`c'` with exit 129
+    # to `git status -c core.fsmonitor=CMD`. Refusing it would cost a real read
+    # and buy nothing.
+    _ok, _why = grant.check("git log -c", _rpol)
+    assert _ok and "read-only" in _why, (_ok, _why)
 finally:
     yolt_gate.classify = _saved_classify
 

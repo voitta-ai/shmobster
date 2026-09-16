@@ -74,7 +74,7 @@ _MAX_OUTPUT = 4000
 
 
 def run_shell(command, policy, channel=None):
-    decision, reason = yolt_gate.classify(command)
+    decision, reason = yolt_gate.classify(command, cwd=policy_mod.cwd_for(policy))
     # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
     # box, and a fetch to a host this channel was not given is a mutation of
     # the world even when it reads nothing here (#149). Demote it to mutating

@@ -2,8 +2,9 @@
 
 Written 2026-09-13 after the backlog triage that followed v0.7.2; revised that
 same day when items 1 and 2 turned into ten issues, revised again 2026-09-14
-with the first four of the new order done, and **revised 2026-09-15, when the
-owed release was cut as v0.8.0**.
+with the first four of the new order done, revised 2026-09-15 when the owed
+release was cut as v0.8.0, and **revised 2026-09-16, when #177 resolved the
+other way and the voitta-yolt 2.0.x hold came off**.
 This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
@@ -43,8 +44,25 @@ The one-sentence version, which is the part worth carrying: **2.0.0 collapses
 `unknown`, and a consumer that must fail closed on the second has no choice but
 to fail closed on the first.**
 
-Until #177 resolves, the supported range is **voitta-yolt >= 1.6.0 and <
-2.0.0**. The floor is 1.6.0, not the 1.2.0 where `--no-user-allow` landed: four
+**Superseded 2026-09-16: the supported range is now `>= 2.0.1`, and #177
+resolved by deciding the question rather than by waiting for an answer.** The
+paragraph below is what v0.8.0 shipped against, kept because the floor argument
+still holds; the ceiling argument does not.
+
+The reason the hold came off is that the thing it was waiting for cannot
+arrive. voitta-yolt's `rules/shell.json` says delegation is defined by the
+*absence* of a rule -- so `cat` and a command it never heard of are one
+`unknown`, upstream cannot tell them apart either, and separating them would
+mean restoring the list 2.0.0 deleted. The read-only set therefore moved here,
+as `grant.READ_VERBS`, consulted only on `unknown` and never over `unsafe` or
+`deny`. It is deliberately not parity with 1.6.0's `safe` set, which called
+`git branch -D x`, `git remote add`, `git config <k> <v>` and `gh api` safe.
+The new floor is 2.0.1 rather than 2.0.0 because `--cwd` arrived there, and
+without it 2.0.x's `deny` predicates judge whichever directory the agent
+process is in (#182).
+
+Historically, until #177 resolved, the supported range was **voitta-yolt >=
+1.6.0 and < 2.0.0**. The floor is 1.6.0, not the 1.2.0 where `--no-user-allow` landed: four
 write-target holes closed in between, and voitta-yolt#128 (1.3.0) is the one
 that mattered here -- before it, `echo x > $HOME/.ssh/authorized_keys`
 classified *safe*, which on this side means auto-run with no card. Startup says
@@ -146,6 +164,7 @@ outside `allow_domains` ask first.
 
 | # | Issue | Size | Why here |
 |---|---|---|---|
+| 0 | ~~#177 + #182 yolt 2.0.x~~ | M | **Done 2026-09-16.** The read-only set is ours now; `--cwd` passed so `deny` judges the channel's repo |
 | 1 | #23 DM events | S | The last ingest gap in Slack; self-contained, and the smallest thing left |
 | 2 | #62 web-fetch tool | M | Take it now that #149 decided its shape: a tool-shaped front door that obeys `allow_domains` |
 | 3 | #140 per-channel memory | L | Deliberately last: it is the piece with the injection surface |

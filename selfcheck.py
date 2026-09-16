@@ -169,10 +169,10 @@ assert _pass.strip() == "planted-parent-secret-9f3a", _pass
 assert "engineering agent" in spine.load_system_prompt()
 
 # 2) tools.run_shell honors the YOLT verdict (yolt stubbed -> no subprocess)
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 out = tools.run_shell("echo selfcheck_marker_123", {})
 assert "selfcheck_marker_123" in out, out
-yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 blocked = tools.run_shell("rm -rf /tmp/x", {})
 assert blocked.startswith("NOT RUN"), blocked
 
@@ -199,7 +199,7 @@ class _FakeMsg:
         return {"role": "assistant", "content": self.content}
 
 
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 _script = [
     _FakeMsg(tool_calls=[_FakeCall("c1", "run_shell", '{"command": "echo hi_from_tool"}')]),
     _FakeMsg(content="ran it: hi_from_tool"),
@@ -241,7 +241,7 @@ aws_pol = {"aws_profile": "doubledoor"}
 assert policy.check("aws s3 ls", aws_pol)[0], "aws without override passes"
 assert not policy.check("aws s3 ls --profile other", aws_pol)[0], "profile override blocks"
 # run_shell surfaces a policy block (yolt says safe, policy says no)
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 blocked_repo = tools.run_shell("gh repo view other-org/thing", gh_pol)
 assert blocked_repo.startswith("BLOCKED by channel policy"), blocked_repo
 
@@ -253,7 +253,7 @@ def _always_tool(messages, tools=None):
     return _FakeMsg(tool_calls=[_FakeCall("c", "run_shell", '{"command": "echo x"}')])
 
 
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 config.MAX_TOOL_STEPS = 3  # keep the test fast + trip the near-limit warning
 config.WARN_TOOL_STEPS = 2
 llm.complete = _always_tool
@@ -356,7 +356,7 @@ assert "updated" in _res2, _res2
 assert _applied["call"][0] == "C1", _applied
 
 # 11) approval flow (#48): a mutating command parks; a trusted user releases it
-yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
 _parked = tools.run_shell("echo approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
@@ -1281,7 +1281,7 @@ except RuntimeError as _exc:
 finally:
     shutil.which = _real_which
 if _HAVE_SANDBOX:
-    _sb_run = lambda cmd: tools.execute(cmd, _sb_pol)  # noqa: E731
+    _sb_run = lambda cmd, cwd=None: tools.execute(cmd, _sb_pol)  # noqa: E731
     assert "in-tree" in _sb_run("echo in-tree > f && cat f"), "a write inside the tree"
     assert "Operation not permitted" in _sb_run(f"touch {_home}/.shmobster_selfcheck_probe"), "a write outside"
     assert not os.path.exists(os.path.join(_home, ".shmobster_selfcheck_probe"))
@@ -1322,7 +1322,7 @@ _git("worktree", "add", "-q", "-b", "feat", _g_wt)
 _g_pol = {"cwd": _g_primary}
 # YOLT stubbed by verb: the grant layer asks it about the segments it does not
 # vouch for itself, so `diff` and `git status` come back safe, `rm` does not
-yolt_gate.classify = lambda cmd: (("safe", "read-only") if cmd.split()[0] in ("cd", "diff", "ls", "cat", "echo") or cmd.startswith(("git status", "git log")) else ("unsafe", cmd.split()[0] + ": mutating"))
+yolt_gate.classify = lambda cmd, cwd=None: (("safe", "read-only") if cmd.split()[0] in ("cd", "diff", "ls", "cat", "echo") or cmd.startswith(("git status", "git log")) else ("unsafe", cmd.split()[0] + ": mutating"))
 _ok, _why = grant.check(f"cd {_g_wt} && cp README copy && diff -q README copy; git add copy && git status --short && git commit -m 'c'", _g_pol)
 assert _ok, _why
 assert "git commit: linked worktree on feat, solo author" in _why, _why
@@ -1580,10 +1580,12 @@ config.CHANNEL_POLICIES.clear(); config.CHANNEL_POLICIES.update(_saved_cps)
 sandbox.roots = _real_roots
 
 # 26) the auto-run set is YOLT's rules, not the operator's terminal permissions
-# (#148). classify() passes --no-user-allow, and preflight() refuses to let a
-# YOLT that cannot honor it pass silently -- silence here would mean the Slack
-# agent is auto-running whatever the operator once allowed themselves.
-_NO_USER_ALLOW_HINT = "predates --no-user-allow"
+# (#148), and the classifier is asked about the directory the command would run
+# in (#182). classify() passes --no-user-allow and --cwd; preflight() refuses to
+# let a YOLT that cannot honor either pass silently -- silence on the first
+# means the Slack agent is auto-running whatever the operator once allowed
+# themselves, and silence on the second means a deny layer that never denies.
+_NO_USER_ALLOW_HINT = "--no-user-allow"
 _ya_dir = tempfile.mkdtemp()
 
 
@@ -1594,60 +1596,78 @@ def _yolt_stub(name, body):
     return path
 
 
-# honors the flag: command is the last argv, and it reports the count
+# 2.0.x's shape and the one this agent is built for: honors both flags, command
+# is the last argv, reports the count, refuses `rm`, and delegates ordinary
+# reads to a host classifier by answering `unknown`. That last part used to fail
+# preflight (#177); it is now the supported case, because grant.READ_VERBS
+# answers for the reads instead of the classifier.
 _ya_good = _yolt_stub("good.py", (
     "flag = '--no-user-allow' in sys.argv[1:]\n"
-    "print(json.dumps({'decision': 'safe', 'reason': ' '.join(sys.argv[1:-1]),\n"
+    "cmd = sys.argv[-1]\n"
+    "mutating = cmd.split(' ')[0] in ('rm', 'git')\n"
+    "print(json.dumps({'decision': 'unsafe' if mutating else 'unknown',\n"
+    "                  'reason': ' '.join(sys.argv[1:-1]),\n"
     "                  'allow_patterns': 0 if flag else 106}))\n"
 ))
-# answers, honors the flag, and delegates ordinary reads to the host instead of
-# calling them read-only -- voitta-yolt 2.0.0's shape (#177). Safe for `echo`,
-# which is one of three commands its Phase 3 left classified, and unknown for
-# the `cat` this agent actually runs.
-_ya_delegating = _yolt_stub("delegating.py", (
-    "cmd = sys.argv[-1]\n"
-    "safe = cmd.split(' ')[0] in ('echo', 'pwd')\n"
-    "print(json.dumps({'decision': 'safe' if safe else 'unknown',\n"
+# pre-2.0.1: does not know --cwd, so the flag lands where the command should be
+# and every verdict becomes a verdict about the string '--cwd'. Measured against
+# the real v1.6.0 tag, which answers 'no rule: --cwd' to exactly this.
+_ya_old = _yolt_stub("old.py", (
+    "rest = [a for a in sys.argv[1:] if a != '--no-user-allow']\n"
+    "cmd = rest[0]\n"
+    "print(json.dumps({'decision': 'unsafe' if cmd.startswith('rm') else 'unknown',\n"
     "                  'reason': 'stub', 'allow_patterns': 0}))\n"
 ))
-# pre-1.2.0: argv[1] is the command, so the flag is classified instead of it
-_ya_old = _yolt_stub("old.py", (
-    "cmd = sys.argv[1]\n"
-    "print(json.dumps({'decision': 'safe' if cmd.startswith('echo') else 'unknown',\n"
-    "                  'reason': 'stub'}))\n"
-))
 # answers, but says nothing about how many patterns were in play
-_ya_quiet = _yolt_stub("quiet.py", "print(json.dumps({'decision': 'safe', 'reason': 'stub'}))\n")
-# takes the flag and inherits anyway
+_ya_quiet = _yolt_stub("quiet.py", (
+    "print(json.dumps({'decision': 'unsafe', 'reason': 'stub'}))\n"
+))
+# takes the flags and inherits anyway
 _ya_leaky = _yolt_stub("leaky.py", (
-    "print(json.dumps({'decision': 'safe', 'reason': 'stub', 'allow_patterns': 7}))\n"
+    "print(json.dumps({'decision': 'unsafe', 'reason': 'stub', 'allow_patterns': 7}))\n"
+))
+# 2.1.0's shape for an argument it will not accept: nothing on stdout, the
+# reason on stderr, non-zero exit. A caller parsing only stdout reports a JSON
+# decode error where the real event was a refusal with a named cause.
+_ya_rejects = _yolt_stub("rejects.py", (
+    "print('unrecognized option --cwd', file=sys.stderr)\n"
+    "sys.exit(2)\n"
 ))
 _saved_yolt = config.YOLT_CLASSIFIER
 try:
     config.YOLT_CLASSIFIER = _ya_good
     assert yolt_gate.preflight() == [], yolt_gate.preflight()
-    # the flag reaches the classifier, ahead of the command
-    assert _REAL_CLASSIFY("cat x") == ("safe", "--no-user-allow"), _REAL_CLASSIFY("cat x")
+    # both flags reach the classifier, ahead of the command
+    assert _REAL_CLASSIFY("rm -rf x") == ("unsafe", "--no-user-allow"), _REAL_CLASSIFY("rm -rf x")
+    assert _REAL_CLASSIFY("rm -rf x", cwd="/tmp") == (
+        "unsafe", "--no-user-allow --cwd /tmp"
+    ), _REAL_CLASSIFY("rm -rf x", cwd="/tmp")
+    # a classifier that delegates ordinary reads is now supported, not warned
+    # about: this is voitta-yolt 2.0.x, and READ_VERBS answers for the reads.
+    assert _REAL_CLASSIFY("cat x")[0] == "unknown", _REAL_CLASSIFY("cat x")
     config.YOLT_CLASSIFIER = _ya_old
-    # pre-1.2.0 and 2.0.0+ share one warning, because they share the symptom
-    # the operator has to act on: the probe came back not-safe, so every
-    # ordinary read parks. The message names both causes and the fix for each.
+    # the probe is a command no version calls anything but unsafe, so a
+    # not-unsafe answer means the flag was classified instead of the command
     _ow = yolt_gate.preflight()
-    assert _ow and "will park for an approval card" in _ow[0], _ow
-    assert _NO_USER_ALLOW_HINT in _ow[0], _ow
+    assert _ow and "predates --cwd" in _ow[0], _ow
+    assert "will park" in _ow[0], _ow
+    assert yolt_gate._PROBE.split()[0] == "rm", (
+        "the probe must be unsafe on every supported version, or this cannot fire"
+    )
     config.YOLT_CLASSIFIER = _ya_quiet
     assert "cannot be confirmed" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    assert _NO_USER_ALLOW_HINT in yolt_gate.preflight()[0], yolt_gate.preflight()
     config.YOLT_CLASSIFIER = _ya_leaky
     assert "despite" in yolt_gate.preflight()[0], yolt_gate.preflight()
-    # ...and a classifier that delegates reads rather than classifying them is
-    # caught, which probing `echo` would not have done: it is still safe there
-    config.YOLT_CLASSIFIER = _ya_delegating
-    _dw = yolt_gate.preflight()
-    assert _dw and "will park for an approval card" in _dw[0], _dw
-    assert "#177" in _dw[0], "the warning has to name where the argument lives"
-    assert yolt_gate._PROBE.split()[0] != "echo", (
-        "the probe must be a command Phase 3 delegated, or this check cannot fire"
-    )
+    # a refusal names itself rather than arriving as a JSON decode error (#182)
+    config.YOLT_CLASSIFIER = _ya_rejects
+    _rw = yolt_gate.preflight()
+    assert _rw and "exited 2" in _rw[0], _rw
+    assert "unrecognized option --cwd" in _rw[0], _rw
+    assert "Expecting value" not in _rw[0], _rw
+    assert _REAL_CLASSIFY("cat x") == (
+        "unsafe", "yolt exited 2: unrecognized option --cwd"
+    ), _REAL_CLASSIFY("cat x")
     config.YOLT_CLASSIFIER = ""
     assert "not configured" in yolt_gate.preflight()[0], yolt_gate.preflight()
     # ...and an unrunnable classifier still fails closed, as it always did
@@ -1692,16 +1712,16 @@ assert policy.check_egress("curl https://example.com/x", {"cwd": "."})[0] is Fal
 
 # the grant layer must not undo it: its read-only fallback would otherwise
 # vouch for the fetch segment of a compound command, one segment at a time
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 assert grant.check("touch f && curl https://example.com/x", _eg)[0], grant.check("touch f && curl https://example.com/x", _eg)
 _g_ok, _g_why = grant.check("touch f && curl https://elsewhere.test/x", _eg)
 assert not _g_ok and "elsewhere.test" in _g_why, (_g_ok, _g_why)
 # ...and a fetch YOLT itself calls mutating refuses on its own grounds rather
 # than slipping through beside a granted write (#149 review, finding 2)
-yolt_gate.classify = lambda cmd: ("safe", "read-only") if "curl" not in cmd else ("unsafe", "curl: flag -X POST")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only") if "curl" not in cmd else ("unsafe", "curl: flag -X POST")
 _g2_ok, _g2_why = grant.check("mkdir -p x && curl -X POST https://elsewhere.test/x", _eg)
 assert not _g2_ok, (_g2_ok, _g2_why)
-yolt_gate.classify = lambda cmd: ("safe", "read-only")
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 
 # ...and end to end: an off-list fetch parks with the host in its reason, while
 # a read-only command in the same channel still runs
@@ -1917,7 +1937,7 @@ _denied = handler.resume("x-9", False, "rm -rf /tmp/x", "", channel="C_RES",
 assert "denied" in json.dumps(_resume_seen["messages"]), _resume_seen
 assert "it did not run" in json.dumps(_resume_seen["messages"])
 # the parked message no longer promises what the old path could not keep
-yolt_gate.classify = lambda cmd: ("unsafe", "mutating")
+yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 _parked = tools.run_shell("rm -rf /tmp/whatever", {"cwd": "."}, "C_RES")
 assert "continued automatically" in _parked and "End your turn now" in _parked, _parked
 approvals._PENDING.clear()
@@ -1951,13 +1971,13 @@ grant.check = _counting_grant
 try:
     # the control: an ordinary mutating verdict still gets the grant layer, and
     # an in-tree write still runs with no card
-    yolt_gate.classify = lambda cmd: ("unsafe", "rm: mutating")
+    yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "rm: mutating")
     _tree = tempfile.mkdtemp()
     _out = tools.run_shell("touch in-tree.txt", {"cwd": _tree}, "C_DENY")
     assert _grant_asked["n"] == 1 and not _out.startswith("NOT RUN"), (_grant_asked, _out)
     # the refusal: same verb, same tree, and now it parks
     _grant_asked["n"] = 0
-    yolt_gate.classify = lambda cmd: ("deny", "rm: tracked file with uncommitted changes")
+    yolt_gate.classify = lambda cmd, cwd=None: ("deny", "rm: tracked file with uncommitted changes")
     _out = tools.run_shell("touch in-tree.txt", {"cwd": _tree}, "C_DENY")
     assert _grant_asked["n"] == 0, "a refused command must not be offered to the grant layer"
     assert _out.startswith("REFUSED by the classifier"), _out
@@ -2037,5 +2057,181 @@ try:
         assert _ok_proc.returncode == 0, _ok_proc
 finally:
     config.WORKSPACE = _saved_ws
+
+# 35) the read-only set is shmobster's, because voitta-yolt 2.0.x stopped
+# answering (#177). Every ordinary read there is `unknown` -- delegated by
+# design to a host classifier this agent does not have -- so without
+# grant.READ_VERBS `cat README.md` parks for a card. The list is consulted only
+# on the verb, so it can promote an `unknown` and never override an `unsafe`.
+_saved_classify = yolt_gate.classify
+# voitta-yolt 2.0.x in miniature: reads delegated, mutations still named.
+_MUTATING = ("rm", "tee", "chmod", "shred")
+
+
+def _yolt_2x(cmd, cwd=None):
+    head = cmd.strip().split(" ")[0]
+    if head in _MUTATING:
+        return ("unsafe", f"{head}: mutating")
+    return ("unknown", f"no rule: {head}")
+
+
+yolt_gate.classify = _yolt_2x
+_rpol = {"cwd": "."}
+try:
+    # the reads that 1.6.0 called safe and 2.0.x delegates
+    for _c in ("cat README.md", "ls -la", "grep -rn x .", "head -1 f", "wc -l f",
+               "git status", "git log --oneline -5", "git diff", "gh pr list",
+               "gh issue view 3", "aws s3 ls", "aws ec2 describe-instances"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # ...and the things that look like reads but are not. Each of these was
+    # `safe` under voitta-yolt 1.6.0, which is why READ_VERBS is not parity
+    # with it: `git branch -D`, `git remote add` and `git config <k> <v>` all
+    # mutate, and `gh api` takes -X POST and reaches any repo the token does.
+    for _c in ("git branch -D topic", "git remote add o https://e/r",
+               "git config user.email x@y", "gh api repos/o/r",
+               "gh pr merge 3", "aws s3 cp a b", "aws s3 rm s3://b/k",
+               "rm -rf x", "tee out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # a read verb stops being a read when its output lands in a file. YOLT
+    # cannot say so -- all three are one `unknown` to it -- so the redirect is
+    # caught here at the AST or not at all.
+    for _c in ("cat x > out.txt", "cat x >> out.txt", "grep x f > /usr/local/bin/foo",
+               "git log > out.txt", "gh pr list > out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # ...while the three harmless devices, and a plain read redirect, still are
+    for _c in ("ls > /dev/null", "cat x > /dev/stdout", "cat < in.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # the pipe-to-shell forms YOLT answers `unknown` to are refused by the
+    # walker, because no shell is in READ_VERBS and a bare `sh` is not safe
+    for _c in ("cat payload | sh", "head -1 x | bash", "cat f | python3"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+    # command substitution in a read verb's arguments is still unconditional
+    _ok, _why = grant.check("cat $(rm -rf x)", _rpol)
+    assert not _ok and "substitution" in _why, (_ok, _why)
+    # a subcommand this agent cannot read statically is not one it vouches for
+    _ok, _why = grant.check("gh $SUB list", _rpol)
+    assert not (_ok and "read-only" in _why), (_ok, _why)
+    # a read verb can also be made to write or execute by a flag, which no
+    # redirect node shows and no YOLT verdict mentions. Each of these was run
+    # against real git/grep before being listed: `-c diff.external=CMD` with
+    # `git log -p --ext-diff`, `-c core.fsmonitor=CMD` with `git status`, and
+    # `-c diff.external=CMD` with `git diff --ext-diff` all executed CMD with
+    # stdout a pipe; `git grep -O<cmd>` ran the pager it was handed; and
+    # `git diff --output=F` wrote F. (`git -c core.pager=CMD --paginate log`
+    # did NOT execute -- git pages only to a terminal -- so the pager route is
+    # not what this guards.)
+    for _c in ("git -c diff.external=touch log -p --ext-diff",
+               "git -c core.fsmonitor=touch status",
+               "git -c diff.external=touch diff --ext-diff",
+               "git --config-env=core.fsmonitor=EV status",
+               "git grep -Otouch needle",
+               "git grep needle",
+               "git diff --output=out.txt",
+               "git diff -O out.txt",
+               "tree -o out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # ...and a config override is refused for local writes too, not just reads:
+    # core.fsmonitor runs on `git add` the same as on `git status`
+    _ok, _why = grant.check("git -c core.fsmonitor=touch add .", _rpol)
+    assert not _ok, (_ok, _why)
+    # the ordinary forms still pass
+    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x ."):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # process substitution runs a command, in an argument or as a redirect
+    # target, and a promoted read verb must not carry one either way
+    for _c in ("cat <(rm -rf x)", "diff <(ls) <(ls)", "cat > >(sh)", "cat < <(sh)"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+    # every spelling of a config override is refused, not just the spaced one
+    for _c in ("git -c core.fsmonitor=touch status",
+               "git -ccore.fsmonitor=touch status",
+               "git --config-env core.fsmonitor=EV status",
+               "git --config-env=core.fsmonitor=EV status"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok and "-c" in _why, (_c, _ok, _why)
+    # ...while `-c` AFTER the subcommand stays granted on purpose: it is not a
+    # config override there, it is the subcommand's own flag (`git log -c` is a
+    # combined diff), and real git answers `unknown switch \`c'` with exit 129
+    # to `git status -c core.fsmonitor=CMD`. Refusing it would cost a real read
+    # and buy nothing.
+    _ok, _why = grant.check("git log -c", _rpol)
+    assert _ok and "read-only" in _why, (_ok, _why)
+    # a global flag takes its value with it, or the value is read as the
+    # subcommand and a real read parks for no reason
+    for _c in ("gh --repo o/r pr list", "gh -R o/r issue view 3",
+               "aws --profile P s3 ls", "aws --region us-east-1 ec2 describe-instances"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # ...and an unknown flag still misparses, which still parks -- the table
+    # only ever adds working commands, it never widens what is granted
+    _ok, _why = grant.check("gh --nosuchflag o/r pr list", _rpol)
+    assert not (_ok and "read-only" in _why), (_ok, _why)
+    # a profile named like a subcommand is consumed as the value it is
+    _ok, _why = grant.check("aws --profile s3 ls", _rpol)
+    assert not (_ok and "read-only" in _why), (_ok, _why)
+    # read-prefixed AWS operations that write a local file are not reads. The
+    # destination is a bare trailing positional -- the CLI's own help says the
+    # outfile "is specified without an option name such as --outfile" -- so it
+    # cannot be filtered by flag and the operations are named instead.
+    for _c in ("aws s3api get-object --bucket b --key k out.bin",
+               "aws s3api get-object-torrent --bucket b --key k t.torrent",
+               "aws kinesisvideo get-media --stream-name s out.mkv"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # ...while the read-prefixed operations that write nothing still pass
+    for _c in ("aws s3api list-objects --bucket b", "aws iam get-user",
+               "aws logs describe-log-groups"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # a read that hands back a credential is not one this layer auto-runs. It
+    # does not mutate, so the argument is #149's rather than the mutation one:
+    # the effect is outward, into a channel, and a bare token has no shape the
+    # redactor catches. Stricter than 1.6.0, where all of these were `safe`.
+    for _c in ("aws secretsmanager get-secret-value --secret-id s",
+               "aws ecr get-login-password",
+               "aws sts get-session-token",
+               "aws ssm get-parameter --name n --with-decryption",
+               "aws sso get-role-credentials --role-name r"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+finally:
+    yolt_gate.classify = _saved_classify
+
+# 36) the classifier is asked about the channel's directory, not this process's
+# (#182). Without --cwd, 2.0.x's git-state predicates read wherever the agent
+# happens to be: a false deny citing a branch the channel never named, or no
+# deny at all from a non-git directory. Nothing in the verdict reveals which.
+_seen = []
+
+
+def _record_cwd(cmd, cwd=None):
+    _seen.append(cwd)
+    return ("unknown", "no rule: stub")
+
+
+_saved_classify = yolt_gate.classify
+yolt_gate.classify = _record_cwd
+try:
+    del _seen[:]
+    tools.run_shell("frobnicate", {"cwd": "/tmp"})
+    assert _seen and _seen[0] == "/tmp", _seen
+    # the grant layer answers with the directory the segment would run in,
+    # following `cd`, and falls back to the channel root rather than to this
+    # process when a `cd` target was not statically known
+    del _seen[:]
+    grant.check("cd sub && frobnicate", {"cwd": "/tmp"})
+    assert _seen and _seen[-1] == "/tmp/sub", _seen
+    del _seen[:]
+    grant.check("cd $UNKNOWN && frobnicate", {"cwd": "/tmp"})
+    assert _seen and _seen[-1] == "/tmp", _seen
+finally:
+    yolt_gate.classify = _saved_classify
 
 print(f"selfcheck OK -- shmobster {_b}")

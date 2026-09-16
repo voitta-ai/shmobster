@@ -52,6 +52,93 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # Filesystem writes the sandbox confines to the tree.
 FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed"))
 
+# Reads that stay reads whatever flags they are given (#177). voitta-yolt 2.0.x
+# delegates every ordinary read to a host classifier this agent does not have,
+# answering `unknown`, so without this list `cat README.md` parks for an approval
+# card. The list is consulted only on the verb; `unsafe` and `deny` never reach
+# here, so it can promote and never override.
+#
+# It is deliberately NOT parity with voitta-yolt 1.6.0, whose `safe` set this
+# replaces. Measured against 1.6.0: `git branch -D x`, `git remote add`,
+# `git config user.email x@y` and `gh api repos/o/r` were all `safe` there, and
+# all four mutate. Reproducing that set would re-import the holes #148 closed.
+#
+# The bar for entry is that no flag turns the command into a write. That is why
+# `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
+# `find` (-delete, -exec) and `xargs` (runs its argument) are absent, and why
+# `awk` is absent despite reading: its program can call system(), and `tree` is
+# absent because -o writes its output to a file. `sed` is in FS_VERBS already,
+# as the writer -i makes it.
+READ_VERBS = frozenset((
+    "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
+    "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep", "rg",
+    "jq", "id", "uname", "printenv", "ps",
+))
+
+# git subcommands that cannot mutate the repository whatever follows them.
+# `branch`, `remote`, `config`, `tag`, `checkout` and `switch` are absent because
+# a flag flips each into a write (-D, add, a value, -d, --). `grep` is absent
+# because `git grep -O<cmd>` opens matches in a pager of its choosing, which
+# runs that command even when stdout is a pipe -- measured, not assumed.
+GIT_READ = frozenset((
+    "status", "log", "show", "diff", "rev-parse", "ls-files", "blame",
+    "describe", "shortlog", "cat-file", "ls-tree",
+))
+
+# `gh <noun> <action>` pairs that only read. `api` is deliberately absent: it
+# takes -X POST, and it reaches any repo the token reaches, which is the open
+# scope question in #150.
+GH_READ_NOUNS = frozenset(("pr", "issue", "repo", "run", "workflow", "release", "label"))
+GH_READ_ACTIONS = frozenset(("list", "view", "status", "diff", "checks"))
+
+# `aws <service> <operation>` where the operation only reads. Everything else,
+# `cp`/`mv`/`rm`/`sync` included, falls through and parks.
+AWS_READ_PREFIXES = ("list-", "get-", "describe-")
+
+# ...except these, which are read-prefixed and still write a local file. The
+# AWS CLI spells that destination as a bare trailing positional -- its own help
+# for s3api get-object: "outfile (string) Filename where the content will be
+# saved. Note that the outfile parameter is specified without an option name
+# such as --outfile." Having no option name is exactly what makes it
+# unfilterable by flag, so the operations are named instead.
+#
+# This is a deny set, not a proof: the sandbox is what bounds an operation not
+# listed here, confining the write to the channel's tree the same as any
+# FS_VERBS write. What the list buys is that the grant layer stops calling such
+# a command "read-only" while it writes.
+AWS_WRITES_OUTFILE = frozenset(("get-object", "get-object-torrent", "get-media"))
+
+# ...and these, which read nothing on this machine and hand back credentials.
+# They do not mutate, so calling them "not a read" needs the #149 argument
+# rather than the mutation one: a fetch is read-only here while being an effect
+# out there, and these are read-only here while putting secret material into a
+# channel. The redactor is not a second line for this -- `tools.py` says it
+# where it matters: "a bare token has no shape the redactor can catch" -- so a
+# secret this layer auto-runs is a secret in the transcript, which no later
+# denial undoes.
+#
+# Stricter than voitta-yolt 1.6.0 on purpose. Measured there: get-secret-value,
+# get-login-password, get-session-token and get-parameter --with-decryption all
+# classified `safe`, which on this side meant auto-run with no card. Inheriting
+# that was defensible while the classifier owned the read-only list. Asserting
+# it here is not.
+AWS_RETURNS_SECRET = frozenset((
+    "get-login-password", "get-authorization-token", "get-secret-value",
+    "get-parameter", "get-parameters", "get-parameters-by-path",
+    "get-session-token", "get-federation-token", "get-role-credentials",
+))
+
+# Global flags that take a separate value. Without these the value is read as
+# the subcommand -- `gh --repo o/r pr list` looks like `gh o/r r...`, which then
+# matches nothing and parks. That is the safe direction but it parks a real
+# read, so the common ones are named. An unknown flag still misparses and still
+# parks, which is why this list only ever adds working commands.
+GH_VALUE_FLAGS = frozenset(("-R", "--repo", "--hostname"))
+AWS_VALUE_FLAGS = frozenset((
+    "--profile", "--region", "--endpoint-url", "--output", "--query",
+    "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--color",
+))
+
 # Local git writes that need no repository state.
 GIT_LOCAL = frozenset(("add", "mv", "stash"))
 
@@ -60,6 +147,15 @@ _CONTAINERS = frozenset(("program", "list", "pipeline"))
 _SKIP = frozenset(("&&", "||", ";", "|", "&", "\n", ";;", "comment"))
 
 _DEV_OK = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
+
+# `<` is the only redirect operator that does not write. Anything else, and
+# anything unrecognized, counts as a write -- the fail-closed direction.
+_READ_REDIRECT = frozenset(("<",))
+
+
+def _reads_only(node):
+    retval = any(c.type in _READ_REDIRECT for c in node.children)
+    return retval
 
 
 def _text(node, src):
@@ -104,9 +200,13 @@ class _Walker:
     def __init__(self, src, start_dir, policy=None):
         self.src = src
         self.tracked = start_dir
+        self.start_dir = start_dir
         self.policy = policy or {}
         self.probe = gitstate.GitProbe()
         self.reasons = []
+        # Raised while walking the body of a redirect that writes to a real
+        # file, so a read verb under it is not granted as a read (#177).
+        self.writes_file = False
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -133,6 +233,7 @@ class _Walker:
         usual; the redirect is an in-tree write the sandbox confines, unless
         it names a device other than the three harmless ones."""
         body = None
+        writes = False
         for c in node.children:
             if c.type in ("command", "pipeline", "list"):
                 body = c
@@ -143,6 +244,13 @@ class _Walker:
                 target = _unquote(_text(dest, self.src))
                 if target.startswith("/dev/") and target not in _DEV_OK:
                     return (False, f"redirect to device {target}")
+                # A read verb stops being a read when its output lands in a
+                # file (#177). YOLT cannot tell us this -- `cat x`,
+                # `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one
+                # `unknown` to it, differing only in a reason string nobody
+                # parses -- so the redirect is seen here or not at all.
+                if not _reads_only(c) and target not in _DEV_OK:
+                    writes = True
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
                 continue
             else:
@@ -150,7 +258,10 @@ class _Walker:
         if body is None:
             return (False, "redirect without a command")
         before = len(self.reasons)
+        saved = self.writes_file
+        self.writes_file = self.writes_file or writes
         retval = self.walk(body)
+        self.writes_file = saved
         if retval[0] and len(self.reasons) > before:
             self.reasons[-1] += " > redirect"
         return retval
@@ -193,10 +304,22 @@ class _Walker:
             retval = (True, f"{verb}: in-tree write")
         elif verb == "git":
             retval = self.git(args)
+        elif verb == "gh":
+            retval = self.gh(args)
+        elif verb == "aws":
+            retval = self.aws(args)
+        elif verb in READ_VERBS and not self.writes_file:
+            retval = (True, f"{verb}: read-only")
         else:
             retval = None
         if retval is None or (retval[0] is False and verb == "git"):
-            decision, reason = yolt_gate.classify(text)
+            # The directory this segment would run in, never the agent
+            # process's (#182): 2.0.x's deny predicates read it, and a
+            # `cd` to a target we could not resolve falls back to the
+            # channel's root rather than to wherever this process sits.
+            decision, reason = yolt_gate.classify(
+                text, cwd=self.tracked or self.start_dir,
+            )
             if decision == "safe":
                 # "Read-only" is about this machine, and a fetch is read-only
                 # here while being an effect out there (#149). Without this the
@@ -225,6 +348,7 @@ class _Walker:
         directory = self.tracked
         sub = None
         rest = []
+        config_override = False
         i = 0
         # Global options come before the subcommand: `-C <dir>` retargets,
         # `-c key=val` takes a value, anything else dashed is skipped. After
@@ -250,15 +374,32 @@ class _Walker:
                 directory = _resolve(t[2:], directory)
                 i += 1
                 continue
-            if t == "-c" and i + 1 < len(args):
-                i += 2
+            # `git -c <key>=<value>` runs arbitrary commands through several
+            # config keys, and the subcommand still looks like a read. Measured
+            # against real git, each of these executed with stdout a pipe:
+            #     -c diff.external=CMD  git log -p --ext-diff
+            #     -c diff.external=CMD  git diff --ext-diff
+            #     -c core.fsmonitor=CMD git status
+            # The pager route does not fire (git pages only to a terminal), but
+            # these do, so no git command carrying an override is granted here.
+            if t == "-c" or t.startswith("-c") or t.startswith("--config-env"):
+                config_override = True
+                i += 2 if t == "-c" else 1
                 continue
             if t.startswith("-"):
                 i += 1
                 continue
             sub = t
             i += 1
-        if sub in GIT_LOCAL:
+        # `--output=F` / `-O F` make a read write a file; git's diff family
+        # accepts them after the subcommand.
+        writes_flag = any(
+            r == "-O" or r == "--output" or r.startswith(("-O", "--output="))
+            for r in rest if r
+        )
+        if config_override:
+            retval = (False, "git -c: a config override can run an arbitrary command")
+        elif sub in GIT_LOCAL:
             retval = (True, f"git {sub}: local")
         # Lowercase only: -B / -C reset an existing branch to HEAD, which is
         # a rewrite, not a creation.
@@ -272,8 +413,55 @@ class _Walker:
             else:
                 ok, why = self.probe.commit_allowed(directory)
                 retval = (ok, f"git commit: {why}")
+        elif sub in GIT_READ and not self.writes_file and not writes_flag:
+            retval = (True, f"git {sub}: read-only")
         else:
             retval = (False, f"git {sub}: not a local write")
+        return retval
+
+
+    def _words(self, args, value_flags=frozenset()):
+        """Non-flag words, or None if any argument is not a literal. A verb
+        whose subcommand this agent cannot read statically is not one it can
+        vouch for, so it falls through to YOLT and parks."""
+        retval = []
+        skip = False
+        for a in args:
+            t = _text(a, self.src) if _static(a) else None
+            if t is None:
+                return None
+            if skip:
+                skip = False
+                continue
+            if t in value_flags:
+                skip = True
+                continue
+            if not t.startswith("-"):
+                retval.append(t)
+        return retval
+
+    def gh(self, args):
+        """`gh <noun> <action>` when both only read. None otherwise, which falls
+        through to YOLT -- and at 2.0.x that means the command parks."""
+        words = self._words(args, GH_VALUE_FLAGS)
+        retval = None
+        if (words is not None and len(words) >= 2 and not self.writes_file
+                and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS):
+            retval = (True, f"gh {words[0]} {words[1]}: read-only")
+        return retval
+
+    def aws(self, args):
+        """`aws <service> <operation>` when the operation only reads. The scope
+        of what it may reach is policy's question, not this one: `_check_aws`
+        runs on every granted command the same as on an auto-run one."""
+        words = self._words(args, AWS_VALUE_FLAGS)
+        retval = None
+        if words is not None and len(words) >= 2 and not self.writes_file:
+            op = words[1]
+            if op in AWS_WRITES_OUTFILE or op in AWS_RETURNS_SECRET:
+                return None
+            if op == "ls" or op.startswith(AWS_READ_PREFIXES):
+                retval = (True, f"aws {words[0]} {op}: read-only")
         return retval
 
 

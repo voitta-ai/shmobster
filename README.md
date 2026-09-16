@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt >= 1.6.0, < 2.0.0   # a clone, not a package: exec classifier + secret_redact
+  - voitta-ai/voitta-yolt >= 2.0.1            # a clone, not a package: exec classifier + secret_redact
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -228,7 +228,7 @@ Not yet: DMs (#23 -- it only sees `app_mention` events) and arbitrary URLs
 One instance per machine (each its own Slack app + config). **Bringing one up
 on a second machine: [docs/NEW-MACHINE.md](docs/NEW-MACHINE.md)** -- the same
 steps plus what is true right now, which log lines to expect on first boot, the
-smoke test, and the one thing not to do (upgrade voitta-yolt past 1.6.0).
+smoke test, and the voitta-yolt version it needs (>= 2.0.1).
 
 One instance per machine (each its own Slack app + config):
 
@@ -400,27 +400,69 @@ One JSON config, no `.env`. Copy the example and fill it in:
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
 
-  **Supported range: >= 1.6.0 and < 2.0.0.**
+  **Supported range: >= 2.0.1.**
 
-  The floor is 1.6.0 rather than 1.2.0 -- which is where `--no-user-allow`
-  landed -- because four write-target holes closed between them, and one of
-  them mattered here. voitta-yolt#128 (1.3.0) read `$HOME/...` as a redirect
-  target: before it, `echo x > $HOME/.ssh/authorized_keys` classified **safe**,
-  and safe means this agent auto-runs it with no card. #127 (1.4.0) covers
-  agent-steering writes; #136 (1.5.0) and #138 (1.6.0) were silent upstream
-  rather than granted, so on this side they parked -- but pinning 1.6.0 takes
-  all four without anyone having to reason about which. Verified on 1.6.0:
+  The floor is 2.0.1 for two reasons, one inherited and one new.
 
-      echo x > $HOME/.ssh/authorized_keys   unsafe | writes to protected path
-      echo x > ~/.ssh/authorized_keys       unsafe | writes to protected path
+  The inherited one is write targets. Four holes closed between 1.2.0 -- where
+  `--no-user-allow` landed -- and 1.6.0, and one of them mattered here:
+  voitta-yolt#128 (1.3.0) read `$HOME/...` as a redirect target, and before it
+  `echo x > $HOME/.ssh/authorized_keys` classified **safe**, which on this side
+  means auto-run with no card. #127 (1.4.0) covers agent-steering writes; #136
+  (1.5.0) and #138 (1.6.0) were silent upstream rather than granted. All four
+  are inside the supported range.
 
-  The ceiling is 2.0.0 (#177). 2.0.0's Phase 3 cut
-  `rules/shell.json` from 136 entries to 28 -- it now carries only what YOLT
-  refuses to delegate -- so `cat`, `ls`, `grep`, `git status` and `gh pr list`
-  come back `unknown` rather than `safe`. For the PreToolUse hook those are the
-  same silent exit; here they are opposite verdicts, so on 2.0.0 every ordinary
-  read in a channel parks for a card. Startup probes `cat /dev/null` and says so
-  rather than letting it be discovered a command at a time.
+  The new one is `--cwd`, which arrived in 2.0.1 (voitta-yolt#145) alongside
+  the `deny` verdict becoming reachable from the CLI. `deny` is produced by
+  git-state predicates read from the directory the command would run in, so
+  without the flag the classifier judges whichever directory this agent process
+  happens to be in. That fails in both directions and announces neither: a
+  false deny citing a branch the channel never named, or -- from a non-git
+  directory -- no deny at all. Startup probes the flag with a command no
+  version calls anything but unsafe, because a classifier that predates it
+  takes `--cwd` as the command and answers about the flag string:
+
+      1.6.0, no flag:      cat README.md   safe    | cat: read-only
+      1.6.0, with --cwd:   cat README.md   unknown | no rule: --cwd
+
+  **2.0.x no longer answers "is this read-only", and that is by design.** Phase
+  3 cut `rules/shell.json` from 136 entries to 28 -- it now carries only what
+  YOLT refuses to delegate -- so `cat`, `ls`, `grep`, `git status` and
+  `gh pr list` come back `unknown`. For the PreToolUse hook `safe` and
+  `unknown` are the same silent exit, which made the deletions free there; here
+  they are opposite verdicts. Delegation is defined by *absence* of a rule, so
+  `cat` and a command YOLT never heard of are indistinguishable, and no upstream
+  change can separate them without restoring the list 2.0.0 deleted.
+
+  So the read-only set lives here now, as `grant.READ_VERBS` (#177). It is
+  consulted only when YOLT says `unknown`, never over `unsafe` or `deny` -- it
+  can promote, never override -- and it is deliberately **not** parity with
+  1.6.0's `safe` set, which included things that mutate:
+
+      git branch -D x                1.6.0: safe    2.0.1: unknown
+      git remote add o https://e/r   1.6.0: safe    2.0.1: unknown
+      git config user.email x@y      1.6.0: safe    2.0.1: unknown
+      gh api repos/o/r               1.6.0: safe    2.0.1: unknown
+
+  The bar for entry is that no flag turns the command into a write, which is
+  why `sort` (`-o`), `uniq` (output positional), `find` (`-delete`), `xargs`
+  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent, and why
+  `git grep` is absent from the git list -- `git grep -O<cmd>` runs the pager it
+  is handed, whether or not anything is a terminal.
+
+  Two more classes are excluded although they never mutate. AWS operations that
+  write a local file (`s3api get-object` and kin) are excluded because the CLI
+  spells that destination as a bare trailing positional, with no option name to
+  filter on. AWS operations that hand back a credential (`get-secret-value`,
+  `get-login-password`, `get-session-token`, `get-parameter`, ...) are excluded
+  on #149's argument rather than the mutation one: a fetch is read-only here
+  while being an effect out there, and so is a command that puts secret
+  material into a channel. The redactor does not cover that case -- a bare token
+  has no shape to catch. This is stricter than 1.6.0, where all of them were
+  `safe`. A read verb also stops
+  being a read when its output lands in a file: YOLT cannot tell us, since
+  `cat x`, `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one `unknown`
+  to it, so the redirect is caught in the grant layer's AST walk or not at all.
 
   The classifier is invoked with `--no-user-allow` (#148), so "read-only" means
   what YOLT's own rules say. Without it, YOLT also promotes anything matching a

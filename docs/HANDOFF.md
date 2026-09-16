@@ -37,8 +37,12 @@ The one-sentence version, which is the part worth carrying: **2.0.0 collapses
 `unknown`, and a consumer that must fail closed on the second has no choice but
 to fail closed on the first.**
 
-Until #177 resolves, the supported range is **voitta-yolt >= 1.2.0 and <
-2.0.0**, and startup says so: the preflight probe is `cat /dev/null`, a command
+Until #177 resolves, the supported range is **voitta-yolt >= 1.6.0 and <
+2.0.0**. The floor is 1.6.0, not the 1.2.0 where `--no-user-allow` landed: four
+write-target holes closed in between, and voitta-yolt#128 (1.3.0) is the one
+that mattered here -- before it, `echo x > $HOME/.ssh/authorized_keys`
+classified *safe*, which on this side means auto-run with no card. Startup says
+so: the preflight probe is `cat /dev/null`, a command
 Phase 3 delegated, rather than the `echo` it used to be -- `echo` is one of the
 three things 2.0.0 still calls safe, so the old probe would have passed on a
 classifier that cards every read.
@@ -80,7 +84,7 @@ The number is **v0.8.0** (see **Versioning** below for why it is not 1.0.0).
 2. ~~Read the yolt side's unsafe-to-safe list~~ -- done, and the question was
    the wrong one. Nothing moved *to* `safe`; everything useful moved *off* it.
    Ask both directions next time.
-3. #177 resolved, or a decision to ship against `>= 1.2.0, < 2.0.0` and adopt
+3. #177 resolved, or a decision to ship against `>= 1.6.0, < 2.0.0` and adopt
    2.0.x later.
 4. Then the three operator notes below.
 
@@ -95,10 +99,12 @@ quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
    `"allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]`.
 2. **The required voitta-yolt version, by release number** (#148, #177).
    shmobster passes `--no-user-allow`, which landed in voitta-yolt 1.2.0
-   (voitta-ai/voitta-yolt#126); 2.0.0 is **not** supported yet, for the reason
-   above. State the range -- `>= 1.2.0, < 2.0.0` -- and link both releases, so
-   an operator who runs `claude plugin update` knows why the newest is the
-   wrong one here.
+   (voitta-ai/voitta-yolt#126), but the supported floor is **1.6.0** -- four
+   write-target fixes closed between them, one of which (#128) was an active
+   grant on `$HOME/...` redirect targets. 2.0.0 is **not** supported, for the
+   reason above. State the range -- `>= 1.6.0, < 2.0.0` -- and link the 1.6.0
+   release, so an operator who runs `claude plugin update` knows why the newest
+   is the wrong one here.
 3. **`logging.path`, and one `chmod 600` of the existing log** (#155). With the
    key set the agent owns a rotated 0600 file; without it, nothing changes and
    the launchd-redirected log keeps growing -- it was **185 MB, mode 0644** on

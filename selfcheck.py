@@ -2560,4 +2560,26 @@ assert _ok, ("an in-scope subdirectory must still work", _why)
 _ok, _why = policy.check("gh myalias repos/other/secret/issues", _gh_pol)
 assert not _ok and "other/secret" in _why, (_ok, _why)
 
+# EVERY target a command names, not the first one found. `gh api
+# repos/other/secret/issues -R mine/repo` reaches other/secret whichever of the
+# two is checked, so checking either alone lets the other through.
+for _c in ("gh api repos/other/secret/issues -R mine/repo",
+           "gh api repos/other/secret/issues --repo mine/repo",
+           "gh api repos/mine/repo/x --repo other/secret"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok, (_c, _why)
+
+# a `..` in an API path means the repo the text shows is not necessarily the
+# repo the request reaches, so the shape is refused rather than normalised --
+# normalising would mean being sure ours matches whatever the API does
+_ok, _why = policy.check("gh api repos/mine/repo/../../other/secret/issues", _gh_pol)
+assert not _ok and "cannot resolve" in _why, (_ok, _why)
+
+# GitHub owner and repo names are case-insensitive, so `mine/*` has to admit
+# `MINE/REPO`; a case-sensitive compare refused a repo that is in scope
+for _c in ("gh api repos/MINE/REPO/issues", "gh repo view MINE/repo"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert _ok, (_c, _why)
+assert not policy.check("gh api repos/OTHER/SECRET/x", _gh_pol)[0]
+
 print(f"selfcheck OK -- shmobster {_b}")

@@ -64,25 +64,46 @@ def classify(command):
     return retval
 
 
-def preflight():
-    """Warnings for a YOLT that does not honor --no-user-allow.
+# The probe command, and the choice matters (#177). `echo` is one of three
+# things still classified `safe` by voitta-yolt 2.0.0, whose Phase 3 cut
+# rules/shell.json from 136 entries to 28 -- so a preflight probing `echo`
+# passes on a classifier under which `cat`, `ls`, `grep`, `git status` and
+# `gh pr list` all come back `unknown` and every ordinary read in a channel
+# parks for a card. `cat` is the probe because it is the read this agent
+# actually runs most, and because a classifier that cannot call it read-only
+# is one this agent cannot use, whatever its version string says.
+_PROBE = "cat /dev/null"
 
-    An older classifier takes its command from argv[1], so the flag lands there
-    and the real command is never classified -- every verdict becomes a verdict
-    about the string "--no-user-allow". That fails closed (everything parks),
-    which is safe but unusable, and it is silent. Worse, a version that ignores
-    the flag while still classifying correctly would go on inheriting the
-    allow-lists with nothing to show for it. Both are caught here: the count of
-    allow patterns in play has to be reported, and it has to be zero."""
+
+def preflight():
+    """Warnings for a YOLT this agent cannot run on.
+
+    Three failure modes, all silent, all ending in "every command parks":
+
+    An older classifier takes its command from argv[1], so `--no-user-allow`
+    lands there and every verdict becomes a verdict about that string. One that
+    accepts the flag and inherits the allow-lists anyway is worse -- the old
+    auto-run surface with nothing to show for it, which is why the count has to
+    be reported and has to be zero.
+
+    And one that no longer answers "is this read-only" for ordinary reads
+    (#177). That is not a malfunction upstream: for the PreToolUse hook `safe`
+    and `unknown` are the same silent exit, so delegating a command costs
+    nothing there. Here they are opposite verdicts, so the probe asks about a
+    command that was delegated rather than one that survived."""
     retval = []
-    data, err = _classify_raw("echo preflight")
+    data, err = _classify_raw(_PROBE)
     if err:
         retval.append(err)
         return retval
     if data.get("decision") != "safe":
         retval.append(
-            f"yolt does not understand {_NO_USER_ALLOW} (a read-only command came back "
-            f"{data.get('decision')!r}); every command will park. Upgrade voitta-yolt to 1.2.0+"
+            f"yolt called {_PROBE!r} {data.get('decision')!r} rather than safe, so every "
+            "ordinary read in a channel will park for an approval card. Either this yolt "
+            f"predates {_NO_USER_ALLOW} (1.2.0+) and classified the flag instead of the "
+            "command, or it is 2.0.0+, which delegates reads to the host instead of "
+            "classifying them (#177). Use a yolt between 1.2.0 and 1.6.0 until #177 says "
+            "otherwise"
         )
     elif "allow_patterns" not in data:
         retval.append(

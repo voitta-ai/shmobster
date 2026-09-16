@@ -1583,6 +1583,7 @@ sandbox.roots = _real_roots
 # (#148). classify() passes --no-user-allow, and preflight() refuses to let a
 # YOLT that cannot honor it pass silently -- silence here would mean the Slack
 # agent is auto-running whatever the operator once allowed themselves.
+_NO_USER_ALLOW_HINT = "predates --no-user-allow"
 _ya_dir = tempfile.mkdtemp()
 
 
@@ -1598,6 +1599,16 @@ _ya_good = _yolt_stub("good.py", (
     "flag = '--no-user-allow' in sys.argv[1:]\n"
     "print(json.dumps({'decision': 'safe', 'reason': ' '.join(sys.argv[1:-1]),\n"
     "                  'allow_patterns': 0 if flag else 106}))\n"
+))
+# answers, honors the flag, and delegates ordinary reads to the host instead of
+# calling them read-only -- voitta-yolt 2.0.0's shape (#177). Safe for `echo`,
+# which is one of three commands its Phase 3 left classified, and unknown for
+# the `cat` this agent actually runs.
+_ya_delegating = _yolt_stub("delegating.py", (
+    "cmd = sys.argv[-1]\n"
+    "safe = cmd.split(' ')[0] in ('echo', 'pwd')\n"
+    "print(json.dumps({'decision': 'safe' if safe else 'unknown',\n"
+    "                  'reason': 'stub', 'allow_patterns': 0}))\n"
 ))
 # pre-1.2.0: argv[1] is the command, so the flag is classified instead of it
 _ya_old = _yolt_stub("old.py", (
@@ -1618,11 +1629,25 @@ try:
     # the flag reaches the classifier, ahead of the command
     assert _REAL_CLASSIFY("cat x") == ("safe", "--no-user-allow"), _REAL_CLASSIFY("cat x")
     config.YOLT_CLASSIFIER = _ya_old
-    assert "does not understand" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    # pre-1.2.0 and 2.0.0+ share one warning, because they share the symptom
+    # the operator has to act on: the probe came back not-safe, so every
+    # ordinary read parks. The message names both causes and the fix for each.
+    _ow = yolt_gate.preflight()
+    assert _ow and "will park for an approval card" in _ow[0], _ow
+    assert _NO_USER_ALLOW_HINT in _ow[0], _ow
     config.YOLT_CLASSIFIER = _ya_quiet
     assert "cannot be confirmed" in yolt_gate.preflight()[0], yolt_gate.preflight()
     config.YOLT_CLASSIFIER = _ya_leaky
     assert "despite" in yolt_gate.preflight()[0], yolt_gate.preflight()
+    # ...and a classifier that delegates reads rather than classifying them is
+    # caught, which probing `echo` would not have done: it is still safe there
+    config.YOLT_CLASSIFIER = _ya_delegating
+    _dw = yolt_gate.preflight()
+    assert _dw and "will park for an approval card" in _dw[0], _dw
+    assert "#177" in _dw[0], "the warning has to name where the argument lives"
+    assert yolt_gate._PROBE.split()[0] != "echo", (
+        "the probe must be a command Phase 3 delegated, or this check cannot fire"
+    )
     config.YOLT_CLASSIFIER = ""
     assert "not configured" in yolt_gate.preflight()[0], yolt_gate.preflight()
     # ...and an unrunnable classifier still fails closed, as it always did

@@ -2309,6 +2309,24 @@ try:
     assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
     for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
         assert _gd_run(_cmd) == 0, _cmd
+    # the pattern matches a gitdir and nothing that merely looks like one: a
+    # `.github/` directory, a project's own `hooks/`, and any plain `config`
+    # are ordinary files a channel writes all the time
+    for _cmd in ("mkdir -p .github/workflows && echo x > .github/workflows/ci.yml",
+                 "mkdir -p .github/hooks && echo x > .github/hooks/thing",
+                 "mkdir -p hooks && echo x > hooks/pre-commit",
+                 "mkdir -p src/hooks && echo x > src/hooks/useThing.ts",
+                 "echo x > config",
+                 "mkdir -p pkg && echo x > pkg/config"):
+        assert _gd_run(_cmd) == 0, _cmd
+    # ...while a repository vendored *inside* the channel's tree is covered on
+    # purpose: its hooks run exactly like the outer repo's. The deny is not
+    # anchored to the channel's own gitdir for that reason.
+    subprocess.run("mkdir -p vendor/dep && git init -q vendor/dep",
+                   cwd=_gd_root, shell=True, check=True)
+    assert _gd_run("echo x > vendor/dep/.git/hooks/pre-commit") != 0
+    assert _gd_run("echo x > vendor/dep/.git/config") != 0
+    assert _gd_run("echo x > vendor/dep/src.txt") == 0
 finally:
     config.WORKSPACE = _gd_saved_ws
 

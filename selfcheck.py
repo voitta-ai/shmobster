@@ -2498,4 +2498,112 @@ if os.path.exists(_req_in):
     # ...and the lock is hashed, which is what --require-hashes enforces
     assert "--hash=sha256:" in open(_req_lock).read(), "the lock carries no hashes"
 
+# 39) github_repos resolves the operation's target, not just the checkout's
+# origin (#150). Every spelling below reached any repo the token reaches while
+# the check knew only `-R X`, `--repo X` and a bare positional -- and `gh api*`
+# was commonly allow-listed, so out-of-scope and uncarded coincided.
+_gh_root = os.path.realpath(tempfile.mkdtemp())
+subprocess.run(["git", "init", "-q", "."], cwd=_gh_root, check=True)
+subprocess.run(["git", "remote", "add", "origin", "https://github.com/mine/repo.git"],
+               cwd=_gh_root, check=True)
+_gh_pol = {"cwd": _gh_root, "github_repos": ["mine/*"]}
+for _c in (
+    "gh api repos/other/secret/contents/README.md",   # the path form
+    "gh api /repos/other/secret/issues",              # ...with a leading slash
+    "gh api https://api.github.com/repos/other/secret/issues",
+    "gh issue list --repo=other/secret",              # the attached flag
+    "gh -Rother/secret pr list",                      # the attached short flag
+    "GH_REPO=other/secret gh issue list",             # an environment prefix
+    "git -C /tmp push",                               # a different directory
+    "gh repo view other/secret",
+    "git clone https://github.com/other/secret",
+):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok, (_c, _why)
+# `gh api` that names no repo this policy can resolve is refused rather than
+# waved through: the target may be inside a GraphQL document or absent, and
+# "could not tell" has to mean no while a whitelist exists, or the one command
+# that reaches every repo is the one command never checked.
+for _c in ("gh api graphql -f query=x", "gh api user"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok and "resolve" in _why, (_c, _ok, _why)
+# ...and the in-scope forms of each still pass, or this is a gate that stopped
+# the work rather than the hazard
+for _c in ("gh pr list", "gh api repos/mine/repo/issues", "gh issue list --repo=mine/repo",
+           "GH_REPO=mine/repo gh issue list", "git push", "git log --oneline",
+           "gh repo view mine/repo"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert _ok, (_c, _why)
+# with no whitelist the key is absent and nothing is checked, which is the
+# default and stays the default
+assert policy.check("gh api repos/any/thing", {"cwd": _gh_root})[0]
+
+# `-C <dir>` is relative to where the command RUNS -- the channel's cwd -- not
+# to wherever this agent process sits. Unresolved it failed closed with
+# "undeterminable", which is safe and also blocks a legitimate in-scope
+# subdirectory for the wrong reason.
+os.makedirs(os.path.join(_gh_root, "vendor"), exist_ok=True)
+os.makedirs(os.path.join(_gh_root, "inscope"), exist_ok=True)
+for _sub, _remote in (("vendor", "https://github.com/other/secret.git"),
+                      ("inscope", "https://github.com/mine/other.git")):
+    _d = os.path.join(_gh_root, _sub)
+    subprocess.run(["git", "init", "-q", "."], cwd=_d, check=True)
+    subprocess.run(["git", "remote", "add", "origin", _remote], cwd=_d, check=True)
+for _c in ("git -C vendor push", "git -C ./vendor push"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+_ok, _why = policy.check("git -C inscope push", _gh_pol)
+assert _ok, ("an in-scope subdirectory must still work", _why)
+
+# a user-defined `gh alias` expands to `api` inside gh, so the literal token
+# need never appear in what this sees. The path is what gives the target away.
+_ok, _why = policy.check("gh myalias repos/other/secret/issues", _gh_pol)
+assert not _ok and "other/secret" in _why, (_ok, _why)
+
+# EVERY target a command names, not the first one found. `gh api
+# repos/other/secret/issues -R mine/repo` reaches other/secret whichever of the
+# two is checked, so checking either alone lets the other through.
+for _c in ("gh api repos/other/secret/issues -R mine/repo",
+           "gh api repos/other/secret/issues --repo mine/repo",
+           "gh api repos/mine/repo/x --repo other/secret"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert not _ok, (_c, _why)
+
+# a `..` in an API path means the repo the text shows is not necessarily the
+# repo the request reaches, so the shape is refused rather than normalised --
+# normalising would mean being sure ours matches whatever the API does
+_ok, _why = policy.check("gh api repos/mine/repo/../../other/secret/issues", _gh_pol)
+assert not _ok and "cannot resolve" in _why, (_ok, _why)
+
+# GitHub owner and repo names are case-insensitive, so `mine/*` has to admit
+# `MINE/REPO`; a case-sensitive compare refused a repo that is in scope
+for _c in ("gh api repos/MINE/REPO/issues", "gh repo view MINE/repo"):
+    _ok, _why = policy.check(_c, _gh_pol)
+    assert _ok, (_c, _why)
+assert not policy.check("gh api repos/OTHER/SECRET/x", _gh_pol)[0]
+
+# A repo-less `gh` command falls back to the checkout's origin, and that is
+# correct rather than a hole: `gh pr list` is the common case and it names no
+# repo. Refusing every repo-less gh command -- the tempting "fail closed"
+# reading -- would card the most-used command in the tool.
+assert policy.check("gh pr list", _gh_pol)[0], "gh pr list must resolve through origin"
+# What makes that safe is that the one way to hide a target from this check --
+# a `gh alias` expanding to `api ...` inside gh, where the word never reaches
+# us -- is not something a channel can create. The sandbox denies gh's config,
+# including through gh itself. That is the fact the argument rests on, so it is
+# asserted rather than assumed.
+if _HAVE_SANDBOX:
+    _al_root = os.path.realpath(tempfile.mkdtemp())
+    _al_saved = config.WORKSPACE
+    try:
+        config.WORKSPACE = _al_root
+        _al_pol = {"cwd": _al_root, "allow_write": [_al_root]}
+        for _cmd in ("mkdir -p ~/.config/gh && echo aliases: > ~/.config/gh/config.yml",
+                     "echo x >> ~/.config/gh/config.yml"):
+            _p = subprocess.run(_REAL_WRAP(_cmd, _al_pol), capture_output=True,
+                                text=True, timeout=15, cwd=_al_root)
+            assert _p.returncode != 0, _cmd
+    finally:
+        config.WORKSPACE = _al_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

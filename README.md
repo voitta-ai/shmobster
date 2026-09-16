@@ -562,6 +562,24 @@ machine's channel layout is versioned separately from the token/key config:
     exec-time, so `"~/g/project"` works.
   - `github_repos` -- git/gh limited to these `owner/repo` globs (e.g.
     `["your-org/*"]` or a single `["org/repo"]`). Omit for no repo restriction.
+
+    It resolves the **operation's target**, not just the checkout's origin
+    (#150): `-R`/`--repo` in both spellings, a `GH_REPO=` environment prefix,
+    the `repos/OWNER/REPO/...` path `gh api` addresses, a clone or push URL,
+    a bare positional `owner/repo`, and the directory `git -C` retargets to.
+    A `gh api` call whose repo it cannot resolve -- `gh api graphql`, whose
+    target lives inside the query, or `gh api user`, which has none -- is
+    **refused** while a whitelist is set, because "could not tell" has to mean
+    no for the one command that reaches every repo the token does.
+
+    **It is still a textual guard, at parity with `exclude`'s first half, and
+    not containment.** It reads the command; it does not hold the credential.
+    A repo named through a spelling not listed above, a URL assembled at
+    runtime, or a redirect to somewhere else all pass it. There is no kernel
+    behind this one -- the sandbox confines the filesystem, never the network
+    (#116) -- so what bounds the blast radius is the token's own scope, and a
+    channel whose token can reach a repo it must not touch is a token problem
+    rather than a policy one.
   - `aws_profile` -- sets `AWS_PROFILE` for the channel's commands; a command
     overriding to another profile is blocked. Omit for no AWS.
   - `exclude` -- paths under `cwd` to keep off-limits, e.g.

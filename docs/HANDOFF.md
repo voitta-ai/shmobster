@@ -9,7 +9,7 @@ This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
-Current state: **v0.11.0 is cut; the live box is still on v0.7.2 until someone
+Current state: **v0.12.0 is cut; the live box is still on v0.7.2 until someone
 upgrades it** -- and that upgrade is now two versions and one inverted
 instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The
 exec path is YOLT (its own rules only, #148) -> egress allow-list (#149) ->
@@ -27,9 +27,10 @@ companions decide what auto-runs -- consulted only on `unknown`, never over
 `unsafe` or `deny`. The supported voitta-yolt range is `>= 2.0.1`, which
 reverses what v0.8.0 shipped.
 
-8 issues are open; two carry the `security` label -- #186 and the #123
-tracker. #152 closed with v0.10.0, #150 with v0.11.0, and #1 closed as
-superseded by the README and this file.
+**The security re-audit is closed.** #123 and all ten of its findings are
+resolved, along with #184 and #186, which the re-audit did not find and the
+adversarial reviews did. What remains is feature work: #23, #62, #140, plus
+#190 and #191. #1 closed as superseded by the README and this file.
 
 ## The v0.8.0 release, and the range it pinned
 

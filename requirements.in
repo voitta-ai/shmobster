@@ -1,0 +1,25 @@
+# Direct dependencies. `requirements.txt` is generated from this file and is
+# the lock -- pinned, hashed and resolved for every platform this runs on:
+#
+#     uv pip compile --universal --generate-hashes \
+#         --python-version 3.12 -o requirements.txt requirements.in
+#
+# Install still reads requirements.txt, so nothing about deploying changes.
+#
+# CI does not re-compile this to check the two agree. It would have to resolve
+# against live PyPI, so the diff would fail the moment any transitive package
+# published a release -- a red build caused by someone else's upload. Editing
+# this file without recompiling is self-revealing instead: the package does not
+# get installed, and selfcheck says so.
+slack-bolt>=1.18
+litellm>=1.100
+tree-sitter>=0.21
+tree-sitter-bash>=0.21
+pyyaml>=6
+
+# Transitive, and named here anyway (#152). aiohttp arrives through litellm and
+# slack-sdk, so nothing in this repo chose its version -- and the 3.14 line is
+# where a batch of request-smuggling and redirect credential-leak fixes landed.
+# A floor on a dependency nobody declared is the only way to say "not below
+# this" about a package we do not import directly.
+aiohttp>=3.14.3

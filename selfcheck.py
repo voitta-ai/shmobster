@@ -1100,6 +1100,34 @@ assert _dep["litellm_params"]["timeout"] == 45, _dep
 _dep = llm._deployment("fb0", {"name": "y", "model": "openai/gpt", "timeout_sec": 12})
 assert _dep["litellm_params"]["timeout"] == 12, "a slow rung may say so per-row"
 
+# 20c) the Router actually builds against the installed litellm (#152). The
+# rest of this file stubs `llm.complete`, so nothing else here would notice
+# litellm renaming a Router kwarg, moving CustomLogger, or changing the failure
+# callback's signature -- all of which are import- or construction-time breaks
+# that would otherwise be found by a channel at 3am rather than by CI.
+# Construction is offline: Router() resolves deployments, it does not dial out.
+_rt_saved_wf = config.WATERFALL
+try:
+    config.WATERFALL = [
+        {"name": "primary-v", "model": "openai/gpt-4o", "api_key": "k"},
+        {"name": "fallback-v", "model": "gemini/gemini-flash-latest", "api_key": "k"},
+    ]
+    llm._invalidate()
+    _router = llm._build()
+    _names = [m["model_name"] for m in _router.model_list]
+    assert _names == ["primary", "fb0"], _names
+    # the fallback wiring is positional, and a rename here is a silent
+    # single-vendor waterfall rather than an error
+    assert _router.fallbacks == [{"primary": ["fb0"]}], _router.fallbacks
+    # the failure callback is what parks a vendor (#80); it hangs off litellm's
+    # global callback list, so the base class has to keep resolving
+    llm._watch()
+    assert any(isinstance(_cb, llm._BudgetWatch) for _cb in litellm.callbacks), litellm.callbacks
+    assert hasattr(llm._BudgetWatch, "async_log_failure_event")
+finally:
+    config.WATERFALL = _rt_saved_wf
+    llm._invalidate()
+
 # 21) budget parking (#80): a vendor that reports no budget is skipped until its
 # window expires, instead of being re-dialled every turn
 state._PATH = os.path.join(tempfile.mkdtemp(), "state.json")

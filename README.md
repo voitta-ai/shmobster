@@ -192,7 +192,7 @@ someone who has done it before.
 
     git clone https://github.com/voitta-ai/shmobster && cd shmobster
     git clone https://github.com/voitta-ai/voitta-yolt ../voitta-yolt   # the exec classifier
-    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.txt
     cp examples/shmobster-config-example.json shmobster-config.json
     cp examples/shmobster-policies-example.json shmobster-policies.json
     chmod 600 shmobster-config.json shmobster-policies.json
@@ -234,7 +234,7 @@ One instance per machine (each its own Slack app + config):
 
 1. Clone this repo and [voitta-ai/voitta-yolt](https://github.com/voitta-ai/voitta-yolt)
    (the exec classifier).
-2. `python3 -m venv .venv && .venv/bin/pip install -r requirements.txt`
+2. `python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.txt`
 3. Create the Slack app (below) -> bot + app tokens.
 4. `cp examples/shmobster-config-example.json shmobster-config.json` and fill:
    Slack tokens, `agent.label`, `channels`, `waterfall` keys, and
@@ -399,6 +399,21 @@ One JSON config, no `.env`. Copy the example and fill it in:
   `cwd`: working dir for commands. `timeout_sec`: per
   command. (Clone voitta-yolt first; its `tree-sitter` + `tree-sitter-bash` deps
   are in requirements.txt.)
+
+  **`requirements.txt` is a lock, not a wish list (#152).** It is generated from
+  `requirements.in` -- the five direct dependencies plus one floor on a
+  transitive one -- and carries every transitive package pinned with hashes,
+  resolved for every platform this runs on:
+
+      uv pip compile --universal --generate-hashes \
+          --python-version 3.12 -o requirements.txt requirements.in
+
+  Install with `--require-hashes` so the lock is enforced rather than
+  suggested. The floor that matters is `aiohttp>=3.14.3`: it arrives through
+  litellm and slack-sdk, so nothing here chose its version, and the 3.14 line
+  is where a batch of request-smuggling and redirect credential-leak fixes
+  landed. CI runs `pip-audit` on every push, which is what would notice the
+  next one.
 
   **Supported range: >= 2.0.1.**
 
@@ -663,7 +678,7 @@ a policy is `set_policy`, trusted users only.
 
 #### Run
 
-    python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    python3 -m venv .venv && .venv/bin/pip install --require-hashes -r requirements.txt
     .venv/bin/python selfcheck.py            # offline sanity check
     .venv/bin/python -m shmobster.slack_app  # start the agent (foreground)
 
@@ -695,7 +710,7 @@ X" means their `git pull`, not this repo's. In that order:
     git -C /path/to/voitta-yolt pull
     git -C /path/to/skillz pull            # and each other skills.paths entry
     git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
-    git pull && .venv/bin/pip install -r requirements.txt
+    git pull && .venv/bin/pip install --require-hashes -r requirements.txt
     .venv/bin/python selfcheck.py
     deploy/service.sh restart
 

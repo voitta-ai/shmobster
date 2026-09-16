@@ -19,8 +19,21 @@ jobs:
           python-version: '3.12'
           cache: pip
 
+      # --require-hashes, so the lock is the lock (#152). Without it pip will
+      # happily install a resolution the lock does not describe, and the file
+      # becomes a suggestion. It also fails loudly if requirements.txt was
+      # hand-edited instead of regenerated from requirements.in.
       - name: Install
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt
+
+      # Known-vulnerability gate. The dependency that mattered here arrived
+      # transitively -- aiohttp, through litellm and slack-sdk -- so nothing in
+      # this repo chose its version and nothing would have noticed it aging
+      # (#152). This is what notices.
+      - name: pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit
 
       # The repo's whole test surface. Offline by design: no Slack, no network,
       # no real keys -- it stubs the env refs the example config makes.

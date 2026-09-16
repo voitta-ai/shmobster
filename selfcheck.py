@@ -338,6 +338,34 @@ assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "
 _none = slack_tools.dispatch("slack_post", {"text": "hi"}, _fs, {"channel": None, "policy": {}})
 assert "not in a channel" in _none, _none
 
+# a policy that names one channel as a bare string is one id, not a haystack.
+# Written "C9" instead of ["C9"], `target in named` is a substring test, so a
+# policy naming C99999 would admit C9 -- measured, it posted.
+for _pol, _want_ok in (({"slack_channels": "C9"}, True),
+                       ({"slack_channels": "C99999"}, False),
+                       ({"slack_channels": None}, False),
+                       ({"slack_channels": 7}, False)):
+    _fs.last = None
+    _r = slack_tools.dispatch(
+        "slack_post", {"channel_id": "C9", "text": "x"}, _fs, {"channel": _ex_ch, "policy": _pol})
+    assert (_fs.last is not None) == _want_ok, (_pol, _r)
+
+# a falsy channel_id never reaches the client, however it is spelled
+for _a in ({"channel_id": "", "text": "x"}, {"channel_id": None, "text": "x"}, {"text": "x"}):
+    _fs.last = None
+    assert "not in a channel" in slack_tools.dispatch(
+        "slack_post", _a, _fs, {"channel": None, "policy": {}})
+    assert _fs.last is None, _a
+
+# a permalink naming another workspace's host is still scoped by its channel id
+_fs.last = None
+_r = slack_tools.dispatch(
+    "slack_read_permalink",
+    {"url": "https://elsewhere.slack.com/archives/C9/p1234567890123456"},
+    _fs, _here)
+assert "refusing to reach C9" in _r, _r
+assert _fs.last is None, _fs.last
+
 
 # 9) channel-context injection into the system prompt
 _capch = {}

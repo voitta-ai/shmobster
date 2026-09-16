@@ -132,6 +132,14 @@ def _scope(target, ctx):
     if not target or target == here:
         return (True, "")
     named = ((ctx or {}).get("policy") or {}).get("slack_channels") or []
+    # A bare string is one id, not a haystack. Written `"slack_channels": "C9"`
+    # instead of `["C9"]` -- an easy thing to type -- `target in named` becomes
+    # a substring test, and a policy naming `C99999` would admit `C9`. Measured
+    # before this line existed: it posted.
+    if isinstance(named, str):
+        named = [named]
+    elif not isinstance(named, (list, tuple, set)):
+        named = []
     if target in named:
         return (True, "")
     retval = (
@@ -177,11 +185,14 @@ def dispatch(name, args, client, ctx=None):
             if not ok:
                 return why
             return _read_permalink(client, url)
+        # "Is there a target at all" before "may we reach it": a falsy target
+        # never reached the client either way, but the order said otherwise to
+        # anyone reading it.
+        if not target:
+            return f"{name}: no channel_id given and this turn is not in a channel"
         ok, why = _scope(target, ctx)
         if not ok:
             return why
-        if not target:
-            return f"{name}: no channel_id given and this turn is not in a channel"
         if name == "slack_read_thread":
             retval = _read_thread(client, target, args.get("thread_ts", ""))
         elif name == "slack_read_channel":

@@ -225,6 +225,11 @@ Not yet: DMs (#23 -- it only sees `app_mention` events) and arbitrary URLs
 
 ### New instance setup
 
+One instance per machine (each its own Slack app + config). **Bringing one up
+on a second machine: [docs/NEW-MACHINE.md](docs/NEW-MACHINE.md)** -- the same
+steps plus what is true right now, which log lines to expect on first boot, the
+smoke test, and the one thing not to do (upgrade voitta-yolt past 1.6.0).
+
 One instance per machine (each its own Slack app + config):
 
 1. Clone this repo and [voitta-ai/voitta-yolt](https://github.com/voitta-ai/voitta-yolt)

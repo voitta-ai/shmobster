@@ -10,7 +10,7 @@ import re
 import shlex
 import subprocess
 
-from . import config
+from . import config, spine
 
 
 def resolve(channel):
@@ -261,8 +261,69 @@ def _check_self(command, policy):
     return (True, "")
 
 
+# Which argument a writing verb actually writes (#174 review). "A spine path
+# appears next to a write verb" is not the question: `cp workspace/SOUL.md
+# backup.md` reads the spine and writes somewhere else, and `sed -n 1,5p
+# workspace/SOUL.md` writes nothing at all. Getting this wrong blocks ordinary
+# work in the deployment's own tree, which is a guard nobody keeps.
+#
+# Verb list mirrors grant.FS_VERBS by hand rather than importing it: grant
+# imports this module, so the arrow goes one way. A verb missing here costs a
+# readable message, not the denial -- the sandbox is what holds.
+def _write_targets(tokens):
+    """The paths this command writes, as written. Best effort by design."""
+    targets = set()
+    for i, tok in enumerate(tokens):
+        if tok in (">", ">>") and i + 1 < len(tokens):
+            targets.add(tokens[i + 1])
+    if not tokens:
+        return targets
+    verb = os.path.basename(tokens[0])
+    args = [t for t in tokens[1:] if not t.startswith("-")]
+    if verb in ("cp", "mv", "ln", "install") and len(args) >= 2:
+        targets.add(args[-1])           # ... SOURCE DEST
+    elif verb in ("tee", "touch"):
+        targets.update(args)            # every file argument is written
+    elif verb == "chmod":
+        targets.update(args[1:])        # the mode is not a path
+    elif verb == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens):
+        targets.update(args[1:])        # in place only; the script is not a path
+    elif verb == "dd":
+        targets.update(t.split("=", 1)[1] for t in tokens if t.startswith("of="))
+    retval = targets
+    return retval
+
+
+def _check_spine(command, policy):
+    """Block a command that writes the agent's own standing prompt (#174).
+
+    `spine.load_system_prompt()` reads these files into the system prompt every
+    turn, and when the bundled `./workspace` sits inside a channel's tree the
+    grant layer runs `tee workspace/SOUL.md` as an ordinary in-tree write, with
+    no card. That is not widening the envelope, it is editing the instructions
+    that say how to behave inside it -- including the ones about being honest
+    about what has been read (#134). #130 already refuses a channel `skills`
+    entry under a writable root for the same reason; this is that hazard with a
+    shorter path.
+
+    Writes only, and only where the spine is the *target*. The spine is the
+    agent's persona, not a secret, and a channel reads and copies its own tree
+    legitimately: `cat workspace/SOUL.md`, `grep terse workspace/SOUL.md >
+    /tmp/out` and `cp workspace/SOUL.md backup.md` all pass, because none of
+    them writes the spine."""
+    paths = spine.files()
+    if not paths:
+        return (True, "")
+    base = cwd_for(policy)
+    for tok in _write_targets(_tokens(command)):
+        if os.path.realpath(_norm_path(tok, base)) in paths:
+            return (False, f"'{tok}' is this agent's own standing prompt; it changes "
+                           f"by a human edit or a PR, not from a channel")
+    return (True, "")
+
+
 def check(command, policy):
-    for fn in (_check_github, _check_aws, _check_exclude, _check_self):
+    for fn in (_check_github, _check_aws, _check_exclude, _check_self, _check_spine):
         ok, reason = fn(command, policy)
         if not ok:
             return (False, reason)

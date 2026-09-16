@@ -231,9 +231,17 @@ def profile(pol):
     # the window.
     #
     # Regexes rather than literals because the tree has more than one gitdir:
-    # the channel's repo, every worktree under `<cwd>.worktrees` (whose `.git`
-    # is a *file* naming its real gitdir, so overwriting it repoints the repo),
-    # and each `config.worktree` beside it.
+    # the channel's repo, every worktree under `<cwd>.worktrees`, each
+    # `config.worktree` beside them, and `.git/modules/<name>/` for a submodule,
+    # whose hooks and config are a second copy of exactly this hazard one level
+    # down -- hence `(.+/)?` rather than an anchored `hooks/`.
+    #
+    # A worktree's own `.git` -- a *file* naming its real gitdir -- is NOT
+    # denied, although overwriting it repoints the repository. Denying it breaks
+    # `git worktree add`, which is how work is done in this repo, and it buys
+    # little: TMPDIR is writable, so `git init /tmp/x` plus a hook there plus a
+    # commit reaches the same place without touching any pointer. That is a
+    # wider question than this deny, and it is recorded rather than solved.
     #
     # Deliberately NOT all of `.git/`: `git add` and `git commit` are granted
     # and have to write `index`, `objects` and `refs`. Denying those would
@@ -241,9 +249,8 @@ def profile(pol):
     lines.append(
         "(deny file-write* "
         + " ".join((
-            r'(regex #"/\.git/hooks/")',
-            r'(regex #"/\.git/config$")',
-            r'(regex #"/\.git$")',
+            r'(regex #"/\.git/(.+/)?hooks/")',
+            r'(regex #"/\.git/(.+/)?config$")',
             r'(regex #"/config\.worktree$")',
         ))
         + ")"

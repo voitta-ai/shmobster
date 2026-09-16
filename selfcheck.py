@@ -2294,8 +2294,21 @@ try:
     )
     _gd_wt = _gd_root + ".worktrees/w"
     assert os.path.isfile(os.path.join(_gd_wt, ".git")), "worktree .git should be a file"
-    assert _gd_run("printf 'gitdir: /evil' > .git", _gd_wt) != 0
     assert _gd_run("echo x > .git/hooks/pre-commit", _gd_wt) != 0
+    # a submodule keeps a second gitdir under .git/modules/<name>/, with its own
+    # hooks and its own config -- the same hazard one level down
+    assert _gd_run("mkdir -p .git/modules/s/hooks && echo x > .git/modules/s/hooks/pre-commit") != 0
+    assert _gd_run("mkdir -p .git/modules/s && echo x > .git/modules/s/config") != 0
+    # case-different spellings are denied too: the volume is case-insensitive,
+    # so .GIT/hooks and .git/HOOKS are the same file as the path already denied
+    for _cmd in ("echo x > .GIT/hooks/pre-commit", "echo x > .git/HOOKS/pre-commit",
+                 "echo x > .git/CONFIG", "ln f.txt .git/hooks/pre-commit"):
+        assert _gd_run(_cmd) != 0, _cmd
+    # `git worktree add` must keep working -- it writes the worktree's `.git`
+    # pointer file, and it is how work is done in this repo
+    assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
+    for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
+        assert _gd_run(_cmd) == 0, _cmd
 finally:
     config.WORKSPACE = _gd_saved_ws
 

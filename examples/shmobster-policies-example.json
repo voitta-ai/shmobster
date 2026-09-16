@@ -27,6 +27,9 @@
         "api.github.com",
         "*.githubusercontent.com"
       ],
+      "slack_channels": [
+        "C0123456789"
+      ],
       "skills": [
         "~/g/skillz-private/channels/scoped-channel/skills"
       ]

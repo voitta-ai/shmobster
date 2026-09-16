@@ -290,17 +290,53 @@ class _FakeSlack:
 
 
 _fs = _FakeSlack()
+# Every slack tool is scoped to the channel the turn is in (#151). The context
+# the handler passes is what says where that is; without one there is no "here"
+# and nothing but a policy-named channel is reachable.
+_here = {"channel": _ex_ch, "policy": {}}
 perm = slack_tools.dispatch(
     "slack_read_permalink",
     {"url": f"https://example.slack.com/archives/{_ex_ch}/p1234567890123456"},
-    _fs,
+    _fs, _here,
 )
 assert "hi from thread" in perm, perm
 assert _fs.last == ("replies", _ex_ch, "1234567890.123456"), _fs.last
-assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "C1"}, _fs)
-assert "no slack client" in slack_tools.dispatch("slack_read_thread", {}, None)
-assert "posted to C9" in slack_tools.dispatch("slack_post", {"channel_id": "C9", "text": "hi"}, _fs)
-assert _fs.last[0] == "post" and _fs.last[1] == "C9", _fs.last
+assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": _ex_ch}, _fs, _here)
+assert "no slack client" in slack_tools.dispatch("slack_read_thread", {}, None, _here)
+assert "posted to " + _ex_ch in slack_tools.dispatch(
+    "slack_post", {"channel_id": _ex_ch, "text": "hi"}, _fs, _here)
+assert _fs.last[0] == "post" and _fs.last[1] == _ex_ch, _fs.last
+
+# an omitted channel_id means here, which is what the model should ask for
+_fs.last = None
+assert "posted to " + _ex_ch in slack_tools.dispatch("slack_post", {"text": "hi"}, _fs, _here)
+assert _fs.last[1] == _ex_ch, _fs.last
+
+# ...and another channel is refused, read or write, however it is named. This
+# is the hole: the bot belongs to C9, so before #151 every one of these reached
+# it with no policy check, no card and no human.
+for _n, _a in (("slack_post", {"channel_id": "C9", "text": "hi"}),
+               ("slack_read_channel", {"channel_id": "C9"}),
+               ("slack_read_thread", {"channel_id": "C9", "thread_ts": "1.2"}),
+               ("slack_read_permalink",
+                {"url": "https://example.slack.com/archives/C9/p1234567890123456"})):
+    _fs.last = None
+    _r = slack_tools.dispatch(_n, _a, _fs, _here)
+    assert "refusing to reach C9" in _r, (_n, _r)
+    assert _fs.last is None, (_n, _fs.last)
+
+# ...until the channel's own policy names it, which is #149's shape: reaching
+# outside this channel is an operator's decision made in advance, not a
+# per-message one.
+_opted = {"channel": _ex_ch, "policy": {"slack_channels": ["C9"]}}
+assert "posted to C9" in slack_tools.dispatch(
+    "slack_post", {"channel_id": "C9", "text": "hi"}, _fs, _opted)
+assert _fs.last[1] == "C9", _fs.last
+assert "chan msg" in slack_tools.dispatch("slack_read_channel", {"channel_id": "C9"}, _fs, _opted)
+
+# a turn with no channel at all (a non-Slack ingress) reaches nothing implicitly
+_none = slack_tools.dispatch("slack_post", {"text": "hi"}, _fs, {"channel": None, "policy": {}})
+assert "not in a channel" in _none, _none
 
 
 # 9) channel-context injection into the system prompt

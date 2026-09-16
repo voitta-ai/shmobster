@@ -38,6 +38,26 @@ Both are on the yolt side's reconciliation list for 2.0.0: the flag accepted as
 a no-op, the key retained and honestly `0` (the allow path is deleted there, so
 zero is true rather than a placeholder).
 
+A third thing crosses that bump, and it is not a failure mode but a new value:
+**2.0.0 emits a fourth verdict, `deny`** -- an already-unsafe command that a
+git-state predicate refuses outright. Every consumer here compares against
+`"safe"`, so it parks rather than falling through; #172 then made the handling
+deliberate (a refusal skips the grant layer, and its card says it was refused
+rather than queued). The general shape is worth remembering beyond this bump:
+**a new verdict nobody handles sends the most restrictive answer down the least
+restrictive path**, which is why the comparison is against `"safe"` and not
+against `"unsafe"`.
+
+**Before cutting, with 2.0.0 in hand:**
+
+1. Re-verify #172 against the real classifier rather than the stubbed verdict:
+   a genuinely denied command parks, is not offered to the grant layer, and
+   renders as a refusal.
+2. Read the yolt side's unsafe-to-safe list. Anything moving *to* `safe` starts
+   auto-running in a channel with no card, so it is judged per command, not per
+   release. They send it before tagging, not after.
+3. Then the three operator notes below.
+
 **The release notes have to carry three things, or an upgrade breaks a channel
 quietly.** All are consequences of what shipped 2026-09-14 and 2026-09-15:
 

@@ -620,6 +620,23 @@ backup.md` copies *from* the spine and passes, while `cp x workspace/SOUL.md`
 does not. It changes by a human edit or a PR --
 approving it from a channel will not work, and that is deliberate.
 
+**`.git/` is not writable from a channel** (#184). The grant layer vouches for an
+in-tree write on the verb alone, and `.git/` is inside the tree, so
+`tee .git/hooks/pre-commit` plus `chmod +x` plus `git commit` -- three commands
+it already grants -- ran arbitrary code with no card. `.git/config` reaches the
+same place without a commit, since `diff.external` fires on the next
+`git diff --ext-diff`, which is a read. The sandbox denies `file-write*` on
+`.git/hooks/`, `.git/config`, any `.git` that is a file (a worktree's gitdir
+pointer) and `config.worktree`, by regex rather than by literal, because a tree
+has more than one gitdir.
+
+It is deliberately not a deny on all of `.git/`: `git add` and `git commit` are
+granted and have to write `index`, `objects` and `refs`. And it is in the
+sandbox rather than in a text guard, so that it is enforced by the kernel
+against spellings nobody enumerated -- `cp`, `mv`, `ln -sf`, `sed -i`, `tee`,
+`sh -c`, a shell variable, python, and a path through `../` are each measured
+in selfcheck.
+
 **Neither config file is reachable from a channel** (#147). A channel whose `cwd` is
 the directory shmobster runs from has them inside its tree, where the grant
 layer would treat `tee`/`sed -i`/`cp` onto one as an ordinary in-tree write and
@@ -743,7 +760,7 @@ A command has to clear all of these. The model's opinion is not one of them.
 |---|---|---|
 | YOLT verdict | does this mutate anything? (YOLT's rules only, #148) | `yolt_gate.py` -> voitta-yolt |
 | Refusal (#172) | ...or did the classifier refuse it outright? | `tools.run_shell` -- skips the grant layer |
-| Self-modification | is it the deployment's own config (#147) or its standing prompt (#174)? | `policy.py` + the sandbox profile |
+| Self-modification | is it the deployment's own config (#147), its standing prompt (#174), or git's own directory (#184)? | `policy.py` + the sandbox profile |
 | Egress (#149) | ...or reach a host this channel was not given? | `policy.check_egress` |
 | Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
 | Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |

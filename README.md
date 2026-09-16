@@ -545,7 +545,9 @@ not widening the envelope; it is editing the instructions about how to behave
 inside it -- the same hazard #130 already refuses for a channel's `skills`
 entry, with a shorter path. Writes are blocked by policy and denied in the
 kernel; **reads are left alone**, because the spine is a persona rather than a
-secret and a channel greps its own tree. It changes by a human edit or a PR --
+secret and a channel reads and copies its own tree -- `cp workspace/SOUL.md
+backup.md` copies *from* the spine and passes, while `cp x workspace/SOUL.md`
+does not. It changes by a human edit or a PR --
 approving it from a channel will not work, and that is deliberate.
 
 **Neither config file is reachable from a channel** (#147). A channel whose `cwd` is

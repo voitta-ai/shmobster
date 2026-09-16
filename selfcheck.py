@@ -1977,11 +1977,20 @@ try:
     assert any(f.endswith("USER.md") for f in spine.files()), spine.files()
     _sp_pol = {"cwd": _sp_root}
     for _cmd in ("tee workspace/SOUL.md", 'sed -i "" s/terse/chatty/ workspace/SOUL.md',
-                 "cp /tmp/x workspace/USER.md", "echo pwn > workspace/SOUL.md"):
+                 "sed -i s/terse/chatty/ workspace/SOUL.md",   # the GNU spelling too
+                 "cp /tmp/x workspace/USER.md", "mv /tmp/x workspace/SOUL.md",
+                 "echo pwn > workspace/SOUL.md", "echo pwn >> workspace/SOUL.md",
+                 "touch workspace/TOOLS.md", "chmod 777 workspace/SOUL.md",
+                 "dd of=workspace/SOUL.md"):
         _ok, _why = policy.check(_cmd, _sp_pol)
         assert not _ok and "standing prompt" in _why, (_cmd, _ok, _why)
-    # reads are not writes, and neither is a read redirected somewhere else
+    # ...and only where the spine is the TARGET (#174 review). Blocking a read
+    # that merely names it -- `cp SOUL.md backup.md` copies FROM the spine --
+    # would stop ordinary work in the deployment's own tree, which is a guard
+    # nobody keeps switched on.
     for _cmd in ("cat workspace/SOUL.md", "grep terse workspace/SOUL.md > /tmp/out",
+                 "cp workspace/SOUL.md backup.md", "mv workspace/SOUL.md.bak elsewhere.md",
+                 "sed -n 1,5p workspace/SOUL.md", "diff workspace/SOUL.md other.md",
                  "tee ordinary.md"):
         assert policy.check(_cmd, _sp_pol)[0], (_cmd, policy.check(_cmd, _sp_pol))
     # and the kernel, which is what holds when the wording hides the path

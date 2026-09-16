@@ -261,10 +261,37 @@ def _check_self(command, policy):
     return (True, "")
 
 
-# Mirrors grant.FS_VERBS deliberately rather than importing it: grant imports
-# this module, so the arrow only goes one way. A verb missing here costs a
-# readable message, not the denial -- the sandbox is what holds (#174).
-_WRITE_VERBS = ("tee", "cp", "mv", "sed", "ln", "chmod", "touch", "dd", "install")
+# Which argument a writing verb actually writes (#174 review). "A spine path
+# appears next to a write verb" is not the question: `cp workspace/SOUL.md
+# backup.md` reads the spine and writes somewhere else, and `sed -n 1,5p
+# workspace/SOUL.md` writes nothing at all. Getting this wrong blocks ordinary
+# work in the deployment's own tree, which is a guard nobody keeps.
+#
+# Verb list mirrors grant.FS_VERBS by hand rather than importing it: grant
+# imports this module, so the arrow goes one way. A verb missing here costs a
+# readable message, not the denial -- the sandbox is what holds.
+def _write_targets(tokens):
+    """The paths this command writes, as written. Best effort by design."""
+    targets = set()
+    for i, tok in enumerate(tokens):
+        if tok in (">", ">>") and i + 1 < len(tokens):
+            targets.add(tokens[i + 1])
+    if not tokens:
+        return targets
+    verb = os.path.basename(tokens[0])
+    args = [t for t in tokens[1:] if not t.startswith("-")]
+    if verb in ("cp", "mv", "ln", "install") and len(args) >= 2:
+        targets.add(args[-1])           # ... SOURCE DEST
+    elif verb in ("tee", "touch"):
+        targets.update(args)            # every file argument is written
+    elif verb == "chmod":
+        targets.update(args[1:])        # the mode is not a path
+    elif verb == "sed" and any(t == "-i" or t.startswith("-i") for t in tokens):
+        targets.update(args[1:])        # in place only; the script is not a path
+    elif verb == "dd":
+        targets.update(t.split("=", 1)[1] for t in tokens if t.startswith("of="))
+    retval = targets
+    return retval
 
 
 def _check_spine(command, policy):
@@ -279,22 +306,17 @@ def _check_spine(command, policy):
     entry under a writable root for the same reason; this is that hazard with a
     shorter path.
 
-    Writes only. The spine is the agent's persona, not a secret, and a channel
-    greps its own tree legitimately -- so this looks for a write *target*: a
-    spine path as an argument to a writing verb, or just after a redirect.
-    `grep SOUL.md > /tmp/out` is a read and passes."""
+    Writes only, and only where the spine is the *target*. The spine is the
+    agent's persona, not a secret, and a channel reads and copies its own tree
+    legitimately: `cat workspace/SOUL.md`, `grep terse workspace/SOUL.md >
+    /tmp/out` and `cp workspace/SOUL.md backup.md` all pass, because none of
+    them writes the spine."""
     paths = spine.files()
     if not paths:
         return (True, "")
     base = cwd_for(policy)
-    tokens = _tokens(command)
-    verb = os.path.basename(tokens[0]) if tokens else ""
-    for i, tok in enumerate(tokens):
-        if "/" not in tok and "." not in tok:
-            continue
-        if os.path.realpath(_norm_path(tok, base)) not in paths:
-            continue
-        if verb in _WRITE_VERBS or (i and tokens[i - 1] in (">", ">>")):
+    for tok in _write_targets(_tokens(command)):
+        if os.path.realpath(_norm_path(tok, base)) in paths:
             return (False, f"'{tok}' is this agent's own standing prompt; it changes "
                            f"by a human edit or a PR, not from a channel")
     return (True, "")

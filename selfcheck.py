@@ -1957,4 +1957,51 @@ _ask_card = json.dumps(slack_blocks.approval("d-2", {"command": "rm x", "reason"
 assert "Needs approval" in _ask_card and "Refused" not in _ask_card, _ask_card
 approvals._PENDING.clear()
 
+# 34) the agent cannot rewrite its own standing prompt (#174). #147 put the
+# config and policy files out of reach and stopped there; the spine is read into
+# the system prompt every turn, and the bundled ./workspace sits inside the tree
+# of a channel whose cwd is the deployment directory.
+_sp_root = os.path.realpath(tempfile.mkdtemp())
+_sp_ws = os.path.join(_sp_root, "workspace")
+os.makedirs(_sp_ws)
+with open(os.path.join(_sp_ws, "SOUL.md"), "w") as _f:
+    _f.write("# SOUL.md\n\nBe terse.\n")
+with open(os.path.join(_sp_root, "ordinary.md"), "w") as _f:
+    _f.write("not the spine\n")
+_saved_ws = config.WORKSPACE
+config.WORKSPACE = _sp_ws
+try:
+    assert len(spine.files()) == 5, spine.files()
+    # a name that does not exist yet is covered too, or creating USER.md would be
+    # the way around this
+    assert any(f.endswith("USER.md") for f in spine.files()), spine.files()
+    _sp_pol = {"cwd": _sp_root}
+    for _cmd in ("tee workspace/SOUL.md", 'sed -i "" s/terse/chatty/ workspace/SOUL.md',
+                 "cp /tmp/x workspace/USER.md", "echo pwn > workspace/SOUL.md"):
+        _ok, _why = policy.check(_cmd, _sp_pol)
+        assert not _ok and "standing prompt" in _why, (_cmd, _ok, _why)
+    # reads are not writes, and neither is a read redirected somewhere else
+    for _cmd in ("cat workspace/SOUL.md", "grep terse workspace/SOUL.md > /tmp/out",
+                 "tee ordinary.md"):
+        assert policy.check(_cmd, _sp_pol)[0], (_cmd, policy.check(_cmd, _sp_pol))
+    # and the kernel, which is what holds when the wording hides the path
+    assert f'(deny file-write* (literal "{os.path.join(_sp_ws, "SOUL.md")}")' in sandbox.profile(_sp_pol)
+    if _HAVE_SANDBOX:
+        _sp_proc = subprocess.run(
+            _REAL_WRAP('f=workspace/SOUL.md; printf pwn >> "$f"', _sp_pol),
+            capture_output=True, text=True, timeout=15, cwd=_sp_root,
+        )
+        assert _sp_proc.returncode != 0, _sp_proc
+        with open(os.path.join(_sp_ws, "SOUL.md")) as _f:
+            assert _f.read().endswith("Be terse.\n"), "the spine must be byte-identical"
+        # ...while the rest of the tree is still writable, or this would be a
+        # sandbox that stopped the work rather than the hazard
+        _ok_proc = subprocess.run(
+            _REAL_WRAP("printf x >> ordinary.md", _sp_pol),
+            capture_output=True, text=True, timeout=15, cwd=_sp_root,
+        )
+        assert _ok_proc.returncode == 0, _ok_proc
+finally:
+    config.WORKSPACE = _saved_ws
+
 print(f"selfcheck OK -- shmobster {_b}")

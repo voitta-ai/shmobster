@@ -46,7 +46,7 @@ import shutil
 import sys
 import tempfile
 
-from . import config, policy
+from . import config, policy, spine
 
 # Under $HOME, readable by default: what git and gh read on every invocation,
 # and the toolchain roots. Nothing here holds a secret: gh's token is in the
@@ -207,6 +207,17 @@ def profile(pol):
         lines.append(
             "(deny file-read* file-write* "
             + " ".join(f"(literal {_quote(p)})" for p in config.SELF_FILES)
+            + ")"
+        )
+    # The agent's own standing prompt (#174): write-denied, read left alone.
+    # It is re-read into the system prompt every turn, so an in-tree write to it
+    # is the shortest path there is to changing how the agent behaves; it is
+    # also not a secret, and a channel greps its own tree.
+    _spine = spine.files()
+    if _spine:
+        lines.append(
+            "(deny file-write* "
+            + " ".join(f"(literal {_quote(p)})" for p in _spine)
             + ")"
         )
     if excludes:

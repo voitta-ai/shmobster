@@ -10,7 +10,7 @@ import re
 import shlex
 import subprocess
 
-from . import config
+from . import config, spine
 
 
 def resolve(channel):
@@ -261,8 +261,47 @@ def _check_self(command, policy):
     return (True, "")
 
 
+# Mirrors grant.FS_VERBS deliberately rather than importing it: grant imports
+# this module, so the arrow only goes one way. A verb missing here costs a
+# readable message, not the denial -- the sandbox is what holds (#174).
+_WRITE_VERBS = ("tee", "cp", "mv", "sed", "ln", "chmod", "touch", "dd", "install")
+
+
+def _check_spine(command, policy):
+    """Block a command that writes the agent's own standing prompt (#174).
+
+    `spine.load_system_prompt()` reads these files into the system prompt every
+    turn, and when the bundled `./workspace` sits inside a channel's tree the
+    grant layer runs `tee workspace/SOUL.md` as an ordinary in-tree write, with
+    no card. That is not widening the envelope, it is editing the instructions
+    that say how to behave inside it -- including the ones about being honest
+    about what has been read (#134). #130 already refuses a channel `skills`
+    entry under a writable root for the same reason; this is that hazard with a
+    shorter path.
+
+    Writes only. The spine is the agent's persona, not a secret, and a channel
+    greps its own tree legitimately -- so this looks for a write *target*: a
+    spine path as an argument to a writing verb, or just after a redirect.
+    `grep SOUL.md > /tmp/out` is a read and passes."""
+    paths = spine.files()
+    if not paths:
+        return (True, "")
+    base = cwd_for(policy)
+    tokens = _tokens(command)
+    verb = os.path.basename(tokens[0]) if tokens else ""
+    for i, tok in enumerate(tokens):
+        if "/" not in tok and "." not in tok:
+            continue
+        if os.path.realpath(_norm_path(tok, base)) not in paths:
+            continue
+        if verb in _WRITE_VERBS or (i and tokens[i - 1] in (">", ">>")):
+            return (False, f"'{tok}' is this agent's own standing prompt; it changes "
+                           f"by a human edit or a PR, not from a channel")
+    return (True, "")
+
+
 def check(command, policy):
-    for fn in (_check_github, _check_aws, _check_exclude, _check_self):
+    for fn in (_check_github, _check_aws, _check_exclude, _check_self, _check_spine):
         ok, reason = fn(command, policy)
         if not ok:
             return (False, reason)

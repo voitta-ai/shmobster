@@ -10,6 +10,16 @@ from . import config
 _SPINE_FILES = ["SOUL.md", "USER.md", "CALIBRATION.md", "RUNBOOKS.md", "TOOLS.md"]
 
 
+def files():
+    """The spine's paths, resolved -- what a channel must not overwrite (#174).
+
+    Absent names resolve too, so creating a `USER.md` that does not exist yet is
+    covered by the same denial as editing the `SOUL.md` that does."""
+    retval = tuple(os.path.realpath(os.path.join(config.WORKSPACE, name))
+                   for name in _SPINE_FILES)
+    return retval
+
+
 def load_system_prompt():
     parts = []
     for name in _SPINE_FILES:

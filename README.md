@@ -536,7 +536,19 @@ config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
 `default_policy` in the main config are still honored when no
 `shmobster-policies.json` exists.
 
-**Neither file is reachable from a channel** (#147). A channel whose `cwd` is
+**The agent's own standing prompt is not writable from a channel either**
+(#174). `spine.load_system_prompt()` reads `SOUL.md`, `USER.md`,
+`CALIBRATION.md`, `RUNBOOKS.md` and `TOOLS.md` from `agent.workspace` into the
+system prompt on **every turn**, and when the bundled `./workspace` sits inside
+a channel's tree, `tee workspace/SOUL.md` is an ordinary in-tree write. That is
+not widening the envelope; it is editing the instructions about how to behave
+inside it -- the same hazard #130 already refuses for a channel's `skills`
+entry, with a shorter path. Writes are blocked by policy and denied in the
+kernel; **reads are left alone**, because the spine is a persona rather than a
+secret and a channel greps its own tree. It changes by a human edit or a PR --
+approving it from a channel will not work, and that is deliberate.
+
+**Neither config file is reachable from a channel** (#147). A channel whose `cwd` is
 the directory shmobster runs from has them inside its tree, where the grant
 layer would treat `tee`/`sed -i`/`cp` onto one as an ordinary in-tree write and
 run it with no card -- letting the agent widen its own envelope. So a command
@@ -659,6 +671,7 @@ A command has to clear all of these. The model's opinion is not one of them.
 |---|---|---|
 | YOLT verdict | does this mutate anything? (YOLT's rules only, #148) | `yolt_gate.py` -> voitta-yolt |
 | Refusal (#172) | ...or did the classifier refuse it outright? | `tools.run_shell` -- skips the grant layer |
+| Self-modification | is it the deployment's own config (#147) or its standing prompt (#174)? | `policy.py` + the sandbox profile |
 | Egress (#149) | ...or reach a host this channel was not given? | `policy.check_egress` |
 | Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
 | Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |

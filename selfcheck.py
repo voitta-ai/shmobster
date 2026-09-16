@@ -2254,79 +2254,91 @@ try:
         cwd=_gd_root, check=True,
     )
     _gd_pol = {"cwd": _gd_root, "allow_write": [_gd_root]}
-
-    def _gd_run(cmd, cwd=_gd_root):
-        _p = subprocess.run(
-            _REAL_WRAP(cmd, _gd_pol), capture_output=True, text=True, timeout=20, cwd=cwd,
-        )
-        return _p.returncode
-
-    _gd_payload = os.path.join(_gd_root, "payload")
-    with open(_gd_payload, "w") as _f:
-        _f.write("#!/bin/sh\ntouch PWNED\n")
-    # Every route to a hook or to the config, not just the redirect. `sed -i`
-    # renames its temp over the target and `ln -sf` never opens it, which is why
-    # the deny is file-write* rather than an open() guard.
-    for _cmd in (
-        "echo x > .git/hooks/pre-commit",
-        f"cp {_gd_payload} .git/hooks/pre-commit",
-        f"ln -sf {_gd_payload} .git/hooks/pre-commit",
-        "tee .git/hooks/pre-commit < payload",
-        "sh -c 'echo x > .git/config'",
-        "T=.git/hooks/pre-commit; echo x > $T",
-        "echo x > .git/hooks/../hooks/pre-commit",
-        "python3 -c \"open('.git/config','a').write('x')\"",
-        "sed -i '' s/a/b/ .git/config",
-    ):
-        assert _gd_run(_cmd) != 0, _cmd
-    assert not os.path.exists(os.path.join(_gd_root, ".git", "hooks", "pre-commit"))
-    # ...and the local-write tier the grant layer actually exists for is
-    # untouched: git has to write index, objects and refs, so this is not a
-    # blanket deny on .git/
-    for _cmd in ("echo ok > ok.txt", "git add ok.txt", "git status --porcelain",
-                 "git log --oneline -1"):
-        assert _gd_run(_cmd) == 0, _cmd
-    # a worktree's `.git` is a FILE naming its real gitdir, so overwriting it
-    # repoints the repository at one whose hooks the channel does own
-    subprocess.run(
-        ["git", "worktree", "add", "-q", _gd_root + ".worktrees/w", "-b", "w"],
-        cwd=_gd_root, check=True,
+    # The profile text is asserted everywhere; the kernel half below runs
+    # only where there is a kernel to run it, so CI (linux) still covers
+    # that the rules are emitted, and macOS covers that they bite.
+    _gd_prof = sandbox.profile(_gd_pol)
+    for _rx in (r'(regex #"/\.git/(.+/)?hooks/")',
+                r'(regex #"/\.git/(.+/)?config$")',
+                r'(regex #"/config\.worktree$")'):
+        assert _rx in _gd_prof, _rx
+    assert r'(regex #"/\.git$")' not in _gd_prof, (
+        "denying the gitdir pointer breaks `git worktree add` (#186)"
     )
-    _gd_wt = _gd_root + ".worktrees/w"
-    assert os.path.isfile(os.path.join(_gd_wt, ".git")), "worktree .git should be a file"
-    assert _gd_run("echo x > .git/hooks/pre-commit", _gd_wt) != 0
-    # a submodule keeps a second gitdir under .git/modules/<name>/, with its own
-    # hooks and its own config -- the same hazard one level down
-    assert _gd_run("mkdir -p .git/modules/s/hooks && echo x > .git/modules/s/hooks/pre-commit") != 0
-    assert _gd_run("mkdir -p .git/modules/s && echo x > .git/modules/s/config") != 0
-    # case-different spellings are denied too: the volume is case-insensitive,
-    # so .GIT/hooks and .git/HOOKS are the same file as the path already denied
-    for _cmd in ("echo x > .GIT/hooks/pre-commit", "echo x > .git/HOOKS/pre-commit",
-                 "echo x > .git/CONFIG", "ln f.txt .git/hooks/pre-commit"):
-        assert _gd_run(_cmd) != 0, _cmd
-    # `git worktree add` must keep working -- it writes the worktree's `.git`
-    # pointer file, and it is how work is done in this repo
-    assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
-    for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
-        assert _gd_run(_cmd) == 0, _cmd
-    # the pattern matches a gitdir and nothing that merely looks like one: a
-    # `.github/` directory, a project's own `hooks/`, and any plain `config`
-    # are ordinary files a channel writes all the time
-    for _cmd in ("mkdir -p .github/workflows && echo x > .github/workflows/ci.yml",
-                 "mkdir -p .github/hooks && echo x > .github/hooks/thing",
-                 "mkdir -p hooks && echo x > hooks/pre-commit",
-                 "mkdir -p src/hooks && echo x > src/hooks/useThing.ts",
-                 "echo x > config",
-                 "mkdir -p pkg && echo x > pkg/config"):
-        assert _gd_run(_cmd) == 0, _cmd
-    # ...while a repository vendored *inside* the channel's tree is covered on
-    # purpose: its hooks run exactly like the outer repo's. The deny is not
-    # anchored to the channel's own gitdir for that reason.
-    subprocess.run("mkdir -p vendor/dep && git init -q vendor/dep",
-                   cwd=_gd_root, shell=True, check=True)
-    assert _gd_run("echo x > vendor/dep/.git/hooks/pre-commit") != 0
-    assert _gd_run("echo x > vendor/dep/.git/config") != 0
-    assert _gd_run("echo x > vendor/dep/src.txt") == 0
+    if _HAVE_SANDBOX:
+
+        def _gd_run(cmd, cwd=_gd_root):
+            _p = subprocess.run(
+                _REAL_WRAP(cmd, _gd_pol), capture_output=True, text=True, timeout=20, cwd=cwd,
+            )
+            return _p.returncode
+
+        _gd_payload = os.path.join(_gd_root, "payload")
+        with open(_gd_payload, "w") as _f:
+            _f.write("#!/bin/sh\ntouch PWNED\n")
+        # Every route to a hook or to the config, not just the redirect. `sed -i`
+        # renames its temp over the target and `ln -sf` never opens it, which is why
+        # the deny is file-write* rather than an open() guard.
+        for _cmd in (
+            "echo x > .git/hooks/pre-commit",
+            f"cp {_gd_payload} .git/hooks/pre-commit",
+            f"ln -sf {_gd_payload} .git/hooks/pre-commit",
+            "tee .git/hooks/pre-commit < payload",
+            "sh -c 'echo x > .git/config'",
+            "T=.git/hooks/pre-commit; echo x > $T",
+            "echo x > .git/hooks/../hooks/pre-commit",
+            "python3 -c \"open('.git/config','a').write('x')\"",
+            "sed -i '' s/a/b/ .git/config",
+        ):
+            assert _gd_run(_cmd) != 0, _cmd
+        assert not os.path.exists(os.path.join(_gd_root, ".git", "hooks", "pre-commit"))
+        # ...and the local-write tier the grant layer actually exists for is
+        # untouched: git has to write index, objects and refs, so this is not a
+        # blanket deny on .git/
+        for _cmd in ("echo ok > ok.txt", "git add ok.txt", "git status --porcelain",
+                     "git log --oneline -1"):
+            assert _gd_run(_cmd) == 0, _cmd
+        # a worktree's `.git` is a FILE naming its real gitdir, so overwriting it
+        # repoints the repository at one whose hooks the channel does own
+        subprocess.run(
+            ["git", "worktree", "add", "-q", _gd_root + ".worktrees/w", "-b", "w"],
+            cwd=_gd_root, check=True,
+        )
+        _gd_wt = _gd_root + ".worktrees/w"
+        assert os.path.isfile(os.path.join(_gd_wt, ".git")), "worktree .git should be a file"
+        assert _gd_run("echo x > .git/hooks/pre-commit", _gd_wt) != 0
+        # a submodule keeps a second gitdir under .git/modules/<name>/, with its own
+        # hooks and its own config -- the same hazard one level down
+        assert _gd_run("mkdir -p .git/modules/s/hooks && echo x > .git/modules/s/hooks/pre-commit") != 0
+        assert _gd_run("mkdir -p .git/modules/s && echo x > .git/modules/s/config") != 0
+        # case-different spellings are denied too: the volume is case-insensitive,
+        # so .GIT/hooks and .git/HOOKS are the same file as the path already denied
+        for _cmd in ("echo x > .GIT/hooks/pre-commit", "echo x > .git/HOOKS/pre-commit",
+                     "echo x > .git/CONFIG", "ln f.txt .git/hooks/pre-commit"):
+            assert _gd_run(_cmd) != 0, _cmd
+        # `git worktree add` must keep working -- it writes the worktree's `.git`
+        # pointer file, and it is how work is done in this repo
+        assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
+        for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
+            assert _gd_run(_cmd) == 0, _cmd
+        # the pattern matches a gitdir and nothing that merely looks like one: a
+        # `.github/` directory, a project's own `hooks/`, and any plain `config`
+        # are ordinary files a channel writes all the time
+        for _cmd in ("mkdir -p .github/workflows && echo x > .github/workflows/ci.yml",
+                     "mkdir -p .github/hooks && echo x > .github/hooks/thing",
+                     "mkdir -p hooks && echo x > hooks/pre-commit",
+                     "mkdir -p src/hooks && echo x > src/hooks/useThing.ts",
+                     "echo x > config",
+                     "mkdir -p pkg && echo x > pkg/config"):
+            assert _gd_run(_cmd) == 0, _cmd
+        # ...while a repository vendored *inside* the channel's tree is covered on
+        # purpose: its hooks run exactly like the outer repo's. The deny is not
+        # anchored to the channel's own gitdir for that reason.
+        subprocess.run("mkdir -p vendor/dep && git init -q vendor/dep",
+                       cwd=_gd_root, shell=True, check=True)
+        assert _gd_run("echo x > vendor/dep/.git/hooks/pre-commit") != 0
+        assert _gd_run("echo x > vendor/dep/.git/config") != 0
+        assert _gd_run("echo x > vendor/dep/src.txt") == 0
 finally:
     config.WORKSPACE = _gd_saved_ws
 

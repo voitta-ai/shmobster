@@ -2665,6 +2665,20 @@ subprocess.run(["git", "init", "-q", "."], cwd=_cd_deep, check=True)
 subprocess.run(["git", "remote", "add", "origin", "https://github.com/other/secret.git"],
                cwd=_cd_deep, check=True)
 assert not policy.check("git -C inscope -C deep push", _cd_pol)[0], "the chain ends out of scope"
+# `/usr/bin/git` and `./gh` are the same commands as `git` and `gh`. An exact
+# token match answered "no git here" and skipped the whitelist entirely -- a
+# hole older than either #150 or #186, and the one thing three adversarial
+# passes over two PRs had to find rather than reason about.
+for _c in ("/usr/bin/git -C vendor push",
+           "cd vendor && /usr/bin/git push",
+           "/opt/homebrew/bin/gh api repos/other/secret/issues",
+           "./git -C vendor push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok, (_c, _why)
+for _c in ("/usr/bin/git push", "cd inscope && /usr/bin/git push",
+           "/opt/homebrew/bin/gh api repos/mine/repo/issues"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
 for _c in ("pushd vendor && popd && git push",      # popd puts the shell back
            "git -C vendor -C ../inscope push",      # the chain ends in scope
            "cd vendor && cd - && git push"):        # cd - is the last place

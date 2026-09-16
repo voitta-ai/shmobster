@@ -183,7 +183,7 @@ def _git_dirs(tokens, base):
                 if t.startswith(var):
                     target = _resolve(t.split("=", 1)[1], cur)
             i += 1
-        if any(t in ("git", "gh") for t in seg):
+        if any(os.path.basename(t) in ("git", "gh") for t in seg):
             out.append(target or cur)
     return out
 
@@ -192,6 +192,14 @@ def _git_dirs(tokens, base):
 _GITHUB_URL = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
+
+
+def _invokes(tokens, name):
+    """True when `name` is invoked, however it is spelled. `/usr/bin/git`,
+    `./git` and `git` are one command, and comparing the token verbatim said
+    otherwise -- which skipped the whitelist rather than applying it."""
+    retval = any(os.path.basename(t) == name for t in tokens)
+    return retval
 
 
 def _tokens(command):
@@ -207,8 +215,12 @@ def _check_github(command, policy):
     if not allowed:
         return (True, "")
     tokens = _tokens(command)
-    is_gh = "gh" in tokens
-    is_git = "git" in tokens
+    # By basename: `/usr/bin/git push` and `./gh api ...` are the same commands
+    # as `git` and `gh`, and an exact token match answered "no git here" to
+    # both, skipping the whitelist entirely. Pre-dates #150 and #186; found by
+    # the third adversarial pass on #195.
+    is_gh = _invokes(tokens, "gh")
+    is_git = _invokes(tokens, "git")
     if not (is_gh or is_git):
         return (True, "")
     # A git command that names a GitHub URL outright (`git ls-remote
@@ -307,7 +319,11 @@ def _git_subcommand(tokens):
     """The subcommand in a `git` invocation, skipping git's own flags and the
     values of the two that take one."""
     retval = None
-    i = tokens.index("git") + 1 if "git" in tokens else len(tokens)
+    i = len(tokens)
+    for n, t in enumerate(tokens):
+        if os.path.basename(t) == "git":
+            i = n + 1
+            break
     while i < len(tokens):
         t = tokens[i]
         if t in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):

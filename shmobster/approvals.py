@@ -112,7 +112,10 @@ def add(command, channel, reason, refused=False):
             # Whether the classifier refused outright rather than asked (#172).
             # Carried on the request because the card is rendered from it, and a
             # human clicking through a row of cards has no other way to tell the
-            # two apart.
+            # two apart. The default under-warns rather than over-warns: a
+            # caller that forgets it gets an ordinary card for a refusal, not a
+            # refusal card for an ordinary park, which would cry wolf on every
+            # queue. run_shell is the only caller; a second one must pass it.
             "refused": refused,
         }
         # Overflow never evicts a held request (#103). acquire() leaves it in

@@ -1938,12 +1938,17 @@ try:
     assert _out.startswith("REFUSED by the classifier"), _out
     assert "refused this one outright" in _out, _out
     assert "uncommitted changes" in _out, "the grounds have to reach the agent"
+    # ...including a compound command, where the grant layer would otherwise
+    # walk it segment by segment and vouch for the in-tree parts (#172 review)
+    _grant_asked["n"] = 0
+    _out = tools.run_shell("touch a && rm -rf b && tee c", {"cwd": _tree}, "C_DENY2")
+    assert _grant_asked["n"] == 0 and _out.startswith("REFUSED"), (_grant_asked, _out)
 finally:
     grant.check = _real_grant_check
 
 # the card says which it is, and keeps both buttons either way -- a human is
 # still the last word (#105)
-_den = [r for r in approvals._PENDING.values() if r["channel"] == "C_DENY"]
+_den = [r for r in approvals._PENDING.values() if r["channel"] == "C_DENY"]  # noqa: E501
 assert len(_den) == 1 and _den[0]["refused"] is True, _den
 _den_card = json.dumps(slack_blocks.approval("d-1", _den[0]))
 assert "Refused by the classifier" in _den_card and "no_entry" in _den_card, _den_card

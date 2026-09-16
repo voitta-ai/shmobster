@@ -2679,6 +2679,20 @@ for _c in ("/usr/bin/git push", "cd inscope && /usr/bin/git push",
            "/opt/homebrew/bin/gh api repos/mine/repo/issues"):
     _ok, _why = policy.check(_c, _cd_pol)
     assert _ok, (_c, _why)
+
+# A subshell runs in its own directory and gives it back: after
+# `(cd vendor && ls)` the parent has not moved, so the later `git push` runs at
+# the channel root. The two spellings used to disagree -- `&&` blocked, `;`
+# allowed -- which is worse than either answer on its own.
+for _c in ("(cd vendor && ls) && git push",
+           "(cd vendor; ls); git push",
+           "(cd vendor && ls) ; git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+# ...while git *inside* the subshell is still judged where it runs
+for _c in ("(cd vendor && git push)", "(cd vendor && git push) && ls"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
 for _c in ("pushd vendor && popd && git push",      # popd puts the shell back
            "git -C vendor -C ../inscope push",      # the chain ends in scope
            "cd vendor && cd - && git push"):        # cd - is the last place

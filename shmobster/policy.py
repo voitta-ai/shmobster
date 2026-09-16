@@ -135,19 +135,39 @@ def _git_dirs(tokens, base):
         if raw in _SEGMENT_BREAK:
             segments.append([])
             continue
-        segments[-1].append(raw.lstrip("({;&|").rstrip(")"))
+        segments[-1].append(raw)
 
     out = []
     cur = base
     last = None
     stack = []
-    for seg in segments:
-        if not seg:
+    subshell = []
+    for raw_seg in segments:
+        if not raw_seg:
             continue
+        # A subshell runs in its own directory and gives it back: after
+        # `(cd vendor && ls)` the parent shell has not moved. Counting the
+        # parentheses is what keeps `(cd x; ls); git push` and
+        # `(cd x && ls) && git push` answering the same -- they used to differ,
+        # which is worse than either answer alone.
+        opens = len(raw_seg[0]) - len(raw_seg[0].lstrip("("))
+        closes = len(raw_seg[-1]) - len(raw_seg[-1].rstrip(")"))
+        for _ in range(opens):
+            subshell.append(cur)
+        seg = [t.lstrip("({;&|").rstrip(")") for t in raw_seg]
         verb = seg[0]
+        def _close():
+            for _ in range(closes):
+                if subshell:
+                    return subshell.pop()
+            return None
+
         if verb == "popd":
             if stack:
                 cur = stack.pop()
+            _back = _close()
+            if _back is not None:
+                cur = _back
             continue
         if verb in ("cd", "pushd"):
             if verb == "pushd":
@@ -163,6 +183,9 @@ def _git_dirs(tokens, base):
             else:
                 cur = _resolve(seg[1], cur)
             last = prev
+            _back = _close()
+            if _back is not None:
+                cur = _back
             continue
         target = None
         i = 0
@@ -185,6 +208,9 @@ def _git_dirs(tokens, base):
             i += 1
         if any(os.path.basename(t) in ("git", "gh") for t in seg):
             out.append(target or cur)
+        _back = _close()
+        if _back is not None:
+            cur = _back
     return out
 
 

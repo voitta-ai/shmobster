@@ -2606,4 +2606,136 @@ if _HAVE_SANDBOX:
     finally:
         config.WORKSPACE = _al_saved
 
+# 40) `cd <dir> &&` retargets git exactly as `git -C <dir>` does, and only one
+# of them was read (#186). `cd vendor && git push` reached a repo that
+# `git -C vendor push` was refused for -- the whitelist one keystroke from
+# irrelevant. Every directory a command names is checked now, not the last:
+# deciding which segment "the" directory is would be guessing.
+_cd_root = os.path.realpath(tempfile.mkdtemp())
+subprocess.run(["git", "init", "-q", "."], cwd=_cd_root, check=True)
+subprocess.run(["git", "remote", "add", "origin", "https://github.com/mine/repo.git"],
+               cwd=_cd_root, check=True)
+for _sub, _rem in (("vendor", "https://github.com/other/secret.git"),
+                   ("inscope", "https://github.com/mine/other.git")):
+    _d = os.path.join(_cd_root, _sub)
+    os.makedirs(_d, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "."], cwd=_d, check=True)
+    subprocess.run(["git", "remote", "add", "origin", _rem], cwd=_d, check=True)
+_cd_pol = {"cwd": _cd_root, "github_repos": ["mine/*"]}
+for _c in ("cd vendor && git push",
+           "cd ./vendor && git push",
+           "cd vendor && git fetch",
+           "cd inscope && cd ../vendor && git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+_cd_ven = os.path.join(_cd_root, "vendor")
+_cd_ins = os.path.join(_cd_root, "inscope")
+os.symlink(_cd_ven, os.path.join(_cd_root, "link"))
+# git is retargeted by more than `cd` and `-C`: two flags and two environment
+# variables say the same thing, and each was reachable past the first fix.
+for _c in (f"git --git-dir={_cd_ven}/.git push",
+           f"git --git-dir {_cd_ven}/.git push",
+           f"GIT_DIR={_cd_ven}/.git git push",
+           f"git --work-tree={_cd_ven} --git-dir={_cd_ven}/.git push",
+           f"GIT_WORK_TREE={_cd_ven} git push",
+           "cd vendor ; git push",          # a list, not just &&
+           "(cd vendor && git push)",       # a subshell: shlex yields `(cd`
+           "pushd vendor && git push",      # pushd moves the shell too
+           "cd link && git push"):          # a symlink -- git resolves it for us
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+# ...and a path this cannot expand fails closed rather than being waved through
+for _c in ("cd $HOME/nowhere && git push", "cd && git push"):
+    assert not policy.check(_c, _cd_pol)[0], _c
+for _c in ("cd inscope && git push", "git push", "cd inscope && git log",
+           "git -C inscope push", "cd . && git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+for _c in (f"git --git-dir={_cd_ins}/.git push", "(cd inscope && git push)"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+
+# A directory is a target where a git command RUNS, not everywhere the line
+# visits. `pushd vendor && popd && git push` runs git at home, and recording
+# vendor refuses work that never touched it. git also chains its own -C --
+# `git -C a -C b` is `a/b` -- so only where the chain ends is a target.
+_cd_deep = os.path.join(_cd_ins, "deep")
+os.makedirs(_cd_deep, exist_ok=True)
+subprocess.run(["git", "init", "-q", "."], cwd=_cd_deep, check=True)
+subprocess.run(["git", "remote", "add", "origin", "https://github.com/other/secret.git"],
+               cwd=_cd_deep, check=True)
+assert not policy.check("git -C inscope -C deep push", _cd_pol)[0], "the chain ends out of scope"
+# `/usr/bin/git` and `./gh` are the same commands as `git` and `gh`. An exact
+# token match answered "no git here" and skipped the whitelist entirely -- a
+# hole older than either #150 or #186, and the one thing three adversarial
+# passes over two PRs had to find rather than reason about.
+for _c in ("/usr/bin/git -C vendor push",
+           "cd vendor && /usr/bin/git push",
+           "/opt/homebrew/bin/gh api repos/other/secret/issues",
+           "./git -C vendor push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok, (_c, _why)
+for _c in ("/usr/bin/git push", "cd inscope && /usr/bin/git push",
+           "/opt/homebrew/bin/gh api repos/mine/repo/issues"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+
+# A subshell runs in its own directory and gives it back: after
+# `(cd vendor && ls)` the parent has not moved, so the later `git push` runs at
+# the channel root. The two spellings used to disagree -- `&&` blocked, `;`
+# allowed -- which is worse than either answer on its own.
+for _c in ("(cd vendor && ls) && git push",
+           "(cd vendor; ls); git push",
+           "(cd vendor && ls) ; git push"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+# ...while git *inside* the subshell is still judged where it runs
+for _c in ("(cd vendor && git push)", "(cd vendor && git push) && ls"):
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert not _ok and "other/secret" in _why, (_c, _ok, _why)
+for _c in ("pushd vendor && popd && git push",      # popd puts the shell back
+           "git -C vendor -C ../inscope push",      # the chain ends in scope
+           "cd vendor && cd - && git push"):        # cd - is the last place
+    _ok, _why = policy.check(_c, _cd_pol)
+    assert _ok, (_c, _why)
+
+# 41) #186 as filed said a channel could `git init` in TMPDIR, plant a hook
+# there and commit, reaching what #184 closed by another door. It cannot: #184
+# denies `.git/hooks/` and `.git/config` by regex, which is not anchored to the
+# channel's tree and therefore covers a repository anywhere -- TMPDIR included.
+# Asserted rather than believed, because the whole issue turned on it.
+if _HAVE_SANDBOX:
+    _tm_chan = os.path.realpath(tempfile.mkdtemp())
+    _tm_saved = config.WORKSPACE
+    try:
+        config.WORKSPACE = _tm_chan
+        _tm_evil = os.path.join(os.path.realpath(tempfile.gettempdir()), "shm_tmp_probe")
+        subprocess.run(["rm", "-rf", _tm_evil], check=True)
+        os.makedirs(_tm_evil)
+        subprocess.run(["git", "init", "-q", "."], cwd=_tm_evil, check=True)
+        _tm_pol = {"cwd": _tm_chan, "allow_write": [_tm_chan]}
+
+        def _tm_run(cmd):
+            return subprocess.run(_REAL_WRAP(cmd, _tm_pol), capture_output=True,
+                                  text=True, timeout=20, cwd=_tm_chan).returncode
+
+        for _cmd in (f"echo x > {_tm_evil}/.git/hooks/pre-commit",
+                     f"echo x > {_tm_evil}/.git/hooks/post-checkout",
+                     f"cp /etc/hosts {_tm_evil}/.git/hooks/pre-commit",
+                     f"echo x > {_tm_evil}/.git/config"):
+            assert _tm_run(_cmd) != 0, _cmd
+        # ...and the other way to the same place, a hooksPath in a config the
+        # channel would have to own. Every one of these is outside its tree.
+        for _cmd in ("echo '[core]' >> ~/.gitconfig",
+                     "git config --global core.hooksPath /tmp/h",
+                     "mkdir -p ~/.config/git && echo x > ~/.config/git/config"):
+            assert _tm_run(_cmd) != 0, _cmd
+        # TMPDIR itself stays writable -- it is a writable root on purpose, and
+        # this is about what may be *executed* from there, not what may be
+        # written
+        assert _tm_run(f"echo x > {_tm_evil}/ordinary.txt") == 0
+        subprocess.run(["rm", "-rf", _tm_evil], check=True)
+    finally:
+        config.WORKSPACE = _tm_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

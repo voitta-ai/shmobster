@@ -104,22 +104,128 @@ def _gh_repos(tokens):
     return (repos, unresolvable)
 
 
-def _git_dir_flag(tokens):
-    """The directory a `git -C <dir>` retargets to, or None. Without this the
-    origin is read from the channel's cwd while the command runs somewhere
-    else entirely (#150)."""
-    for i, t in enumerate(tokens):
-        if t == "-C" and i + 1 < len(tokens):
-            return tokens[i + 1]
-        if t.startswith("-C") and len(t) > 2:
-            return t[2:]
-    return None
+_SEGMENT_BREAK = frozenset(("&&", "||", ";", "|", "&"))
+
+
+def _git_dirs(tokens, base):
+    """Every directory a git/gh command in this line would actually run in.
+
+    Not every directory the line *visits*: `pushd vendor && popd && git push`
+    runs git at home, and recording `vendor` as a target refuses work that
+    never touched it. So the line is walked as segments, the shell's directory
+    is tracked across them, and a directory is recorded only where a git or gh
+    command sits.
+
+    Four spellings retarget such a command and all of them were reachable past
+    an earlier version of this check (#150, #186): `cd`/`pushd` move the shell,
+    while `-C`, `--git-dir`/`--work-tree` and their `GIT_DIR=`/`GIT_WORK_TREE=`
+    environment forms retarget one command without moving anything. git chains
+    its own `-C` options -- `git -C a -C b` is `a/b` -- and only where the
+    chain ends is a target."""
+    def _resolve(d, at):
+        d = os.path.expanduser(d)
+        p = os.path.normpath(d if os.path.isabs(d) else os.path.join(at, d))
+        # A gitdir names its worktree's parent; `git -C` wants the worktree.
+        if os.path.basename(p) == ".git":
+            p = os.path.dirname(p)
+        return p
+
+    segments = [[]]
+    for raw in tokens:
+        if raw in _SEGMENT_BREAK:
+            segments.append([])
+            continue
+        segments[-1].append(raw)
+
+    out = []
+    cur = base
+    last = None
+    stack = []
+    subshell = []
+    for raw_seg in segments:
+        if not raw_seg:
+            continue
+        # A subshell runs in its own directory and gives it back: after
+        # `(cd vendor && ls)` the parent shell has not moved. Counting the
+        # parentheses is what keeps `(cd x; ls); git push` and
+        # `(cd x && ls) && git push` answering the same -- they used to differ,
+        # which is worse than either answer alone.
+        opens = len(raw_seg[0]) - len(raw_seg[0].lstrip("("))
+        closes = len(raw_seg[-1]) - len(raw_seg[-1].rstrip(")"))
+        for _ in range(opens):
+            subshell.append(cur)
+        seg = [t.lstrip("({;&|").rstrip(")") for t in raw_seg]
+        verb = seg[0]
+        def _close():
+            for _ in range(closes):
+                if subshell:
+                    return subshell.pop()
+            return None
+
+        if verb == "popd":
+            if stack:
+                cur = stack.pop()
+            _back = _close()
+            if _back is not None:
+                cur = _back
+            continue
+        if verb in ("cd", "pushd"):
+            if verb == "pushd":
+                stack.append(cur)
+            prev = cur
+            # `cd` with no argument, or `cd ~`, is home -- the same rule the
+            # grant layer's own cd tracking uses. `cd -` is the last place the
+            # shell was.
+            if len(seg) == 1 or seg[1] == "~":
+                cur = os.path.expanduser("~")
+            elif seg[1] == "-":
+                cur = last if last is not None else cur
+            else:
+                cur = _resolve(seg[1], cur)
+            last = prev
+            _back = _close()
+            if _back is not None:
+                cur = _back
+            continue
+        target = None
+        i = 0
+        while i < len(seg):
+            t = seg[i]
+            if t == "-C" and i + 1 < len(seg):
+                target = _resolve(seg[i + 1], target or cur)
+                i += 2
+                continue
+            if t.startswith("-C") and len(t) > 2:
+                target = _resolve(t[2:], target or cur)
+            for flag in ("--git-dir", "--work-tree"):
+                if t == flag and i + 1 < len(seg):
+                    target = _resolve(seg[i + 1], cur)
+                elif t.startswith(flag + "="):
+                    target = _resolve(t.split("=", 1)[1], cur)
+            for var in ("GIT_DIR=", "GIT_WORK_TREE="):
+                if t.startswith(var):
+                    target = _resolve(t.split("=", 1)[1], cur)
+            i += 1
+        if any(os.path.basename(t) in ("git", "gh") for t in seg):
+            out.append(target or cur)
+        _back = _close()
+        if _back is not None:
+            cur = _back
+    return out
 
 
 # A GitHub repo named as a URL, in the three forms git accepts for it.
 _GITHUB_URL = re.compile(
     r"^(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?$"
 )
+
+
+def _invokes(tokens, name):
+    """True when `name` is invoked, however it is spelled. `/usr/bin/git`,
+    `./git` and `git` are one command, and comparing the token verbatim said
+    otherwise -- which skipped the whitelist rather than applying it."""
+    retval = any(os.path.basename(t) == name for t in tokens)
+    return retval
 
 
 def _tokens(command):
@@ -135,8 +241,12 @@ def _check_github(command, policy):
     if not allowed:
         return (True, "")
     tokens = _tokens(command)
-    is_gh = "gh" in tokens
-    is_git = "git" in tokens
+    # By basename: `/usr/bin/git push` and `./gh api ...` are the same commands
+    # as `git` and `gh`, and an exact token match answered "no git here" to
+    # both, skipping the whitelist entirely. Pre-dates #150 and #186; found by
+    # the third adversarial pass on #195.
+    is_gh = _invokes(tokens, "gh")
+    is_git = _invokes(tokens, "git")
     if not (is_gh or is_git):
         return (True, "")
     # A git command that names a GitHub URL outright (`git ls-remote
@@ -174,15 +284,16 @@ def _check_github(command, policy):
         return (True, "")
     repo = None
     if not is_gh:
-        # `-C <dir>` is relative to where the command runs -- the channel's
-        # cwd -- not to wherever this agent process happens to be. Left
-        # unresolved it fails closed with "undeterminable", which is safe and
-        # also blocks a legitimate in-scope subdirectory for the wrong reason.
-        _cd = _git_dir_flag(tokens)
+        # Every directory the command names, not just the channel's cwd: a
+        # `cd` and a `-C` retarget git identically (#186). Each one's origin
+        # has to be in scope, because the command reaches all of them.
         _base = cwd_for(policy)
-        if _cd:
-            _cd = _cd if os.path.isabs(_cd) else os.path.join(_base, _cd)
-        repo = _git_origin(_cd or _base)
+        _dirs = _git_dirs(tokens, _base)
+        for _d in _dirs:
+            _r = _git_origin(_d)
+            if _r and not _in_scope(_r):
+                return (False, f"repo '{_r}' not in channel whitelist {allowed}")
+        repo = _git_origin(_dirs[-1] if _dirs else _base)
     else:
         repo = _git_origin(cwd_for(policy))
     if not repo:
@@ -234,7 +345,11 @@ def _git_subcommand(tokens):
     """The subcommand in a `git` invocation, skipping git's own flags and the
     values of the two that take one."""
     retval = None
-    i = tokens.index("git") + 1 if "git" in tokens else len(tokens)
+    i = len(tokens)
+    for n, t in enumerate(tokens):
+        if os.path.basename(t) == "git":
+            i = n + 1
+            break
     while i < len(tokens):
         t = tokens[i]
         if t in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):

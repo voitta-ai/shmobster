@@ -9,15 +9,25 @@ This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
-Current state: **v0.8.0 is cut; the live box is still on v0.7.2 until someone
-upgrades it** (see below). The exec path is YOLT (its own rules only, #148) ->
-egress allow-list (#149) -> grant layer (#117) -> seatbelt sandbox (#116) ->
-approval card (#48). A command's environment is built from an allowlist (#112),
-the deployment's own config is unreachable from a channel (#147), every command
-is recorded (#129), a channel can load its own learned skills (#130), and the
-agent can report its envelope rather than improvise it (#9). 12 issues are
-open; five of them carry the `security` label and are the re-audit's remaining
-findings.
+Current state: **v0.9.0 is cut; the live box is still on v0.7.2 until someone
+upgrades it** -- and that upgrade is now two versions and one inverted
+instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The
+exec path is YOLT (its own rules only, #148) -> egress allow-list (#149) ->
+grant layer (#117) -> seatbelt sandbox (#116) -> approval card (#48). A
+command's environment is built from an allowlist (#112), the deployment's own
+config is unreachable from a channel (#147), git's own directory is unwritable
+(#184), the slack tools reach only this channel unless the policy says
+otherwise (#151), every command is recorded (#129), a channel can load its own
+learned skills (#130), and the agent can report its envelope rather than
+improvise it (#9).
+
+**The read-only set is ours now (#177).** voitta-yolt 2.0.x answers `unknown`
+for every ordinary read, by design, so `grant.READ_VERBS` and its git/gh/aws
+companions decide what auto-runs -- consulted only on `unknown`, never over
+`unsafe` or `deny`. The supported voitta-yolt range is `>= 2.0.1`, which
+reverses what v0.8.0 shipped.
+
+11 issues are open; four carry the `security` label.
 
 ## The v0.8.0 release, and the range it pinned
 

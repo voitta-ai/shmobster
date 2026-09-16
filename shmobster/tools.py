@@ -85,10 +85,16 @@ def run_shell(command, policy, channel=None):
         if not allowed:
             decision, reason = "unsafe", why
     if decision != "safe":
-        # Not every mutation needs a human (#117): a write the sandbox keeps
-        # in the tree, or a commit on the user's own worktree branch, runs on
-        # the grant layer's say-so. Logged with its grounds, like a park.
-        granted, why = grant.check(command, policy)
+        # A refusal is not a question (#172). voitta-yolt 2.0.0 upgrades an
+        # already-unsafe verdict to "deny" when a git-state predicate refuses
+        # outright -- it has looked at the repository and said no. The grant
+        # layer decides on the verb, so without this an `rm` or `tee` the
+        # classifier refused would come back "in-tree write" and run with no
+        # card, vouched for by the layer that never asked why it was refused.
+        # The better-informed gate wins; the human still gets the last word,
+        # through a card that says what it is.
+        refused = decision == "deny"
+        granted, why = (False, reason) if refused else grant.check(command, policy)
         if granted:
             logging.info(
                 "run_shell: granted in %s (%s): %s",
@@ -96,7 +102,7 @@ def run_shell(command, policy, channel=None):
             )
             retval = execute(command, policy)
             return retval
-        req_id = approvals.add(command, channel, reason)
+        req_id = approvals.add(command, channel, reason, refused=refused)
         # The whole id, nonce and all (#109). It is what a human types back, and
         # a shortened one would mean a different request after the next restart
         # while reading identically on the card they typed it from.
@@ -107,9 +113,13 @@ def run_shell(command, policy, channel=None):
         # promise the system did not keep (#134). It keeps it now, and the
         # instruction is to stop rather than to wait, because the turn ends
         # here either way.
+        headline = "REFUSED by the classifier" if refused else "NOT RUN -- pending approval"
         retval = (
-            f"NOT RUN -- pending approval [{req_id}] ({reason}): {command}\n"
-            f"Tell the user: a trusted user can approve it with the card's button "
+            f"{headline} [{req_id}] ({reason}): {command}\n"
+            + ("Say plainly that the classifier refused this one outright rather than "
+               "merely asking, and why. A trusted user can still override it, but do "
+               "not present that as routine.\n" if refused else "")
+            + f"Tell the user: a trusted user can approve it with the card's button "
             f"or by asking you to approve request {req_id} (approve_command), "
             f"quoting the id exactly. Do not retry the command. End your turn now: "
             f"once it is approved and runs, you are continued automatically with "

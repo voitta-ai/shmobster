@@ -95,7 +95,7 @@ def canonical(key):
     return retval
 
 
-def add(command, channel, reason):
+def add(command, channel, reason, refused=False):
     key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before
     # the delete: scrub() is fail-closed, and a raise after the insert would
@@ -109,6 +109,11 @@ def add(command, channel, reason):
     with _LOCK:
         _PENDING[key] = {
             "command": command, "channel": channel, "reason": reason, "surfaced": False,
+            # Whether the classifier refused outright rather than asked (#172).
+            # Carried on the request because the card is rendered from it, and a
+            # human clicking through a row of cards has no other way to tell the
+            # two apart.
+            "refused": refused,
         }
         # Overflow never evicts a held request (#103). acquire() leaves it in
         # the queue until the approve path pops it, so an oldest-first eviction

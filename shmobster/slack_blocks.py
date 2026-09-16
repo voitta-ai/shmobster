@@ -25,9 +25,18 @@ def approval(req_id, req):
                 "type": "mrkdwn",
                 # Scrubbed here, not only in the fallback `text`: the command
                 # is rendered twice and a credential rides argv routinely (#72).
+                # A refusal and a question must not look alike (#172): the
+                # same lock and the same "needs approval" on both would leave a
+                # trusted user clicking through a row of cards with no signal
+                # that the classifier refused this one rather than queued it.
+                # The buttons stay either way -- a human is still the last word
+                # (#105) -- but overriding a refusal should read as a decision.
                 "text": redact.scrub(
-                    f":lock: *Needs approval* [{req_id}] ({req['reason']})\n"
-                    f"```{req['command']}```"
+                    (f":no_entry: *Refused by the classifier* -- approve only if you "
+                     f"are sure [{req_id}] ({req['reason']})\n"
+                     if req.get("refused") else
+                     f":lock: *Needs approval* [{req_id}] ({req['reason']})\n")
+                    + f"```{req['command']}```"
                 ),
             },
         },

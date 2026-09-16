@@ -1908,4 +1908,53 @@ assert "approvals.claim_unsurfaced(channel, thread_ts)" in _app_src, (
     "cards must record their thread, or pending_in() can never answer"
 )
 
+# 33) voitta-yolt 2.0.0's fourth verdict (#172). "deny" is an outright refusal
+# by a predicate that looked at the repository, not a question -- so it must not
+# reach the grant layer, which decides on the verb and would hand back
+# "in-tree write" for a command the classifier had already refused.
+approvals._PENDING.clear()
+_grant_asked = {"n": 0}
+_real_grant_check = grant.check
+
+
+def _counting_grant(command, policy):
+    _grant_asked["n"] += 1
+    return _real_grant_check(command, policy)
+
+
+grant.check = _counting_grant
+try:
+    # the control: an ordinary mutating verdict still gets the grant layer, and
+    # an in-tree write still runs with no card
+    yolt_gate.classify = lambda cmd: ("unsafe", "rm: mutating")
+    _tree = tempfile.mkdtemp()
+    _out = tools.run_shell("touch in-tree.txt", {"cwd": _tree}, "C_DENY")
+    assert _grant_asked["n"] == 1 and not _out.startswith("NOT RUN"), (_grant_asked, _out)
+    # the refusal: same verb, same tree, and now it parks
+    _grant_asked["n"] = 0
+    yolt_gate.classify = lambda cmd: ("deny", "rm: tracked file with uncommitted changes")
+    _out = tools.run_shell("touch in-tree.txt", {"cwd": _tree}, "C_DENY")
+    assert _grant_asked["n"] == 0, "a refused command must not be offered to the grant layer"
+    assert _out.startswith("REFUSED by the classifier"), _out
+    assert "refused this one outright" in _out, _out
+    assert "uncommitted changes" in _out, "the grounds have to reach the agent"
+    # ...including a compound command, where the grant layer would otherwise
+    # walk it segment by segment and vouch for the in-tree parts (#172 review)
+    _grant_asked["n"] = 0
+    _out = tools.run_shell("touch a && rm -rf b && tee c", {"cwd": _tree}, "C_DENY2")
+    assert _grant_asked["n"] == 0 and _out.startswith("REFUSED"), (_grant_asked, _out)
+finally:
+    grant.check = _real_grant_check
+
+# the card says which it is, and keeps both buttons either way -- a human is
+# still the last word (#105)
+_den = [r for r in approvals._PENDING.values() if r["channel"] == "C_DENY"]  # noqa: E501
+assert len(_den) == 1 and _den[0]["refused"] is True, _den
+_den_card = json.dumps(slack_blocks.approval("d-1", _den[0]))
+assert "Refused by the classifier" in _den_card and "no_entry" in _den_card, _den_card
+assert "approve_command" in _den_card and "deny_command" in _den_card, "buttons stay"
+_ask_card = json.dumps(slack_blocks.approval("d-2", {"command": "rm x", "reason": "rm: mutating"}))
+assert "Needs approval" in _ask_card and "Refused" not in _ask_card, _ask_card
+approvals._PENDING.clear()
+
 print(f"selfcheck OK -- shmobster {_b}")

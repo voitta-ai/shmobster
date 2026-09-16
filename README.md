@@ -658,6 +658,7 @@ A command has to clear all of these. The model's opinion is not one of them.
 | Gate | Question it answers | Lives in |
 |---|---|---|
 | YOLT verdict | does this mutate anything? (YOLT's rules only, #148) | `yolt_gate.py` -> voitta-yolt |
+| Refusal (#172) | ...or did the classifier refuse it outright? | `tools.run_shell` -- skips the grant layer |
 | Egress (#149) | ...or reach a host this channel was not given? | `policy.check_egress` |
 | Grant layer (#117) | ...and is it an in-tree write or a commit I authored? | `grant.py`, `gitstate.py` |
 | Channel policy | is it in scope -- cwd, repos, aws profile? | `policy.py` |
@@ -666,6 +667,23 @@ A command has to clear all of these. The model's opinion is not one of them.
 
 Everything the agent then says is scrubbed on the way out
 ([Credential redaction](#credential-redaction-72)).
+
+### A refusal is not a question (#172)
+
+voitta-yolt 2.0.0 adds a fourth verdict, `deny`: an already-mutating command
+that a git-state predicate refuses outright, rather than one it wants a human
+asked about. Everything here compares against `"safe"`, so a `deny` was always
+going to park -- two things about it are deliberate rather than incidental:
+
+- **It never reaches the grant layer.** The grant layer decides on the verb, so
+  an `rm` or `tee` inside the tree comes back "in-tree write" and runs with no
+  card. A classifier that looked at the repository and said no is the better
+  informed of the two, so a refusal short-circuits it.
+- **The card says so**: `:no_entry: Refused by the classifier -- approve only if
+  you are sure`, against `:lock: Needs approval` for an ordinary park. Both keep
+  both buttons. A human is still the last word here as everywhere else (#105);
+  overriding a refusal should read as a decision rather than as a click in a
+  queue.
 
 ### After an approval, the turn carries on (#169)
 

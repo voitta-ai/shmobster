@@ -446,7 +446,20 @@ One JSON config, no `.env`. Copy the example and fill it in:
 
   The bar for entry is that no flag turns the command into a write, which is
   why `sort` (`-o`), `uniq` (output positional), `find` (`-delete`), `xargs`
-  (runs its argument) and `awk` (`system()`) are absent. A read verb also stops
+  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent, and why
+  `git grep` is absent from the git list -- `git grep -O<cmd>` runs the pager it
+  is handed, whether or not anything is a terminal.
+
+  Two more classes are excluded although they never mutate. AWS operations that
+  write a local file (`s3api get-object` and kin) are excluded because the CLI
+  spells that destination as a bare trailing positional, with no option name to
+  filter on. AWS operations that hand back a credential (`get-secret-value`,
+  `get-login-password`, `get-session-token`, `get-parameter`, ...) are excluded
+  on #149's argument rather than the mutation one: a fetch is read-only here
+  while being an effect out there, and so is a command that puts secret
+  material into a channel. The redactor does not cover that case -- a bare token
+  has no shape to catch. This is stricter than 1.6.0, where all of them were
+  `safe`. A read verb also stops
   being a read when its output lands in a file: YOLT cannot tell us, since
   `cat x`, `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one `unknown`
   to it, so the redirect is caught in the grant layer's AST walk or not at all.

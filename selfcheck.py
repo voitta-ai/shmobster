@@ -2116,6 +2116,34 @@ try:
     # a subcommand this agent cannot read statically is not one it vouches for
     _ok, _why = grant.check("gh $SUB list", _rpol)
     assert not (_ok and "read-only" in _why), (_ok, _why)
+    # a read verb can also be made to write or execute by a flag, which no
+    # redirect node shows and no YOLT verdict mentions. Each of these was run
+    # against real git/grep before being listed: `-c diff.external=CMD` with
+    # `git log -p --ext-diff`, `-c core.fsmonitor=CMD` with `git status`, and
+    # `-c diff.external=CMD` with `git diff --ext-diff` all executed CMD with
+    # stdout a pipe; `git grep -O<cmd>` ran the pager it was handed; and
+    # `git diff --output=F` wrote F. (`git -c core.pager=CMD --paginate log`
+    # did NOT execute -- git pages only to a terminal -- so the pager route is
+    # not what this guards.)
+    for _c in ("git -c diff.external=touch log -p --ext-diff",
+               "git -c core.fsmonitor=touch status",
+               "git -c diff.external=touch diff --ext-diff",
+               "git --config-env=core.fsmonitor=EV status",
+               "git grep -Otouch needle",
+               "git grep needle",
+               "git diff --output=out.txt",
+               "git diff -O out.txt",
+               "tree -o out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # ...and a config override is refused for local writes too, not just reads:
+    # core.fsmonitor runs on `git add` the same as on `git status`
+    _ok, _why = grant.check("git -c core.fsmonitor=touch add .", _rpol)
+    assert not _ok, (_ok, _why)
+    # the ordinary forms still pass
+    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x ."):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
 finally:
     yolt_gate.classify = _saved_classify
 

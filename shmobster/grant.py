@@ -66,21 +66,23 @@ FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed")
 # The bar for entry is that no flag turns the command into a write. That is why
 # `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
 # `find` (-delete, -exec) and `xargs` (runs its argument) are absent, and why
-# `awk` is absent despite reading: its program can call system(). `sed` is in
-# FS_VERBS already, as the writer -i makes it.
+# `awk` is absent despite reading: its program can call system(), and `tree` is
+# absent because -o writes its output to a file. `sed` is in FS_VERBS already,
+# as the writer -i makes it.
 READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep", "rg",
-    "jq", "id", "uname", "printenv", "ps", "tree",
+    "jq", "id", "uname", "printenv", "ps",
 ))
 
 # git subcommands that cannot mutate the repository whatever follows them.
 # `branch`, `remote`, `config`, `tag`, `checkout` and `switch` are absent because
-# a flag flips each into a write (-D, add, a value, -d, --). `git diff --output=F`
-# does write a file, in-tree and sandbox-confined, at the tier FS_VERBS grants.
+# a flag flips each into a write (-D, add, a value, -d, --). `grep` is absent
+# because `git grep -O<cmd>` opens matches in a pager of its choosing, which
+# runs that command even when stdout is a pipe -- measured, not assumed.
 GIT_READ = frozenset((
     "status", "log", "show", "diff", "rev-parse", "ls-files", "blame",
-    "describe", "shortlog", "cat-file", "ls-tree", "grep",
+    "describe", "shortlog", "cat-file", "ls-tree",
 ))
 
 # `gh <noun> <action>` pairs that only read. `api` is deliberately absent: it
@@ -302,6 +304,7 @@ class _Walker:
         directory = self.tracked
         sub = None
         rest = []
+        config_override = False
         i = 0
         # Global options come before the subcommand: `-C <dir>` retargets,
         # `-c key=val` takes a value, anything else dashed is skipped. After
@@ -327,15 +330,32 @@ class _Walker:
                 directory = _resolve(t[2:], directory)
                 i += 1
                 continue
-            if t == "-c" and i + 1 < len(args):
-                i += 2
+            # `git -c <key>=<value>` runs arbitrary commands through several
+            # config keys, and the subcommand still looks like a read. Measured
+            # against real git, each of these executed with stdout a pipe:
+            #     -c diff.external=CMD  git log -p --ext-diff
+            #     -c diff.external=CMD  git diff --ext-diff
+            #     -c core.fsmonitor=CMD git status
+            # The pager route does not fire (git pages only to a terminal), but
+            # these do, so no git command carrying an override is granted here.
+            if t == "-c" or t.startswith("-c") or t.startswith("--config-env"):
+                config_override = True
+                i += 2 if t == "-c" else 1
                 continue
             if t.startswith("-"):
                 i += 1
                 continue
             sub = t
             i += 1
-        if sub in GIT_LOCAL:
+        # `--output=F` / `-O F` make a read write a file; git's diff family
+        # accepts them after the subcommand.
+        writes_flag = any(
+            r == "-O" or r == "--output" or r.startswith(("-O", "--output="))
+            for r in rest if r
+        )
+        if config_override:
+            retval = (False, "git -c: a config override can run an arbitrary command")
+        elif sub in GIT_LOCAL:
             retval = (True, f"git {sub}: local")
         # Lowercase only: -B / -C reset an existing branch to HEAD, which is
         # a rewrite, not a creation.
@@ -349,7 +369,7 @@ class _Walker:
             else:
                 ok, why = self.probe.commit_allowed(directory)
                 retval = (ok, f"git commit: {why}")
-        elif sub in GIT_READ and not self.writes_file:
+        elif sub in GIT_READ and not self.writes_file and not writes_flag:
             retval = (True, f"git {sub}: read-only")
         else:
             retval = (False, f"git {sub}: not a local write")

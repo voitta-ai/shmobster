@@ -95,6 +95,30 @@ GH_READ_ACTIONS = frozenset(("list", "view", "status", "diff", "checks"))
 # `cp`/`mv`/`rm`/`sync` included, falls through and parks.
 AWS_READ_PREFIXES = ("list-", "get-", "describe-")
 
+# ...except these, which are read-prefixed and still write a local file. The
+# AWS CLI spells that destination as a bare trailing positional -- its own help
+# for s3api get-object: "outfile (string) Filename where the content will be
+# saved. Note that the outfile parameter is specified without an option name
+# such as --outfile." Having no option name is exactly what makes it
+# unfilterable by flag, so the operations are named instead.
+#
+# This is a deny set, not a proof: the sandbox is what bounds an operation not
+# listed here, confining the write to the channel's tree the same as any
+# FS_VERBS write. What the list buys is that the grant layer stops calling such
+# a command "read-only" while it writes.
+AWS_WRITES_OUTFILE = frozenset(("get-object", "get-object-torrent", "get-media"))
+
+# Global flags that take a separate value. Without these the value is read as
+# the subcommand -- `gh --repo o/r pr list` looks like `gh o/r r...`, which then
+# matches nothing and parks. That is the safe direction but it parks a real
+# read, so the common ones are named. An unknown flag still misparses and still
+# parks, which is why this list only ever adds working commands.
+GH_VALUE_FLAGS = frozenset(("-R", "--repo", "--hostname"))
+AWS_VALUE_FLAGS = frozenset((
+    "--profile", "--region", "--endpoint-url", "--output", "--query",
+    "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--color",
+))
+
 # Local git writes that need no repository state.
 GIT_LOCAL = frozenset(("add", "mv", "stash"))
 
@@ -376,15 +400,22 @@ class _Walker:
         return retval
 
 
-    def _words(self, args):
+    def _words(self, args, value_flags=frozenset()):
         """Non-flag words, or None if any argument is not a literal. A verb
         whose subcommand this agent cannot read statically is not one it can
         vouch for, so it falls through to YOLT and parks."""
         retval = []
+        skip = False
         for a in args:
             t = _text(a, self.src) if _static(a) else None
             if t is None:
                 return None
+            if skip:
+                skip = False
+                continue
+            if t in value_flags:
+                skip = True
+                continue
             if not t.startswith("-"):
                 retval.append(t)
         return retval
@@ -392,7 +423,7 @@ class _Walker:
     def gh(self, args):
         """`gh <noun> <action>` when both only read. None otherwise, which falls
         through to YOLT -- and at 2.0.x that means the command parks."""
-        words = self._words(args)
+        words = self._words(args, GH_VALUE_FLAGS)
         retval = None
         if (words is not None and len(words) >= 2 and not self.writes_file
                 and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS):
@@ -403,10 +434,12 @@ class _Walker:
         """`aws <service> <operation>` when the operation only reads. The scope
         of what it may reach is policy's question, not this one: `_check_aws`
         runs on every granted command the same as on an auto-run one."""
-        words = self._words(args)
+        words = self._words(args, AWS_VALUE_FLAGS)
         retval = None
         if words is not None and len(words) >= 2 and not self.writes_file:
             op = words[1]
+            if op in AWS_WRITES_OUTFILE:
+                return None
             if op == "ls" or op.startswith(AWS_READ_PREFIXES):
                 retval = (True, f"aws {words[0]} {op}: read-only")
         return retval

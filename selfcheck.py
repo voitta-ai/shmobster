@@ -2163,6 +2163,33 @@ try:
     # and buy nothing.
     _ok, _why = grant.check("git log -c", _rpol)
     assert _ok and "read-only" in _why, (_ok, _why)
+    # a global flag takes its value with it, or the value is read as the
+    # subcommand and a real read parks for no reason
+    for _c in ("gh --repo o/r pr list", "gh -R o/r issue view 3",
+               "aws --profile P s3 ls", "aws --region us-east-1 ec2 describe-instances"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # ...and an unknown flag still misparses, which still parks -- the table
+    # only ever adds working commands, it never widens what is granted
+    _ok, _why = grant.check("gh --nosuchflag o/r pr list", _rpol)
+    assert not (_ok and "read-only" in _why), (_ok, _why)
+    # a profile named like a subcommand is consumed as the value it is
+    _ok, _why = grant.check("aws --profile s3 ls", _rpol)
+    assert not (_ok and "read-only" in _why), (_ok, _why)
+    # read-prefixed AWS operations that write a local file are not reads. The
+    # destination is a bare trailing positional -- the CLI's own help says the
+    # outfile "is specified without an option name such as --outfile" -- so it
+    # cannot be filtered by flag and the operations are named instead.
+    for _c in ("aws s3api get-object --bucket b --key k out.bin",
+               "aws s3api get-object-torrent --bucket b --key k t.torrent",
+               "aws kinesisvideo get-media --stream-name s out.mkv"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+    # ...while the read-prefixed operations that write nothing still pass
+    for _c in ("aws s3api list-objects --bucket b", "aws iam get-user",
+               "aws logs describe-log-groups"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok and "read-only" in _why, (_c, _ok, _why)
 finally:
     yolt_gate.classify = _saved_classify
 

@@ -3391,4 +3391,55 @@ assert admin_tools._alerted(approvals.canonical(_r215e), "C_215L", "U_STRANGER_2
 for _k in approvals.ids("C_215L"):
     approvals.pop(_k, "C_215L")
 
+# ...one alert per user per request bounds the CARDS too, not just the text.
+# An adversarial review read the live card as a new spam vector: a stranger
+# clicking repeatedly could fill a thread with actionable cards. Measured
+# instead -- the volume is identical to the pointer-text version it replaced,
+# because the bound was never on the content. The same user gets one message
+# however many times they click; a different user gets one of their own, which
+# is #94's deliberate design and predates this.
+_r215f = approvals.add("echo spam_probe", "C_215S", "unknown")
+_posts = []
+class _CountPost:
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
+        _posts.append(blocks)
+        return {"ok": True, "ts": "1"}
+for _i in range(6):   # one stranger, six clicks
+    admin_tools.refuse_click(_r215f, {"user_id": "U_SPAM", "channel": "C_215S",
+                                      "client": _CountPost()}, "approve_command")
+assert len(_posts) == 1, "six clicks from one user must post once, card or no card"
+for _u in ("U_A", "U_B", "U_C"):   # three strangers, one click each
+    admin_tools.refuse_click(_r215f, {"user_id": _u, "channel": "C_215S",
+                                      "client": _CountPost()}, "approve_command")
+assert len(_posts) == 4, len(_posts)
+assert all(_b is not None for _b in _posts), "each alert carries its own card"
+
+# a credential in a parked command is scrubbed in the CARD, not only in the
+# text the card replaced. The command used to be rendered into the alert body
+# through redact.scrub; now slack_blocks.approval owns that rendering, so the
+# scrub has to be asserted where the bytes actually go (#72).
+_secret = "AKIA" + "4KEYSELFCHECK0000"[:16]
+_r215g = approvals.add(f"aws configure set x {_secret}", "C_215K", "unknown")
+_posted.clear()
+admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215g", "channel": "C_215K",
+                                  "client": _FakePost()}, "approve_command")
+assert _secret not in str(_posted["blocks"]), "a credential reached the card"
+assert _secret not in _posted["text"], _posted["text"]
+assert "REDACTED" in str(_posted["blocks"]), _posted["blocks"]
+
+# a card outlives its request, exactly as the original card always has (#109).
+# Consuming the request through one card leaves the other showing buttons, and
+# pressing them resolves to "no longer pending" rather than to whatever
+# inherited the id -- which is why the absent branch exists at all.
+approvals.acquire(_r215g, "C_215K")
+approvals.finish(_r215g)
+_posted.clear()
+admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215h", "channel": "C_215K",
+                                  "client": _FakePost()}, "approve_command")
+assert "no longer pending" in _posted["text"], _posted
+assert _posted["blocks"] is None, "a consumed request must not be handed live buttons"
+for _c in ("C_215S", "C_215K"):
+    for _k in approvals.ids(_c):
+        approvals.pop(_k, _c)
+
 print(f"selfcheck OK -- shmobster {_b}")

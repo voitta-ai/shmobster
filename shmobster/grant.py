@@ -75,6 +75,68 @@ READ_VERBS = frozenset((
     "jq", "id", "uname", "printenv", "ps",
 ))
 
+# Reads that stay reads unless a named flag turns them into something else
+# (#219). READ_VERBS above is consulted on the verb alone, so its bar is that no
+# flag can make the command write -- which is why `find` and `sort` are absent
+# from it, and why a directory listing needed a human approval card.
+#
+# The bar can move for these because this layer is not verb-only any more: it
+# parses argv and already refuses on flags for `git -c`, `gh api` and the `aws`
+# value-flags. A flag-checked tier is the mechanism that is already here.
+#
+# On the shape of the risk, stated rather than glossed. This is a deny list, so
+# a writing flag nobody enumerated would pass. That is survivable for the ones
+# that write a FILE, because the sandbox confines the write to the channel's
+# tree, which is the same risk already accepted for every verb in FS_VERBS --
+# `tee out.txt` is granted today. It would NOT be survivable for a flag that
+# RUNS something, because execution escapes the read/write framing entirely, so
+# those are the entries to be sure of: find's four are the complete set in both
+# BSD and GNU find.
+_FIND_WRITES = frozenset((
+    # run a command this layer cannot see
+    "-exec", "-execdir", "-ok", "-okdir",
+    # remove what it matched
+    "-delete",
+    # write the match list to a named file. GNU only -- BSD find answers
+    # "-fprint: unknown primary or operator" -- and listed anyway, because
+    # which find is on the box is not a security property. voitta-yolt's own
+    # find rule omits these deliberately (its safe_write_targets would treat
+    # the path as ordinary), so its `find: rules punt` cannot be promoted in
+    # their place; see #219.
+    "-fprint", "-fprint0", "-fprintf", "-fls",
+))
+
+FLAG_CHECKED_READS = frozenset(("find", "sort"))
+
+
+def _find_refusal(texts):
+    hit = next((t for t in texts if t in _FIND_WRITES), None)
+    retval = f"find: flag {hit}" if hit else None
+    return retval
+
+
+def _sort_refusal(texts):
+    """`sort` writes only through -o/--output, and every spelling of it.
+
+    The attached and bundled forms are the point: `sort -o out f`, `sort -oout`
+    and `sort -uo out` all redirect the result into a file, and only the first
+    is caught by comparing against "-o". So any single-dash cluster containing
+    an `o` is refused -- `-u`, `-n`, `-r` and the rest survive, and a cluster
+    that merely looks unfamiliar is refused rather than guessed at."""
+    retval = None
+    for t in texts:
+        if t == "--output" or t.startswith("--output="):
+            retval = f"sort: flag {t.split('=')[0]}"
+            break
+        if t.startswith("-") and not t.startswith("--") and "o" in t[1:]:
+            retval = f"sort: flag {t} redirects the result into a file"
+            break
+    return retval
+
+
+_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal}
+
+
 # git subcommands that cannot mutate the repository whatever follows them.
 # `branch`, `remote`, `config`, `tag`, `checkout` and `switch` are absent because
 # a flag flips each into a write (-D, add, a value, -d, --). `grep` is absent
@@ -388,6 +450,8 @@ class _Walker:
             retval = self.aws(args)
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
+        elif verb in FLAG_CHECKED_READS and not self.writes_file:
+            retval = self.flag_checked(verb, args)
         else:
             retval = None
         # Why the read rule did not apply, kept for the refusal below (#213).
@@ -398,7 +462,8 @@ class _Walker:
         # went to check the verb list found the verb already in it and learned
         # nothing about the redirect that actually caused the card.
         shadowed = (f"{verb} reads, but this segment redirects output to a file"
-                    if retval is None and verb in READ_VERBS else None)
+                    if retval is None and (verb in READ_VERBS or verb in FLAG_CHECKED_READS)
+                    else None)
         if retval is None or (retval[0] is False and verb == "git"):
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
@@ -419,6 +484,23 @@ class _Walker:
                 retval = (False, shadowed or reason)
         if retval[0]:
             self.reasons.append(retval[1])
+        return retval
+
+    def flag_checked(self, verb, args):
+        """A read verb granted unless one of its own writing flags is present.
+
+        Every argument must be a literal. `find . $F` with F=-delete is a
+        deletion the deny list cannot see, and `_no_substitution` upstream does
+        not catch it -- that rejects things that RUN a command, and `$F` merely
+        expands. So an argument this layer cannot read is a refusal, not a
+        guess: the verb goes back to punting, which is where it was before
+        (#219)."""
+        if not all(_static(a) for a in args):
+            retval = (False, f"{verb}: an argument is not a literal, so its flags cannot be read")
+            return retval
+        texts = [_unquote(_text(a, self.src)) for a in args]
+        why = _FLAG_REFUSAL[verb](texts)
+        retval = (False, why) if why else (True, f"{verb}: read-only")
         return retval
 
     def cd(self, args):

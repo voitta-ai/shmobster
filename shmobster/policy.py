@@ -396,11 +396,21 @@ def check_egress(command, policy):
     hosts = [_host_of(h) for h in _URL_HOST.findall(command)]
     if not hosts:
         return (False, "fetch: no statically known host (use an explicit https:// URL)")
-    allowed = [p.lower() for p in (policy.get("allow_domains") or [])]
     for host in hosts:
-        if not any(fnmatch.fnmatch(host, pat) for pat in allowed):
+        if not host_allowed(host, policy):
             return (False, f"fetch to '{host}' is not in this channel's allow_domains")
     return (True, "")
+
+
+def host_allowed(host, policy):
+    """Is this host in the channel's `allow_domains` (#149)?
+
+    One rule, two callers: the textual guard over a shell command, and the
+    web_fetch tool (#62). A second copy of the matching would be a second
+    answer to "may this channel reach that host", and the two would drift."""
+    allowed = [p.lower() for p in (policy.get("allow_domains") or [])]
+    retval = any(fnmatch.fnmatch((host or "").lower(), pat) for pat in allowed)
+    return retval
 
 
 def _norm_path(p, base):

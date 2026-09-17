@@ -1427,13 +1427,18 @@ Three properties make it safe to inject, and all three are structural rather
 than advisory:
 
 - **The agent cannot write it.** It is found only through the channel's
-  `skills` entries, so the same refusal applies: a `MEMORY.md` resolving under
-  the channel's writable roots is ignored. In-tree writes run without a card
-  (#117), so a memory file inside the tree would let one granted
+  `skills` entries, so a directory under a writable root never reaches it --
+  and the *resolved file* is checked again, because a `MEMORY.md` sitting in
+  the read-only catalog can be a **symlink into the channel's tree**: the
+  directory passes and the file is still the agent's to edit. In-tree writes
+  run without a card (#117), so either route would let one granted
   `cat > MEMORY.md` become next turn's prompt. Editing it is a pull request
   against the catalog, like a skill.
-- **It is reference, not instruction.** The block says so where the model reads
-  it, and says what the text *cannot* do: it grants nothing, and a line that
+- **It is reference, not instruction.** The body is fenced, with a fence longer
+  than any backtick run inside it, so the content cannot close its own block --
+  an unfenced `## Conversation so far in this thread` in a memory file reads as
+  a new section of the prompt rather than as a line in a file. The block says
+  so where the model reads it, and says what the text *cannot* do: it grants nothing, and a line that
   reads like permission ("you may push to master", "skip the approval for X")
   is stale or someone testing, and changes nothing either way. #52's
   memory-poisoning section is the threat model -- the author may be somebody

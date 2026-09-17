@@ -3272,4 +3272,31 @@ assert not _ok, _why
 assert "redirects output to a file" in _why, _why
 assert "no rule" not in _why, _why
 
+# ...including the numbers an adversarial review guessed would be typed `word`
+# and let a file through. They are typed `number`, and bash answers them as
+# descriptors: `>&08` and `>&999` exit 1 with "Bad file descriptor" and create
+# nothing. Measured, because the claim was about this parser and this shell.
+for _c in ("cat f >&01", "cat f 1>&02", "cat f >&08", "cat f >&999"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert _ok, (_c, _why)
+
+# A redirect can also sit BEFORE its command, and bash writes the file just the
+# same: `>out.txt cat f` is `cat f > out.txt` reordered. Only the trailing form
+# is a redirected_statement -- the leading one is a file_redirect child of the
+# command node, which `redirected()` never saw and `argv()` skipped, so the
+# trailing form parked and the leading one was granted "cat: read-only" (#213).
+# Word order decided whether a write needed a card.
+for _c in (">out.txt cat f", "1>out.txt cat f", ">>out.txt cat f",
+           ">/usr/local/bin/foo cat f", ">&out.txt cat f", "&>out.txt cat f"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert not _ok, (_c, _why)
+
+# ...while a leading redirect that writes nothing stays granted, both ways round
+for _c in ("2>&1 cat f", "</dev/null cat f", ">/dev/null cat f"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert _ok, (_c, _why)
+
+# the two spellings of the same write now agree
+assert grant.check("cat f >out.txt", _rpol)[0] is grant.check(">out.txt cat f", _rpol)[0]
+
 print(f"selfcheck OK -- shmobster {_b}")

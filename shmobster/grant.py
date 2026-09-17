@@ -261,6 +261,36 @@ class _Walker:
             retval = (False, f"{node.type} is not grantable")
         return retval
 
+    def redirect_write(self, c):
+        """One file_redirect judged: (refusal, writes_a_file).
+
+        `refusal` is a reason string when the redirect cannot be judged at all,
+        and None otherwise -- in which case the second value says whether it
+        puts bytes in a file.
+
+        Shared by both callers on purpose. A redirect can sit on either side of
+        its command, and bash writes the file either way, so the two parse
+        shapes have to reach the same verdict or the rule is decoration (#213).
+        """
+        # No path, nothing to judge: not a device, not in the tree, not a
+        # write. Checked before the destination is read at all, because for
+        # `2>&1` the "destination" is the number 1.
+        if _fd_dup(c):
+            return (None, False)
+        dest = c.children[-1] if c.children else None
+        if dest is None or not _static(dest):
+            return ("redirect target is not a literal", None)
+        target = _unquote(_text(dest, self.src))
+        if target.startswith("/dev/") and target not in _DEV_OK:
+            return (f"redirect to device {target}", None)
+        # A read verb stops being a read when its output lands in a file
+        # (#177). YOLT cannot tell us this -- `cat x`, `cat x > out.txt` and
+        # `cat x > /usr/local/bin/foo` are one `unknown` to it, differing only
+        # in a reason string nobody parses -- so the redirect is seen here or
+        # not at all.
+        retval = (None, not _reads_only(c) and target not in _DEV_OK)
+        return retval
+
     def redirected(self, node):
         """A command, pipeline or list with redirects. The body is judged as
         usual; the redirect is an in-tree write the sandbox confines, unless
@@ -271,24 +301,10 @@ class _Walker:
             if c.type in ("command", "pipeline", "list"):
                 body = c
             elif c.type == "file_redirect":
-                # No path, nothing to judge: not a device, not in the tree,
-                # not a write (#213). Checked before the destination is read
-                # at all, because for `2>&1` the "destination" is the number 1.
-                if _fd_dup(c):
-                    continue
-                dest = c.children[-1] if c.children else None
-                if dest is None or not _static(dest):
-                    return (False, "redirect target is not a literal")
-                target = _unquote(_text(dest, self.src))
-                if target.startswith("/dev/") and target not in _DEV_OK:
-                    return (False, f"redirect to device {target}")
-                # A read verb stops being a read when its output lands in a
-                # file (#177). YOLT cannot tell us this -- `cat x`,
-                # `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one
-                # `unknown` to it, differing only in a reason string nobody
-                # parses -- so the redirect is seen here or not at all.
-                if not _reads_only(c) and target not in _DEV_OK:
-                    writes = True
+                refusal, redirect_writes = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
+                writes = writes or redirect_writes
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
                 continue
             else:
@@ -326,7 +342,31 @@ class _Walker:
         return retval
 
     def segment(self, node):
+        """A redirect may sit before its command as well as after it.
+
+        `>out.txt cat f` is `cat f > out.txt` with the words in the other
+        order, and bash writes the file for both. Only the trailing form parses
+        as a `redirected_statement`; the leading one is a `file_redirect` child
+        of the command node, which `redirected()` never sees and `argv()`
+        skips outright -- so `cat f > out.txt` parked while `>out.txt cat f`
+        was granted as "cat: read-only", and the difference was word order
+        (#213). Found reviewing the descriptor-dup change above; it predates
+        it."""
+        saved = self.writes_file
+        try:
+            retval = self._segment(node)
+        finally:
+            self.writes_file = saved
+        return retval
+
+    def _segment(self, node):
         text = _text(node, self.src)
+        for c in node.children:
+            if c.type == "file_redirect":
+                refusal, writes = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
+                self.writes_file = self.writes_file or writes
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")

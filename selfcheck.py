@@ -2752,6 +2752,8 @@ try:
     # the agent a participant in conversations nobody asked it into
     assert not identity.dm_turn({"channel_type": "channel", "user": "UHUMAN", "text": "hi"})
     assert not identity.dm_turn({"channel_type": "group", "user": "UHUMAN"})
+    # a group DM has other people in it, so the mention is the address there too
+    assert not identity.dm_turn({"channel_type": "mpim", "user": "UHUMAN"})
     assert not identity.dm_turn({"user": "UHUMAN"})
     # ...and three ways of not talking to ourselves. A reply posted into a DM
     # comes back as a message event, so without these the agent holds both ends
@@ -2767,6 +2769,11 @@ try:
     assert not identity.dm_turn(None)
     # a sibling agent's DM is still not ours to answer -- it carries bot_id
     assert not identity.dm_turn({"channel_type": "im", "user": "UOTHER", "bot_id": "B2"})
+    # and not knowing who we are is a reason not to answer rather than a reason
+    # to skip the check: an agent that cannot recognize its own posts is one
+    # that can answer them, in a loop
+    config.BOT_USER_ID = ""
+    assert not identity.dm_turn({"channel_type": "im", "user": "UHUMAN", "text": "hi"})
 finally:
     config.BOT_USER_ID = _dm_saved_bot
 

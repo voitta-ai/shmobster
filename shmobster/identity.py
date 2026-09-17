@@ -62,7 +62,15 @@ def dm_turn(event):
         return False
     if event.get("bot_id") or event.get("subtype"):
         return False
-    if config.BOT_USER_ID and event.get("user") == config.BOT_USER_ID:
+    # Not knowing who we are is a reason not to answer, not a reason to skip
+    # the check. `bot_id` already catches our own posts -- the app posts with a
+    # bot token, so Slack sets it -- but that is one guard standing alone, and
+    # the failure it would be standing alone against is an agent talking to
+    # itself in a loop. The id is resolved before serving; if it is empty,
+    # something is wrong enough that DMs can wait. Startup says so.
+    if not config.BOT_USER_ID:
+        return False
+    if event.get("user") == config.BOT_USER_ID:
         return False
     retval = bool(event.get("user"))
     return retval

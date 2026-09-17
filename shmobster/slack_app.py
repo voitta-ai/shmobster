@@ -337,6 +337,14 @@ def main():
     except Exception:
         logging.exception("could not resolve bot user id")
     logging.info("agent: %s (%s) -- shmobster %s", config.AGENT_LABEL, config.BOT_USER_ID, build())
+    if not config.BOT_USER_ID:
+        # `identity.dm_turn` refuses every DM without it, on purpose: an agent
+        # that cannot recognize its own posts is one that can answer them.
+        # Mentions still work, because there the mention is the address.
+        logging.warning(
+            "bot user id unresolved, so direct messages will not be answered (#23); "
+            "mentions are unaffected. Check the bot token and auth.test"
+        )
     # Skills index (#74): names only in the log -- a skill body is content, and
     # logs are a surface we keep boring.
     if config.SKILL_PATHS:

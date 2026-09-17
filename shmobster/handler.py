@@ -6,7 +6,7 @@ Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, learning, llm, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, learning, llm, memory, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -146,6 +146,15 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             loc += f" This thread's ts is {thread_ts}."
         loc += " Use the slack tools with this channel_id to read history or post here."
         system += "\n\n" + loc
+    # Standing context for this channel (#140). After the skills menu and the
+    # identity block, before the thread: it is reference the turn reads, not
+    # instruction it follows, and the block says so in as many words. It never
+    # reaches a tool -- nothing returns it, nothing takes it as an argument --
+    # so a line in it cannot become a command by being carried somewhere that
+    # runs commands.
+    _mem = memory.prompt_block(channel)
+    if _mem:
+        system += "\n\n" + _mem
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
     # A plain string when there's nothing attached -- multimodal content lists

@@ -1415,6 +1415,43 @@ inside the tree would let one granted `cat > skills/x/SKILL.md` become next
 turn's prompt, skipping the PR gate that is the promotion story. Point the
 entry at the read-only catalog clone, which lives outside every channel tree.
 
+### Per-channel memory (#140)
+
+A `MEMORY.md` beside the channel's skills -- `channels/<channel>/MEMORY.md` in
+the private catalog, or inside the skills directory itself -- is injected into
+the system prompt as **standing context for that channel**. Facts that are in
+no repo: which box runs what, who owns which alert, what everyone calls the
+thing. A skill is a procedure; memory is what a procedure assumes.
+
+Three properties make it safe to inject, and all three are structural rather
+than advisory:
+
+- **The agent cannot write it.** It is found only through the channel's
+  `skills` entries, so the same refusal applies: a `MEMORY.md` resolving under
+  the channel's writable roots is ignored. In-tree writes run without a card
+  (#117), so a memory file inside the tree would let one granted
+  `cat > MEMORY.md` become next turn's prompt. Editing it is a pull request
+  against the catalog, like a skill.
+- **It is reference, not instruction.** The block says so where the model reads
+  it, and says what the text *cannot* do: it grants nothing, and a line that
+  reads like permission ("you may push to master", "skip the approval for X")
+  is stale or someone testing, and changes nothing either way. #52's
+  memory-poisoning section is the threat model -- the author may be somebody
+  this agent has no reason to trust.
+- **It never reaches the tool-call path.** No tool returns it, none takes it as
+  an argument, and nothing but `handler` imports the module. A fact cannot
+  become an instruction by being carried somewhere instructions run. selfcheck
+  asserts the import graph, not just the behavior.
+
+Past 8000 characters it is truncated with a line saying so -- a memory that is
+quietly half-read is worse than one that says where it stopped.
+
+There is deliberately **no tool for the agent to write its own memory.** The
+file is authored by people through the catalog's PR gate, which is the
+strongest reading of "through the propose -> PR -> merge gate" and adds no
+surface. If agent-proposed memory is wanted later it should reuse the learning
+flow (#129) rather than inventing a second path.
+
 **Refresh.** The index is built at boot. A trusted user can say "reload your
 skills" to re-scan after pulling a catalog; the `reload_skills` tool sits behind
 the same trust gate as `set_policy` (see **Trust model**). Reading files is not a

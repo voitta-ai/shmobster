@@ -54,11 +54,18 @@ def main():
     by_day = collections.defaultdict(lambda: [0.0, 0, 0])
     for day, chan, rec in records(args.days, args.channel):
         calls = rec.get("calls")
-        if calls is None:
+        if not isinstance(calls, list):
             continue  # recorded before costs existed; not the same as "free"
         by_chan[chan][3] += 1
         for c in calls:
+            if not isinstance(c, dict):
+                continue
             v = c.get("cost")
+            # A cost that is not a number is not a cost. Coercing a string here
+            # would turn type drift into a total nobody could audit; counting
+            # it unpriced says "we do not know", which is true.
+            if isinstance(v, bool):
+                v = None
             priced = isinstance(v, (int, float))
             amount = float(v) if priced else 0.0
             for bucket in (by_chan[chan], by_vendor[c.get("vendor") or "unknown"], by_day[day]):

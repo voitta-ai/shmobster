@@ -97,8 +97,12 @@ def total(calls):
     priced = 0
     unpriced = 0
     for c in calls or []:
+        if not isinstance(c, dict):
+            continue
         v = c.get("cost")
-        if isinstance(v, (int, float)):
+        # bool is an int in Python, and a True in a cost field is type drift
+        # rather than a price.
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
             cost += float(v)
             priced += 1
         else:

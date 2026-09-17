@@ -56,6 +56,7 @@ for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 _ROUTER = None
+_RUNG_VENDORS = {}
 _ROUTER_VENDORS = None  # the vendor names the live router was built from
 
 _STATE_KEY = "parked_vendors"  # {vendor name: epoch seconds when it may be used again}
@@ -178,18 +179,15 @@ def _answering_vendor(resp):
     `model` alone is not enough for the same reason `_deployment_of` exists:
     litellm strips the provider prefix, so two vendors reached through
     different routers report the same string. The deployment id the Router
-    used -- `primary`, `fb0` -- is positional and maps straight back to the
-    waterfall, so that is preferred and the model string is the fallback."""
+    used -- `primary`, `fb0` -- is positional, and `_RUNG_VENDORS` records what
+    those positions meant *when that Router was built*: parking a vendor
+    rebuilds and renumbers, so resolving against the live waterfall would
+    credit a response in flight to whoever now holds its id."""
     try:
         hidden = getattr(resp, "_hidden_params", None) or {}
         dep = str(hidden.get("model_id") or "")
-        wf = _live_waterfall()
-        if dep == "primary" and wf:
-            return wf[0].get("name")
-        if dep.startswith("fb") and dep[2:].isdigit():
-            i = int(dep[2:]) + 1
-            if i < len(wf):
-                return wf[i].get("name")
+        if dep in _RUNG_VENDORS:
+            return _RUNG_VENDORS[dep]
         model = str(getattr(resp, "model", "") or "")
         matches = [v.get("name") for v in config.WATERFALL
                    if v.get("model") == model or v.get("model", "").endswith("/" + model)]
@@ -310,6 +308,15 @@ def _build():
     rest = wf[1:]
     for i, vendor in enumerate(rest):
         model_list.append(_deployment(f"fb{i}", vendor))
+    # Which rung is which, fixed at build time (#190). Reading it back from the
+    # live waterfall at attribution time is a race: parking a vendor rebuilds
+    # the Router and renumbers the rungs, so a response already in flight would
+    # be credited to whichever vendor now holds its id. The ids are positional,
+    # and this is the only place that knows what they meant.
+    global _RUNG_VENDORS
+    _RUNG_VENDORS = {m["model_name"]: (wf[0] if m["model_name"] == "primary"
+                                       else rest[int(m["model_name"][2:])]).get("name")
+                     for m in model_list}
     fallbacks = [{"primary": [f"fb{i}" for i in range(len(rest))]}] if rest else []
     retval = Router(
         model_list=model_list,

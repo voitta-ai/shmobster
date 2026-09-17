@@ -2983,4 +2983,32 @@ finally:
 _rc = next(t for t in tools.TOOLS if t["function"]["name"] == "report_cost")
 assert _rc["function"]["parameters"]["properties"] == {}, _rc
 
+# the resume path bills its own turn rather than the one before it: it goes
+# through handle(), whose first act is cost.start(). Asserted because the
+# adversarial review believed otherwise, and a reader might too.
+assert "cost.start()" in open(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "shmobster", "handler.py")).read()
+import inspect as _insp
+assert "handle(" in _insp.getsource(handler._resume_turn), "resume must route through handle()"
+
+# type drift is unpriced, not priced at whatever it parses to: a string or a
+# bool in a cost field means we do not know, and coercing it would turn a bad
+# record into a total nobody could audit
+_drift = [{"cost": "0.02"}, {"cost": True}, {"cost": None}, {"cost": 0.01}, "not a dict"]
+_t, _p, _u = cost.total(_drift)
+assert (_t, _p, _u) == (0.01, 1, 3), (_t, _p, _u)
+
+# the rung map is snapshotted when the Router is built, so parking a vendor
+# mid-turn cannot renumber the rungs under a response already in flight
+_rv_saved = dict(llm._RUNG_VENDORS)
+try:
+    llm._RUNG_VENDORS = {"primary": "anthropic", "fb0": "gemini"}
+    assert llm._answering_vendor(_Resp(0.01, dep="fb0")) == "gemini"
+    assert llm._answering_vendor(_Resp(0.01, dep="primary")) == "anthropic"
+    # an id from a Router that no longer exists resolves to nothing rather than
+    # to whoever holds that position now
+    assert llm._answering_vendor(_Resp(0.01, dep="fb7", model="zzz/unknown")) is None
+finally:
+    llm._RUNG_VENDORS = _rv_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

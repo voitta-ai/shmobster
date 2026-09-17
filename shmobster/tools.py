@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, gitcfg, grant, policy as policy_mod, redact, sandbox, skills, yolt_gate
+from . import approvals, config, cost as cost_mod, gitcfg, grant, policy as policy_mod, redact, sandbox, skills, trajectory, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -68,7 +68,23 @@ DESCRIBE = {
     },
 }
 
-TOOLS = [RUN_SHELL, DESCRIBE]
+REPORT_COST = {
+    "type": "function",
+    "function": {
+        "name": "report_cost",
+        "description": (
+            "What this thread and this channel have cost in model calls today. "
+            "Use it when someone asks what a turn, a thread or the day cost -- "
+            "do not estimate from token counts or model prices, which is "
+            "guessing at a number this can answer. Takes no arguments: it "
+            "reports the thread and channel of the current turn and cannot be "
+            "pointed at another."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+TOOLS = [RUN_SHELL, DESCRIBE, REPORT_COST]
 
 _MAX_OUTPUT = 4000
 
@@ -279,11 +295,60 @@ def capabilities(policy, channel=None):
     return retval
 
 
-def dispatch(name, args, policy, channel=None):
+def dispatch(name, args, policy, channel=None, thread_ts=None):
     if name == "run_shell":
         retval = run_shell(args.get("command", ""), policy, channel)
+    elif name == "report_cost":
+        retval = report_cost(channel, thread_ts)
     elif name == "describe_capabilities":
         retval = capabilities(policy, channel)
     else:
         retval = f"unknown tool: {name}"
+    return retval
+
+
+def report_cost(channel, thread_ts=None):
+    """This thread's and this channel's spend today (#190).
+
+    Deliberately takes no channel argument. #151 is the precedent: a reporting
+    tool that accepts a target is a tool that reports on somewhere else, and
+    the turn already knows where it is.
+
+    The current turn is included from the in-flight accumulator rather than
+    from the trajectory, because the turn has not been recorded yet -- asking
+    "what did this cost" mid-turn and being told about every turn but this one
+    is the obvious wrong answer."""
+    if not channel:
+        retval = "no channel in this turn, so there is nothing to total."
+        return retval
+    in_flight = cost_mod.peek()
+    today = trajectory.day(channel)
+    day_calls = [c for rec in today for c in (rec.get("calls") or [])]
+    lines = []
+    if thread_ts:
+        thread_recs = [r for r in today if r.get("thread_ts") == thread_ts]
+        thread_calls = [c for rec in thread_recs for c in (rec.get("calls") or [])]
+        lines.append(
+            f"This thread today: {cost_mod.summarize(thread_calls + in_flight)}"
+            f" (including this turn so far)."
+        )
+    lines.append(f"This channel today: {cost_mod.summarize(day_calls + in_flight)}.")
+    by_vendor = {}
+    for c in day_calls + in_flight:
+        by_vendor.setdefault(c.get("vendor") or "unknown", []).append(c)
+    # Shown when there is more than one vendor, and ALSO when everything landed
+    # in `unknown` -- otherwise a day whose rungs all failed attribution prints
+    # a total with no breakdown at all, which reads as "one vendor" rather than
+    # as "we could not tell". Same family as an unpriced call: a number that
+    # looks complete and is not.
+    if len(by_vendor) > 1 or "unknown" in by_vendor:
+        lines.append("By vendor today: " + "; ".join(
+            f"{v}: {cost_mod.summarize(cs)}" for v, cs in sorted(by_vendor.items())))
+    if "unknown" in by_vendor:
+        lines.append(
+            f"{len(by_vendor['unknown'])} call(s) could not be attributed to a "
+            f"configured vendor -- their cost is in the totals above, but not in "
+            f"any vendor's line."
+        )
+    retval = "\n".join(lines)
     return retval

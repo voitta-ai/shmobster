@@ -37,7 +37,7 @@ import litellm
 from litellm import Router
 from litellm.integrations.custom_logger import CustomLogger
 
-from . import codex_llm, config, state
+from . import codex_llm, config, cost, state
 
 # Never let the rented router log raw request params -- they carry api_key.
 # Belt and suspenders: disable verbose mode AND cap the LiteLLM logger at
@@ -56,6 +56,7 @@ for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 _ROUTER = None
+_RUNG_VENDORS = {}
 _ROUTER_VENDORS = None  # the vendor names the live router was built from
 
 _STATE_KEY = "parked_vendors"  # {vendor name: epoch seconds when it may be used again}
@@ -172,6 +173,30 @@ def _vendor_for(deployment, exc=None):
     return retval
 
 
+def _answering_vendor(resp):
+    """Which configured vendor answered, from the response.
+
+    `model` alone is not enough for the same reason `_deployment_of` exists:
+    litellm strips the provider prefix, so two vendors reached through
+    different routers report the same string. The deployment id the Router
+    used -- `primary`, `fb0` -- is positional, and `_RUNG_VENDORS` records what
+    those positions meant *when that Router was built*: parking a vendor
+    rebuilds and renumbers, so resolving against the live waterfall would
+    credit a response in flight to whoever now holds its id."""
+    try:
+        hidden = getattr(resp, "_hidden_params", None) or {}
+        dep = str(hidden.get("model_id") or "")
+        if dep in _RUNG_VENDORS:
+            return _RUNG_VENDORS[dep]
+        model = str(getattr(resp, "model", "") or "")
+        matches = [v.get("name") for v in config.WATERFALL
+                   if v.get("model") == model or v.get("model", "").endswith("/" + model)]
+        retval = matches[0] if len(matches) == 1 else None
+        return retval
+    except Exception:
+        return None
+
+
 def is_budget_error(exc):
     """A 4xx that names a spend problem. Status alone is not enough: 400 is also
     'your request was malformed', and 402 is unambiguous but rare."""
@@ -283,6 +308,15 @@ def _build():
     rest = wf[1:]
     for i, vendor in enumerate(rest):
         model_list.append(_deployment(f"fb{i}", vendor))
+    # Which rung is which, fixed at build time (#190). Reading it back from the
+    # live waterfall at attribution time is a race: parking a vendor rebuilds
+    # the Router and renumbers the rungs, so a response already in flight would
+    # be credited to whichever vendor now holds its id. The ids are positional,
+    # and this is the only place that knows what they meant.
+    global _RUNG_VENDORS
+    _RUNG_VENDORS = {m["model_name"]: (wf[0] if m["model_name"] == "primary"
+                                       else rest[int(m["model_name"][2:])]).get("name")
+                     for m in model_list}
     fallbacks = [{"primary": [f"fb{i}" for i in range(len(rest))]}] if rest else []
     retval = Router(
         model_list=model_list,
@@ -323,6 +357,10 @@ def complete(messages, tools=None):
     if tools:
         kwargs["tools"] = tools
     resp = _ensure().completion(**kwargs)
+    # What it cost, on the rung that actually answered (#190). The Router may
+    # have failed over, so the vendor is read back off the response rather than
+    # assumed to be the primary.
+    cost.note(resp, _answering_vendor(resp))
     retval = resp.choices[0].message
     return retval
 

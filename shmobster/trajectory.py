@@ -71,7 +71,7 @@ def _path(channel, when):
     return retval
 
 
-def record(channel, user_id, thread_ts, text, steps, answer):
+def record(channel, user_id, thread_ts, text, steps, answer, calls=None):
     """Append one turn. Never raises: a turn that cannot be recorded still
     happened, and the reply is on its way to the channel."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -83,6 +83,11 @@ def record(channel, user_id, thread_ts, text, steps, answer):
         "request": redact.scrub(text if isinstance(text, str) else str(text))[:_TEXT_MAX],
         "steps": steps,
         "answer": redact.scrub(answer or "")[:_TEXT_MAX],
+        # What the turn's model calls cost (#190). A turn with none -- an
+        # approval resume that never reached the model -- records an empty
+        # list rather than being absent, so a reader can tell "no calls" from
+        # "recorded before costs existed".
+        "calls": list(calls or []),
     }
     path = _path(channel, now)
     try:
@@ -144,5 +149,22 @@ def thread(channel, thread_ts, days=14):
                         out.append(rec)
         except OSError:
             continue
+    retval = out
+    return retval
+
+
+def day(channel, when=None):
+    """Every record for one channel on one UTC day, for a rollup (#190)."""
+    when = when or datetime.datetime.now(datetime.timezone.utc)
+    out = []
+    try:
+        with open(_path(channel, when), "r") as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
     retval = out
     return retval

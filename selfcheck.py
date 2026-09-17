@@ -43,7 +43,7 @@ for _var in (
 
 import litellm  # noqa: E402
 
-from shmobster import __version__, admin_tools, announce, approvals, build, config, handler, identity, llm, memory, policy, redact, sandbox, skills, slack_blocks, slack_tools, spine, state, tools, yolt_gate  # noqa: E402
+from shmobster import __version__, admin_tools, announce, approvals, build, config, cost, handler, identity, llm, memory, policy, redact, sandbox, skills, slack_blocks, slack_tools, spine, state, tools, trajectory, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
 # config points at a placeholder path (CI has no yolt checkout). Stand up a stub
@@ -740,7 +740,7 @@ policy.resolve = lambda ch: _pols.get(ch, {})
 _seen_pol = []
 
 
-def _rec_tools(name, args, pol, channel=None):
+def _rec_tools(name, args, pol, channel=None, thread_ts=None):
     _seen_pol.append(pol)
     return "ok"
 
@@ -959,7 +959,7 @@ if True:
         _leaked.append(json.dumps(messages))
         return _FakeMsg(content="done")
 
-    tools.dispatch = lambda name, args, pol, channel=None: _akia
+    tools.dispatch = lambda name, args, pol, channel=None, thread_ts=None: _akia
     llm.complete = lambda messages, tools=None: (
         _FakeMsg(tool_calls=[_FakeCall("t", "run_shell", '{"command":"env"}')])
         if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
@@ -2895,5 +2895,132 @@ for _mod in ("tools.py", "slack_tools.py", "admin_tools.py", "skills.py", "learn
 # the one module that may is the one that builds the prompt
 assert re.search(r"^from \. import .*\bmemory\b",
                  open(os.path.join(_mem_here, "shmobster", "handler.py")).read(), re.M)
+
+# 44) what each call cost, captured per turn (#190). The point of the feature
+# is a number an operator can trust, so the assertions are mostly about the one
+# way a cost rollup goes quietly wrong: reporting spending as free.
+class _Resp:
+    def __init__(self, cost_v, model="anthropic/claude-sonnet-5", dep="primary",
+                 prompt=100, completion=20, cached=None):
+        self._hidden_params = {"response_cost": cost_v, "model_id": dep}
+        self.model = model
+        self.usage = type("U", (), {
+            "prompt_tokens": prompt, "completion_tokens": completion,
+            "prompt_tokens_details": (type("D", (), {"cached_tokens": cached})()
+                                      if cached is not None else None),
+        })()
+
+
+cost.start()
+cost.note(_Resp(0.01), "anthropic")
+cost.note(_Resp(0.02), "gemini")
+_c = cost.peek()
+assert len(_c) == 2 and cost.peek() == _c, "peek must not clear -- a mid-turn question needs it"
+assert _c[0]["prompt_tokens"] == 100 and _c[0]["completion_tokens"] == 20
+_tot, _priced, _unpriced = cost.total(_c)
+assert (_tot, _priced, _unpriced) == (0.03, 2, 0), (_tot, _priced, _unpriced)
+
+# an unpriced call is None, never 0: a subscription rung and a model missing
+# from litellm's cost map both report nothing, and a rollup showing those as
+# free is wrong in the one direction nobody audits
+cost.note(_Resp(None, model="codex/gpt-5", dep="fb1"), "codex")
+_c = cost.peek()
+assert _c[-1]["cost"] is None, _c[-1]
+assert _c[-1]["prompt_tokens"] == 100, "tokens are still recorded for an unpriced rung"
+_tot, _priced, _unpriced = cost.total(_c)
+assert (_priced, _unpriced) == (2, 1), (_priced, _unpriced)
+# ...and the summary says so rather than implying the total is complete
+_sum = cost.summarize(_c)
+assert "unpriced" in _sum and "higher than this" in _sum, _sum
+
+# cached tokens are carried when the vendor reports them
+cost.note(_Resp(0.001, cached=90))
+assert cost.peek()[-1]["cached_tokens"] == 90
+
+# drain clears, so the next turn starts at zero rather than inheriting
+assert len(cost.drain()) == 4
+assert cost.peek() == []
+cost.note(_Resp(0.5))
+cost.start()
+assert cost.peek() == [], "start() must clear what a raised turn left behind"
+
+# a malformed response is recorded as unknown rather than raising: a turn that
+# answered is not one to fail over bookkeeping
+cost.note(object())
+assert cost.peek() == [] or cost.peek()[-1]["cost"] is None
+cost.drain()
+
+# the trajectory carries the turn's calls, and an empty list is not absence --
+# a reader can tell "no model calls" from "recorded before #190"
+_cost_dir = tempfile.mkdtemp()
+_cost_saved_dir = trajectory._DIR
+try:
+    trajectory._DIR = _cost_dir
+    trajectory.record("C_COST", "U1", "1.1", "hi", [], "hello",
+                      [{"vendor": "anthropic", "cost": 0.01, "prompt_tokens": 10},
+                       {"vendor": "codex", "cost": None, "prompt_tokens": 5}])
+    _recs = trajectory.day("C_COST")
+    assert len(_recs) == 1 and len(_recs[0]["calls"]) == 2, _recs
+    trajectory.record("C_COST", "U1", "2.2", "x", [], "y")
+    assert trajectory.day("C_COST")[1]["calls"] == [], "no calls is [] not missing"
+
+    # the in-channel report is scoped to this turn's channel and thread, takes
+    # no target, and includes the turn in flight -- asking mid-turn and being
+    # told about every turn but this one is the obvious wrong answer
+    cost.start()
+    cost.note(_Resp(0.04), "anthropic")
+    _rep = tools.report_cost("C_COST", "1.1")
+    assert "This thread today" in _rep and "This channel today" in _rep, _rep
+    assert "including this turn so far" in _rep, _rep
+    assert "unpriced" in _rep, "the codex call must not vanish into the total"
+    assert "no channel in this turn" in tools.report_cost(None, "1.1")
+    cost.drain()
+
+    # a call nobody could attribute is named rather than folded away. The
+    # vendor breakdown is normally shown only when there is more than one, so
+    # a day whose rungs ALL failed attribution would otherwise print a total
+    # with no breakdown -- reading as "one vendor" rather than "we could not
+    # tell", which is the same failure as pricing an unpriced call at zero.
+    cost.start()
+    cost.note(_Resp(0.05, model="mystery/model", dep="fb9"), None)
+    _rep = tools.report_cost("C_COST", "9.9")
+    assert "could not be attributed" in _rep, _rep
+    assert "unknown" in _rep, _rep
+    cost.drain()
+finally:
+    trajectory._DIR = _cost_saved_dir
+
+# the tool takes no channel argument at all -- #151's precedent: a reporting
+# tool that accepts a target is one that reports on somewhere else
+_rc = next(t for t in tools.TOOLS if t["function"]["name"] == "report_cost")
+assert _rc["function"]["parameters"]["properties"] == {}, _rc
+
+# the resume path bills its own turn rather than the one before it: it goes
+# through handle(), whose first act is cost.start(). Asserted because the
+# adversarial review believed otherwise, and a reader might too.
+assert "cost.start()" in open(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "shmobster", "handler.py")).read()
+import inspect as _insp
+assert "handle(" in _insp.getsource(handler._resume_turn), "resume must route through handle()"
+
+# type drift is unpriced, not priced at whatever it parses to: a string or a
+# bool in a cost field means we do not know, and coercing it would turn a bad
+# record into a total nobody could audit
+_drift = [{"cost": "0.02"}, {"cost": True}, {"cost": None}, {"cost": 0.01}, "not a dict"]
+_t, _p, _u = cost.total(_drift)
+assert (_t, _p, _u) == (0.01, 1, 3), (_t, _p, _u)
+
+# the rung map is snapshotted when the Router is built, so parking a vendor
+# mid-turn cannot renumber the rungs under a response already in flight
+_rv_saved = dict(llm._RUNG_VENDORS)
+try:
+    llm._RUNG_VENDORS = {"primary": "anthropic", "fb0": "gemini"}
+    assert llm._answering_vendor(_Resp(0.01, dep="fb0")) == "gemini"
+    assert llm._answering_vendor(_Resp(0.01, dep="primary")) == "anthropic"
+    # an id from a Router that no longer exists resolves to nothing rather than
+    # to whoever holds that position now
+    assert llm._answering_vendor(_Resp(0.01, dep="fb7", model="zzz/unknown")) is None
+finally:
+    llm._RUNG_VENDORS = _rv_saved
 
 print(f"selfcheck OK -- shmobster {_b}")

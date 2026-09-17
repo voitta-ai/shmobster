@@ -254,6 +254,31 @@ def _mark_alerted(request_id, channel, user_id):
         del _CLICK_ALERTED[next(iter(_CLICK_ALERTED))]
 
 
+# Slack refuses a section whose text runs past 3000 characters, and a parked
+# command can be longer than that (#215). The original card hits the same wall
+# -- `_post_pending` logs the failure and unsurfaces the request -- so for such
+# a command there was never a card standing anywhere, and forcing one here
+# would cost the alert itself: the post raises, `_post_alert` returns False,
+# `_mark_alerted` never fires, and the trusted users are simply not told that
+# an unauthorized click happened. That is the one thing this path exists to
+# guarantee. So an oversized card degrades to the wording it replaced, which
+# was always text and always fit.
+_SLACK_SECTION_MAX = 3000
+
+
+def _fits(card):
+    """Whether every section in a card is inside Slack's per-section limit.
+
+    Checked rather than remembered: a size rule that lives only in a comment is
+    one a longer command walks straight past, and the failure is silent at the
+    surface that matters."""
+    retval = all(
+        len(b.get("text", {}).get("text", "")) <= _SLACK_SECTION_MAX
+        for b in (card or []) if b.get("type") == "section"
+    )
+    return retval
+
+
 def _live_card(queue, key, req):
     """The still-parked request, rendered fresh and clickable (#215).
 
@@ -351,12 +376,27 @@ def refuse_click(request_id, ctx, action_id):
         # other then reads "no longer pending", which is true. The command is
         # not repeated here -- the card renders it, scrubbed, and printing it
         # twice in one message is how a credential gets two chances (#72).
-        alert = (
-            f":warning: {who} clicked *{label}* on request [{key}], but only "
-            f"trusted users may act on a parked command -- nothing ran. It is "
-            f"still parked, so {_trusted_tags()} can act on it right here."
-        )
         card = _live_card(queue, key, live)
+        if not _fits(card):
+            card = None
+        # Reached only for "pending", which `status()` never returns without a
+        # request -- said out loud because the fallback below quotes it.
+        shown = req["command"] if req is not None else f"(request {key})"
+        head = (f":warning: {who} clicked *{label}* on request [{key}], but only "
+                f"trusted users may act on a parked command -- nothing ran. The "
+                f"request is still parked")
+        if card is None:
+            # No card to carry, so say where the original is and name the
+            # command, exactly as before. Scrubbed like every other rendering of
+            # a parked command (#72): a credential rides argv routinely, and
+            # this is a fresh channel post.
+            alert = (
+                f"{head} and the *Approve* / *Deny* buttons on the card above "
+                f"are still live, so {_trusted_tags()} can act on it there."
+                "\n" + redact.scrub(f"```{shown}```")
+            )
+        else:
+            alert = f"{head}, so {_trusted_tags()} can act on it right here."
     if _post_alert(ctx, alert, card):
         _mark_alerted(key, channel, user_id)
     retval = _REFUSED

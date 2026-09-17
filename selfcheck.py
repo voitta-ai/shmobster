@@ -3363,4 +3363,32 @@ assert _posted == {}, "a second click from the same user must post nothing at al
 for _k in approvals.ids("C_215"):
     approvals.pop(_k, "C_215")
 
+# ...and a command too long to fit a Slack section gives up the card, never the
+# alert. Slack refuses a section over 3000 characters, so carrying a card for
+# such a command would raise, _post_alert would return False, _mark_alerted
+# would never fire, and the trusted users would not hear about the
+# unauthorized click at all -- trading the one guarantee this path owes them
+# for a convenience. The original card cannot exist for these either
+# (_post_pending unsurfaces on the same failure), so there is nothing lost by
+# falling back to the wording that was always text and always fit.
+_long = "echo " + "x" * 4000
+assert not admin_tools._fits(slack_blocks.approval("k-1", {"command": _long, "reason": "r"}))
+assert admin_tools._fits(slack_blocks.approval("k-1", {"command": "echo hi", "reason": "r"}))
+
+_r215e = approvals.add(_long, "C_215L", "unknown")
+_posted.clear()
+admin_tools.refuse_click(_r215e, {"user_id": "U_STRANGER_215e", "channel": "C_215L",
+                                  "client": _FakePost()}, "approve_command")
+assert _posted["blocks"] is None, "an oversized card must not be sent"
+# the alert still went, still tags the trusted users, still names the command,
+# and points at the original card the way it did before #215
+assert "U_STRANGER_215e" in _posted["text"], _posted
+assert "<@U_TRUSTED>" in _posted["text"], _posted
+assert "card above" in _posted["text"], _posted
+assert _long in _posted["text"], "the fallback has to name the command itself"
+# and the alert counts as delivered, so the dedupe still holds for it
+assert admin_tools._alerted(approvals.canonical(_r215e), "C_215L", "U_STRANGER_215e")
+for _k in approvals.ids("C_215L"):
+    approvals.pop(_k, "C_215L")
+
 print(f"selfcheck OK -- shmobster {_b}")

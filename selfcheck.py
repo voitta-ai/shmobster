@@ -2975,6 +2975,18 @@ try:
     assert "unpriced" in _rep, "the codex call must not vanish into the total"
     assert "no channel in this turn" in tools.report_cost(None, "1.1")
     cost.drain()
+
+    # a call nobody could attribute is named rather than folded away. The
+    # vendor breakdown is normally shown only when there is more than one, so
+    # a day whose rungs ALL failed attribution would otherwise print a total
+    # with no breakdown -- reading as "one vendor" rather than "we could not
+    # tell", which is the same failure as pricing an unpriced call at zero.
+    cost.start()
+    cost.note(_Resp(0.05, model="mystery/model", dep="fb9"), None)
+    _rep = tools.report_cost("C_COST", "9.9")
+    assert "could not be attributed" in _rep, _rep
+    assert "unknown" in _rep, _rep
+    cost.drain()
 finally:
     trajectory._DIR = _cost_saved_dir
 

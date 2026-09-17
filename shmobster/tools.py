@@ -336,8 +336,19 @@ def report_cost(channel, thread_ts=None):
     by_vendor = {}
     for c in day_calls + in_flight:
         by_vendor.setdefault(c.get("vendor") or "unknown", []).append(c)
-    if len(by_vendor) > 1:
+    # Shown when there is more than one vendor, and ALSO when everything landed
+    # in `unknown` -- otherwise a day whose rungs all failed attribution prints
+    # a total with no breakdown at all, which reads as "one vendor" rather than
+    # as "we could not tell". Same family as an unpriced call: a number that
+    # looks complete and is not.
+    if len(by_vendor) > 1 or "unknown" in by_vendor:
         lines.append("By vendor today: " + "; ".join(
             f"{v}: {cost_mod.summarize(cs)}" for v, cs in sorted(by_vendor.items())))
+    if "unknown" in by_vendor:
+        lines.append(
+            f"{len(by_vendor['unknown'])} call(s) could not be attributed to a "
+            f"configured vendor -- their cost is in the totals above, but not in "
+            f"any vendor's line."
+        )
     retval = "\n".join(lines)
     return retval

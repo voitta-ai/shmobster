@@ -8,7 +8,7 @@ import logging
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, proposals, redact, sandbox, skills, slack_blocks, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -144,6 +144,14 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
             logging.exception("could not report a stale approval click")
         return
     try:
+        # A reaction as well as the rewrite (#206). The claimed-card update
+        # below already says "Working on", but a reaction is the signal people
+        # are trained on: every user message gets :eyes: the moment the agent
+        # picks it up, and an approval click got nothing of the kind. Between
+        # the click and the result -- seconds, on a slow command -- there was no
+        # way to tell "it landed and is running" from "it was lost", which is
+        # exactly what the bug #169 fixed used to look like.
+        slack_tools.react(client, channel, message_ts, add="eyes")
         # Acknowledge the click before doing the work (#101), not after. The
         # final update can be seconds away -- this one ran a network call -- and
         # until it lands the card is unchanged with its buttons still live,
@@ -178,6 +186,11 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
     except Exception:
         logging.exception("could not update approval message")
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=result[:2900])
+    # The receipt becomes a verdict: :eyes: meant "heard you", and it has to
+    # stop meaning that once the answer is on the card. Denial is not failure,
+    # so it gets its own mark rather than the one that reads as an error.
+    slack_tools.react(client, channel, message_ts, remove="eyes",
+           add="white_check_mark" if action.get("action_id") == "approve_command" else "no_entry_sign")
     if queue is approvals:
         _resume_thread(client, channel, thread_ts, req_id, req,
                        approved=action.get("action_id") == "approve_command",

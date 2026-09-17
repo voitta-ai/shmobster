@@ -220,6 +220,12 @@ What that feels like in practice:
 - **Read-only work just happens.** No confirmation step for a `git log`, and no
   approval spam -- that was the point (see
   [What we tried before](#what-we-tried-before)).
+- **A click gets a receipt.** Approve or Deny reacts `:eyes:` on the card
+  immediately, the same signal a message gets, and that becomes
+  `:white_check_mark:` or `:no_entry_sign:` when the result lands (#206).
+  Without it there was no way to tell "the click landed and the command is
+  running" from "the click was lost" until the card rewrote itself, which is
+  what the stall this fixed (#169) used to look like.
 - **A mutating command comes back as a card** with Approve / Deny. Anyone in the
   channel may ask for it; only a trusted user may release it. `@agent approve
   <id>` does the same job when the buttons are out of reach.

@@ -3176,5 +3176,61 @@ finally:
 _wt = next(t for t in tools.TOOLS if t["function"]["name"] == "web_fetch")
 assert list(_wt["function"]["parameters"]["properties"]) == ["url"], _wt
 assert _wt["function"]["parameters"]["required"] == ["url"]
+# 47) an approval click gets a receipt (#206). A user message gets :eyes: the
+# moment the agent picks it up; a click on Approve got nothing until the
+# command finished and the card was rewritten -- seconds, on a slow command, in
+# which "it landed and is running" and "it was lost" look identical. That is
+# the shape the #169 bug had, so the absence of a signal was read as the bug
+# coming back.
+class _ReactSlack:
+    def __init__(self, fail=None):
+        self.calls = []
+        self.fail = fail or {}
+
+    def _do(self, kind, channel, name, timestamp):
+        self.calls.append((kind, name))
+        if name in self.fail:
+            raise RuntimeError(self.fail[name])
+
+    def reactions_add(self, channel, name, timestamp):
+        self._do("add", channel, name, timestamp)
+
+    def reactions_remove(self, channel, name, timestamp):
+        self._do("remove", channel, name, timestamp)
+
+
+_rc = _ReactSlack()
+slack_tools.react(_rc, "C1", "1.1", add="eyes")
+assert _rc.calls == [("add", "eyes")], _rc.calls
+
+# the receipt becomes a verdict, and the removal happens before the mark so the
+# card never shows both at once
+_rc = _ReactSlack()
+slack_tools.react(_rc, "C1", "1.1", remove="eyes", add="white_check_mark")
+assert _rc.calls == [("remove", "eyes"), ("add", "white_check_mark")], _rc.calls
+
+# denial is not failure, so it gets its own mark rather than the error one
+_rc = _ReactSlack()
+slack_tools.react(_rc, "C1", "1.1", remove="eyes", add="no_entry_sign")
+assert ("add", "no_entry_sign") in _rc.calls
+
+# Slack rejects a reaction that is already there, and a removal of one that is
+# not -- both mean the state is already what was asked for, so two deliveries
+# of one press must not turn cosmetics into a logged error
+_rc = _ReactSlack(fail={"eyes": "already_reacted"})
+slack_tools.react(_rc, "C1", "1.1", add="eyes")          # must not raise
+_rc = _ReactSlack(fail={"eyes": "no_reaction"})
+slack_tools.react(_rc, "C1", "1.1", remove="eyes")       # must not raise
+
+# ...and a real failure is swallowed too: a missing reactions:write scope must
+# cost the receipt and nothing else, never the approval it is reporting on
+_rc = _ReactSlack(fail={"eyes": "missing_scope"})
+slack_tools.react(_rc, "C1", "1.1", add="eyes")
+assert _rc.calls == [("add", "eyes")]
+
+# no-op when asked for nothing
+_rc = _ReactSlack()
+slack_tools.react(_rc, "C1", "1.1")
+assert _rc.calls == []
 
 print(f"selfcheck OK -- shmobster {_b}")

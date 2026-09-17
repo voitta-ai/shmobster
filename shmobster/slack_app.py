@@ -243,10 +243,14 @@ def on_decline_skill(ack, body, client, action):
     )
 
 
-@app.event("app_mention")
-def on_mention(event, say, client, logger):
-    if _seen(event.get("ts")):
-        return  # Slack can deliver an event more than once -- handle it once.
+def _turn(event, say, client, logger):
+    """One turn, from whichever Slack event carried it.
+
+    A mention in a channel and a direct message are the same turn: the same
+    handler, the same policy lookup, the same approval cards. Only the door
+    differs (#23). Keeping one body means a DM cannot quietly miss something a
+    mention gets -- attachments, thread context, the parked-request cards --
+    which is exactly what a second copy of this would drift into."""
     channel = event.get("channel")
     # Ack immediately with a reaction so we don't look silent while churning.
     # Best-effort: needs reactions:write; if not granted, this no-ops.
@@ -254,8 +258,6 @@ def on_mention(event, say, client, logger):
         client.reactions_add(channel=channel, name="eyes", timestamp=event.get("ts"))
     except Exception:
         pass
-    # Respond wherever invited (#36): no channel allowlist gate. Capability is
-    # scoped by per-channel policy, not by which channels we respond in.
     thread_ts = event.get("thread_ts") or event.get("ts")
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
     # Attachments ride in event["files"], not in the text (#68). Only this
@@ -280,11 +282,30 @@ def on_mention(event, say, client, logger):
     _post_pending(client, channel, thread_ts)
 
 
+@app.event("app_mention")
+def on_mention(event, say, client, logger):
+    if _seen(event.get("ts")):
+        return  # Slack can deliver an event more than once -- handle it once.
+    # Respond wherever invited (#36): no channel allowlist gate. Capability is
+    # scoped by per-channel policy, not by which channels we respond in.
+    _turn(event, say, client, logger)
+
+
 @app.event("message")
-def _ignore_message(event):
-    # Iter 0 answers mentions only. Ack other message events so Bolt doesn't
-    # log a 404 "unhandled request" for every message in the channel.
-    return
+def on_message(event, say, client, logger):
+    """A direct message is a turn; a channel message still needs a mention.
+
+    Trust does not change with the door: `trusted_users` is per user, so the
+    same person has the same authority in a DM as in a channel, and the channel
+    id a DM resolves to (`D...`) takes a policy like any other -- one that is
+    absent falls back to `default_policy`, so a deployment wanting DMs narrower
+    than its default says so there. The decision itself is `identity.dm_turn`,
+    where it can be tested without a Slack connection."""
+    if not identity.dm_turn(event):
+        return
+    if _seen(event.get("ts")):
+        return  # a mention inside a DM arrives twice, once per event type
+    _turn(event, say, client, logger)
 
 
 def _resolve_label(client):
@@ -316,6 +337,14 @@ def main():
     except Exception:
         logging.exception("could not resolve bot user id")
     logging.info("agent: %s (%s) -- shmobster %s", config.AGENT_LABEL, config.BOT_USER_ID, build())
+    if not config.BOT_USER_ID:
+        # `identity.dm_turn` refuses every DM without it, on purpose: an agent
+        # that cannot recognize its own posts is one that can answer them.
+        # Mentions still work, because there the mention is the address.
+        logging.warning(
+            "bot user id unresolved, so direct messages will not be answered (#23); "
+            "mentions are unaffected. Check the bot token and auth.test"
+        )
     # Skills index (#74): names only in the log -- a skill body is content, and
     # logs are a surface we keep boring.
     if config.SKILL_PATHS:

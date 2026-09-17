@@ -7,7 +7,8 @@ own prior posts AND, crucially, see a sibling agent's posts as a *different*
 agent rather than as itself -- the mislabeling that was read as impersonation.
 
 Used by both history surfaces: the in-thread context flattener (slack_app) and
-the slack_read_* tools (slack_tools)."""
+the slack_read_* tools (slack_tools) -- and by the ingress, to decide whether a
+message event is a turn at all (#23)."""
 import re
 
 from . import config
@@ -38,4 +39,38 @@ def speaker(m):
         retval = f"{name} (another agent)" if name else f"another agent ({uid or m.get('bot_id')})"
         return retval
     retval = f"user {uid}" if uid else "user"
+    return retval
+
+
+def dm_turn(event):
+    """True when this `message` event is a direct message this agent should
+    answer (#23).
+
+    In a channel the mention is the address, and answering every message would
+    make the agent a participant in conversations nobody asked it into. A DM
+    has no one else in it, so the message *is* the address, and requiring
+    `@shmobster` in a one-to-one conversation is a tax with nothing on the
+    other side.
+
+    The rest is about not talking to ourselves. A reply posted into a DM comes
+    back as a `message` event, and an agent that answers its own posts will
+    hold both ends of the conversation until the dedup table rolls over. Three
+    separate ways that shows up: `bot_id` on anything a bot posted, our own
+    `BOT_USER_ID` when the app posts as its user, and a `subtype` for the edits
+    and joins and deletions that are not somebody talking."""
+    if (event or {}).get("channel_type") != "im":
+        return False
+    if event.get("bot_id") or event.get("subtype"):
+        return False
+    # Not knowing who we are is a reason not to answer, not a reason to skip
+    # the check. `bot_id` already catches our own posts -- the app posts with a
+    # bot token, so Slack sets it -- but that is one guard standing alone, and
+    # the failure it would be standing alone against is an agent talking to
+    # itself in a loop. The id is resolved before serving; if it is empty,
+    # something is wrong enough that DMs can wait. Startup says so.
+    if not config.BOT_USER_ID:
+        return False
+    if event.get("user") == config.BOT_USER_ID:
+        return False
+    retval = bool(event.get("user"))
     return retval

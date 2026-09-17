@@ -41,7 +41,7 @@ python:      "3.12+"          # CI pins 3.12
 entrypoint:  .venv/bin/python -m shmobster.slack_app
 check:       .venv/bin/python selfcheck.py    # offline; the repo's whole test surface
 service:     deploy/service.sh {install,restart,update,status,logs,uninstall}
-ingest:      slack socket mode, app_mention events    # DMs are #23
+ingest:      slack socket mode, app_mention + DM events
 files:
   config:       shmobster-config.json       # $SHMOBSTER_CONFIG       gitignored, chmod 600
   policies:     shmobster-policies.json     # $SHMOBSTER_POLICIES     gitignored, chmod 600
@@ -202,10 +202,18 @@ someone who has done it before.
 
 ### Talking to it
 
-@mention it in a channel it has been invited to. It reacts `:eyes:` as soon as
-it has the message (#32) and replies in the thread; the thread is the session,
-so a follow-up does not have to repeat itself (#11). Attach an image or a text
-file to the mention and it reads it (#68).
+@mention it in a channel it has been invited to, **or just message it
+directly** -- in a DM the message is the address, so no mention is needed
+(#23). It reacts `:eyes:` as soon as it has the message (#32) and replies in
+the thread; the thread is the session, so a follow-up does not have to repeat
+itself (#11). Attach an image or a text file and it reads it (#68).
+
+A DM is the same turn as a mention: same handler, same policy lookup, same
+approval cards. **Trust does not change with the door** -- `trusted_users` is
+per user, so the same person has the same authority either way. The channel id
+a DM resolves to (`D...`) takes a policy like any other, and one that is absent
+falls back to `default_policy`; a deployment that wants DMs narrower than its
+default says so there.
 
 What that feels like in practice:
 
@@ -220,8 +228,7 @@ What that feels like in practice:
   that way; the trusted list is file-only.
 - **It knows which build it is.** Ask it.
 
-Not yet: DMs (#23 -- it only sees `app_mention` events) and arbitrary URLs
-(#62).
+Not yet: arbitrary URLs (#62).
 
 ### New instance setup
 
@@ -285,6 +292,7 @@ Every bot scope the loop actually uses, all granted by
 | `channels:history` | read thread / channel context in public channels |
 | `groups:history` | the same, in private channels |
 | `im:history`, `mpim:history` | the same, in DMs and group DMs |
+| `message.im` event | receive direct messages, which are answered without a mention (#23) |
 | `reactions:write` | the `:eyes:` "on it" ack |
 | `files:read` | download image and text attachments on a mention (#68) |
 

@@ -3233,4 +3233,70 @@ _rc = _ReactSlack()
 slack_tools.react(_rc, "C1", "1.1")
 assert _rc.calls == []
 
+# 48) `2>&1` opens no file (#213). The grant layer allowed `<` as the only
+# non-writing redirect and failed closed on the rest, which is the right
+# default and the wrong answer for descriptor duplication: `2>&1` points one
+# descriptor at another and `2>&-` closes one, so neither can write anything.
+# Counted as writes, they shadowed the read rule -- `jq . big.json 2>&1 | head`
+# parked for an approval card, a local read of a local file refused for a
+# reason unrelated to what it does, three times in one live thread.
+_rpol = {"cwd": "/tmp"}
+for _c in ("cat f 2>&1", "cat f >&2", "cat f 1>&2", "cat f 2>&-", "cat f <&3",
+           "jq . f 2>&1 | head -c 6000",
+           "cd /tmp && jq .a f.json 2>&1 | head -c 6000"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert _ok, (_c, _why)
+
+# The whole risk of the above is that bash spells a descriptor dup and a
+# two-stream file write with the same operator: `>&2` writes nothing, and
+# `>&out.txt` creates a file. tree-sitter types the destinations `number` and
+# `word`, so the rule reads the parse rather than the string -- and everything
+# that is neither, an expansion included, stays on the write path.
+for _c in ("cat f >&out.txt", "cat f &>out.txt", "cat f &>>out.txt",
+           "cat f >&$X", "cat f > out.txt", "cat f >> out.txt",
+           "cat f 2>&1 > out.txt", "cat f > /usr/local/bin/foo"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert not _ok, (_c, _why)
+
+# ...and a dup does not launder a verb the layer would never have granted
+for _c in ("curl -s https://example.com/ 2>&1", "rm -rf / 2>&1"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert not _ok, (_c, _why)
+
+# The refusal has to name the redirect. It used to read `no rule: jq` -- the
+# classifier's words about its own ruleset -- while `jq` sat in READ_VERBS all
+# along, so the card sent a human to check a list that already had the verb in
+# it and told them nothing about the cause.
+_ok, _why = grant.check("jq . f > out.json", _rpol)
+assert not _ok, _why
+assert "redirects output to a file" in _why, _why
+assert "no rule" not in _why, _why
+
+# ...including the numbers an adversarial review guessed would be typed `word`
+# and let a file through. They are typed `number`, and bash answers them as
+# descriptors: `>&08` and `>&999` exit 1 with "Bad file descriptor" and create
+# nothing. Measured, because the claim was about this parser and this shell.
+for _c in ("cat f >&01", "cat f 1>&02", "cat f >&08", "cat f >&999"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert _ok, (_c, _why)
+
+# A redirect can also sit BEFORE its command, and bash writes the file just the
+# same: `>out.txt cat f` is `cat f > out.txt` reordered. Only the trailing form
+# is a redirected_statement -- the leading one is a file_redirect child of the
+# command node, which `redirected()` never saw and `argv()` skipped, so the
+# trailing form parked and the leading one was granted "cat: read-only" (#213).
+# Word order decided whether a write needed a card.
+for _c in (">out.txt cat f", "1>out.txt cat f", ">>out.txt cat f",
+           ">/usr/local/bin/foo cat f", ">&out.txt cat f", "&>out.txt cat f"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert not _ok, (_c, _why)
+
+# ...while a leading redirect that writes nothing stays granted, both ways round
+for _c in ("2>&1 cat f", "</dev/null cat f", ">/dev/null cat f"):
+    _ok, _why = grant.check(_c, _rpol)
+    assert _ok, (_c, _why)
+
+# the two spellings of the same write now agree
+assert grant.check("cat f >out.txt", _rpol)[0] is grant.check(">out.txt cat f", _rpol)[0]
+
 print(f"selfcheck OK -- shmobster {_b}")

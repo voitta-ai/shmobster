@@ -152,6 +152,39 @@ _DEV_OK = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
 # anything unrecognized, counts as a write -- the fail-closed direction.
 _READ_REDIRECT = frozenset(("<",))
 
+# ...with one exception, and it is an exception about descriptors rather than
+# about files (#213). `2>&1` opens nothing: it points one descriptor at
+# another, and `2>&-` closes one. Neither names a path, so neither can write.
+# Counting them as writes made `jq . big.json 2>&1 | head` park for an approval
+# card -- a local read of a local file, refused for a reason unrelated to what
+# it does.
+_DUP_OPS = frozenset((">&", "<&"))
+_CLOSE_OPS = frozenset((">&-", "<&-"))
+
+
+def _fd_dup(node):
+    """True when a file_redirect only moves or closes a descriptor.
+
+    The distinction is bash's and it is genuinely ambiguous in the text:
+    `>&word` duplicates a descriptor when `word` is a number, and redirects
+    both streams into a *file* named `word` when it is not. So `>&2` writes
+    nothing and `>&out.txt` writes a file, spelled with the same operator.
+
+    We do not re-implement that rule -- tree-sitter has already applied it, and
+    types the two destinations `number` and `word`. Reading the node type is
+    therefore asking the parser what bash decided, rather than asking a regex
+    what the string looks like. Anything that is neither (`$X`, unparsed, a
+    destination we do not recognize) falls through to the write path, which is
+    the fail-closed direction and where `&>file` stays too."""
+    types = [c.type for c in node.children]
+    if any(t in _CLOSE_OPS for t in types):
+        retval = True
+    else:
+        retval = (any(t in _DUP_OPS for t in types)
+                  and bool(node.children)
+                  and node.children[-1].type == "number")
+    return retval
+
 
 def _reads_only(node):
     retval = any(c.type in _READ_REDIRECT for c in node.children)
@@ -228,6 +261,36 @@ class _Walker:
             retval = (False, f"{node.type} is not grantable")
         return retval
 
+    def redirect_write(self, c):
+        """One file_redirect judged: (refusal, writes_a_file).
+
+        `refusal` is a reason string when the redirect cannot be judged at all,
+        and None otherwise -- in which case the second value says whether it
+        puts bytes in a file.
+
+        Shared by both callers on purpose. A redirect can sit on either side of
+        its command, and bash writes the file either way, so the two parse
+        shapes have to reach the same verdict or the rule is decoration (#213).
+        """
+        # No path, nothing to judge: not a device, not in the tree, not a
+        # write. Checked before the destination is read at all, because for
+        # `2>&1` the "destination" is the number 1.
+        if _fd_dup(c):
+            return (None, False)
+        dest = c.children[-1] if c.children else None
+        if dest is None or not _static(dest):
+            return ("redirect target is not a literal", None)
+        target = _unquote(_text(dest, self.src))
+        if target.startswith("/dev/") and target not in _DEV_OK:
+            return (f"redirect to device {target}", None)
+        # A read verb stops being a read when its output lands in a file
+        # (#177). YOLT cannot tell us this -- `cat x`, `cat x > out.txt` and
+        # `cat x > /usr/local/bin/foo` are one `unknown` to it, differing only
+        # in a reason string nobody parses -- so the redirect is seen here or
+        # not at all.
+        retval = (None, not _reads_only(c) and target not in _DEV_OK)
+        return retval
+
     def redirected(self, node):
         """A command, pipeline or list with redirects. The body is judged as
         usual; the redirect is an in-tree write the sandbox confines, unless
@@ -238,19 +301,10 @@ class _Walker:
             if c.type in ("command", "pipeline", "list"):
                 body = c
             elif c.type == "file_redirect":
-                dest = c.children[-1] if c.children else None
-                if dest is None or not _static(dest):
-                    return (False, "redirect target is not a literal")
-                target = _unquote(_text(dest, self.src))
-                if target.startswith("/dev/") and target not in _DEV_OK:
-                    return (False, f"redirect to device {target}")
-                # A read verb stops being a read when its output lands in a
-                # file (#177). YOLT cannot tell us this -- `cat x`,
-                # `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one
-                # `unknown` to it, differing only in a reason string nobody
-                # parses -- so the redirect is seen here or not at all.
-                if not _reads_only(c) and target not in _DEV_OK:
-                    writes = True
+                refusal, redirect_writes = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
+                writes = writes or redirect_writes
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
                 continue
             else:
@@ -288,7 +342,31 @@ class _Walker:
         return retval
 
     def segment(self, node):
+        """A redirect may sit before its command as well as after it.
+
+        `>out.txt cat f` is `cat f > out.txt` with the words in the other
+        order, and bash writes the file for both. Only the trailing form parses
+        as a `redirected_statement`; the leading one is a `file_redirect` child
+        of the command node, which `redirected()` never sees and `argv()`
+        skips outright -- so `cat f > out.txt` parked while `>out.txt cat f`
+        was granted as "cat: read-only", and the difference was word order
+        (#213). Found reviewing the descriptor-dup change above; it predates
+        it."""
+        saved = self.writes_file
+        try:
+            retval = self._segment(node)
+        finally:
+            self.writes_file = saved
+        return retval
+
+    def _segment(self, node):
         text = _text(node, self.src)
+        for c in node.children:
+            if c.type == "file_redirect":
+                refusal, writes = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
+                self.writes_file = self.writes_file or writes
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")
@@ -312,6 +390,15 @@ class _Walker:
             retval = (True, f"{verb}: read-only")
         else:
             retval = None
+        # Why the read rule did not apply, kept for the refusal below (#213).
+        # A read verb whose output lands in a file still goes to the classifier
+        # -- it may know the command -- but when that also refuses, the card
+        # used to read `no rule: jq`. Those are the classifier's words about
+        # its own ruleset, and `jq` is in READ_VERBS right here; the human who
+        # went to check the verb list found the verb already in it and learned
+        # nothing about the redirect that actually caused the card.
+        shadowed = (f"{verb} reads, but this segment redirects output to a file"
+                    if retval is None and verb in READ_VERBS else None)
         if retval is None or (retval[0] is False and verb == "git"):
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
@@ -329,7 +416,7 @@ class _Walker:
                 allowed, why = policy_mod.check_egress(text, self.policy)
                 retval = (True, f"{verb}: read-only") if allowed else (False, why)
             elif retval is None:
-                retval = (False, reason)
+                retval = (False, shadowed or reason)
         if retval[0]:
             self.reasons.append(retval[1])
         return retval

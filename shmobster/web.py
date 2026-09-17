@@ -23,19 +23,30 @@ instead, for the model to fetch again on purpose and be checked again.
 **What comes back is data.** A fetched page is written by strangers, so it
 arrives fenced and labelled, the same construction #140 uses for memory. A page
 that says "ignore your instructions" is a page that says that.
+
+One residue, named rather than implied: the address is checked at resolution
+and the connection is made by name, so a record that answers publicly on the
+first lookup and privately on the second is not caught -- classic DNS
+rebinding. Closing it means resolving once and connecting to that address,
+which fights TLS hostname verification and is a bigger change than this.
+Reaching it requires a host already in the channel's `allow_domains` to be
+attacker-controlled, which is a narrower door than the one this closes; it is
+recorded here rather than left for somebody to discover.
 """
 import html
 import ipaddress
 import logging
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 
-from . import policy as policy_mod
+from . import policy as policy_mod, redact
 
 _MAX_BYTES = 400_000          # what we will read off the wire
+_DEADLINE = 30                # total seconds, not per socket operation
 _MAX_TEXT = 12_000            # what reaches the model
 _TIMEOUT = 20
 _UA = "shmobster/web_fetch (+https://github.com/voitta-ai/shmobster)"
@@ -44,6 +55,19 @@ _SCRIPT_STYLE = re.compile(rb"(?is)<(script|style)\b.*?</\1>")
 _TAG = re.compile(rb"(?s)<[^>]+>")
 _WS = re.compile(r"[ \t]+")
 _BLANKS = re.compile(r"\n{3,}")
+
+
+def _safe_url(url):
+    """A URL fit to put in a message. The query string is where a token rides
+    -- `?token=`, `?sig=`, a presigned S3 URL is nothing but signature -- and
+    an error message goes to a channel. Drop it, and scrub what is left, since
+    userinfo and path can carry one too."""
+    parts = urlsplit((url or "").strip())
+    shown = f"{parts.scheme}://{parts.hostname or ''}{parts.path}"
+    if parts.query or parts.fragment:
+        shown += " (query omitted)"
+    retval = redact.scrub(shown)
+    return retval
 
 
 def _private(host):
@@ -94,31 +118,48 @@ def fetch(url, policy):
         return (None, f"'{host}' is not in this channel's allow_domains, so I did not fetch it")
     refused, why = _private(host)
     if refused:
-        return (None, f"refusing to fetch {url}: {why}")
+        return (None, f"refusing to fetch {_safe_url(url)}: {why}")
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "text/*, */*"})
     opener = urllib.request.build_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=_TIMEOUT) as resp:
-            body = resp.read(_MAX_BYTES + 1)
             ctype = resp.headers.get("Content-Type", "")
+            # Chunked with a total deadline. `timeout` bounds each socket
+            # operation, not the transfer, so a server dripping a byte at a
+            # time satisfies every individual read and holds the turn open for
+            # as long as it likes.
+            deadline = time.monotonic() + _DEADLINE
+            chunks = []
+            got = 0
+            while got <= _MAX_BYTES:
+                if time.monotonic() > deadline:
+                    logging.info("web_fetch: deadline reached, using what arrived")
+                    break
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                got += len(chunk)
+            body = b"".join(chunks)
     except urllib.error.HTTPError as exc:
         if exc.code in (301, 302, 303, 307, 308):
             target = exc.headers.get("Location", "(no Location header)")
             return (None, (
-                f"{url} redirects to {target}. I did not follow it: a redirect is a "
-                f"second fetch to a host nobody checked. Ask me to fetch that URL "
-                f"directly and it will be checked like any other."
+                f"{_safe_url(url)} redirects to {_safe_url(target)}. I did not follow "
+                f"it: a redirect is a second fetch to a host nobody checked. Ask me to "
+                f"fetch that URL directly and it will be checked like any other."
             ))
-        return (None, f"{url} returned HTTP {exc.code} {exc.reason}")
+        return (None, f"{_safe_url(url)} returned HTTP {exc.code} {exc.reason}")
     except Exception as exc:
-        return (None, f"could not fetch {url}: {exc}")
+        return (None, f"could not fetch {_safe_url(url)}: {redact.scrub(str(exc))}")
     truncated = len(body) > _MAX_BYTES
     text = _text_from(body[:_MAX_BYTES], ctype)
     if len(text) > _MAX_TEXT:
         text = text[:_MAX_TEXT]
         truncated = True
     if not text.strip():
-        return (None, f"{url} returned nothing readable as text (Content-Type: {ctype or 'unknown'})")
+        return (None, f"{_safe_url(url)} returned nothing readable as text "
+                      f"(Content-Type: {ctype or 'unknown'})")
     if truncated:
         text += f"\n\n[truncated at {_MAX_TEXT} characters]"
     return (text, None)

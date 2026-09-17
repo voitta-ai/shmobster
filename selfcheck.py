@@ -3133,6 +3133,30 @@ try:
 finally:
     web.fetch = _wf_saved
 
+# a URL is a place a credential rides -- ?token=, ?sig=, a presigned S3 URL is
+# nothing but signature -- and an error message goes to a channel. The query is
+# dropped and what is left is scrubbed.
+for _u in ("https://evil.test/p?token=SECRETVALUE123&x=1",
+           "http://127.0.0.1/a?sig=ABCDEF#frag"):
+    _t, _e = web.fetch(_u, {"allow_domains": ["*"]})
+    assert _t is None, _u
+    assert "SECRETVALUE123" not in _e and "ABCDEF" not in _e, _e
+    assert "query omitted" in _e, _e
+
+# userinfo does not smuggle an allowed host past the check: the hostname is
+# what is after the @, and that is what is tested
+for _u, _host in (("https://example.com@evil.test/x", "evil.test"),
+                  ("https://example.com@127.0.0.1/x", "127.0.0.1")):
+    _t, _e = web.fetch(_u, _wf_pol)
+    assert _t is None and _host in _e, (_u, _e)
+
+# an IPv4-mapped IPv6 address is private even where is_loopback is False --
+# ::ffff:169.254.169.254 is the metadata endpoint wearing a different hat, and
+# checking only is_loopback would have let it through
+for _u in ("http://[::1]/", "http://[::ffff:127.0.0.1]/", "http://2130706433/"):
+    _t, _e = web.fetch(_u, {"allow_domains": ["*"]})
+    assert _t is None, (_u, _e)
+
 # a redirect is a second fetch to a host nobody checked, so the handler refuses
 # to follow it rather than letting the allow-list become a first-hop formality.
 # Tested on the handler directly: following one needs a network, and refusing

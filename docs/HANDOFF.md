@@ -9,7 +9,7 @@ This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
-Current state: **v0.12.0 is cut; the live box is still on v0.7.2 until someone
+Current state: **v0.12.0 is cut; the live box is on v0.8.0 until someone
 upgrades it** -- and that upgrade is now two versions and one inverted
 instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The
 exec path is YOLT (its own rules only, #148) -> egress allow-list (#149) ->
@@ -277,9 +277,14 @@ Four things, all checkable, none of them "it feels ready":
 3. **The re-audit's remaining findings closed or explicitly accepted** --
    #150, #151, #152 and the rest of #123's list. Shipping 1.0 with the security
    review's own list open is a claim the review does not support.
-4. **The deployment actually on the released build.** The live box ran v0.7.2
-   through all of this; v0.8.0 is cut but not yet deployed. A contract that has
-   never run is not stable, it is untested.
+4. **The deployment actually on the released build.** The live box is on
+   v0.8.0; v0.12.0 is cut. A contract that has never run is not stable, it is
+   untested -- and v0.8.0 pins voitta-yolt `< 2.0.0`, so criterion 2's clock
+   has not started either. Both of those are the same action.
+
+   *(Corrected 2026-09-16: this said v0.7.2 through several releases. The
+   number was carried forward from the 2026-09-13 triage and never
+   re-checked -- including by me, into four sets of release notes.)*
 
 The argument *for* 1.0 is real and worth recording too: the security model
 arrived this cycle -- five gates, each documented and covered by selfcheck,

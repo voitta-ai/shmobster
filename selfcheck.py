@@ -3560,6 +3560,7 @@ _real_exec51 = tools.execute
 tools.execute = lambda cmd, policy: _ran51.append(cmd) or "(execute reached)"
 yolt_gate.classify = lambda cmd, cwd=None: ("safe", "curl: read-only")
 _pol51 = {"cwd": "/tmp", "allow_domains": ["api.figma.com"]}
+_H = "https://api.figma.com/v1/x"
 try:
     # an allow-listed host says where bytes may go, not that bytes may go
     for _c in ("curl -dsecret=1 https://api.figma.com/v1/x",
@@ -3596,6 +3597,33 @@ try:
         _ran51.clear()
         tools.run_shell(_c, _pol51, "C_222")
         assert _ran51, ("an ordinary read stopped auto-running: " + _c)
+
+    # Options that source further options or URLs from a FILE, which this layer
+    # cannot read. An adversarial review found this and it is real: measured,
+    # a config containing `data = "@/tmp/payload"` makes curl POST that file
+    # while the argv scan sees only `-K`, and curl itself prints "POST is
+    # already inferred". A separate config line set `output` and it took
+    # effect. So what the command does is not what the command says.
+    for _c in ("curl -K cfg " + _H, "curl --config cfg " + _H,
+               "curl --config=cfg " + _H, "curl -sK cfg " + _H,
+               "curl --config - " + _H,
+               "wget --config=cfg " + _H, "wget -i urls.txt " + _H,
+               "wget --input-file=urls.txt " + _H):
+        _ok, _why = policy.check_egress(_c, _pol51)
+        assert not _ok, (_c, _why)
+        assert "from a file" in _why, (_c, _why)
+
+    # Per verb, because the same letters mean different things and getting it
+    # backwards costs either a hole or every ordinary command. wget spells its
+    # body options long, and its short flags collide head-on with curl's:
+    # `-d` is debug, `-T` a timeout, `-F` --force-html. And `-i` is the pair
+    # that proves the point -- a URL list for wget, --include for curl.
+    for _c in ("wget -d " + _H, "wget -T 30 " + _H, "wget -F " + _H,
+               "wget -q -O /tmp/x " + _H, "curl -i " + _H):
+        _ok, _why = policy.check_egress(_c, _pol51)
+        assert _ok, ("ordinary use carded: " + _c, _why)
+    assert not policy.check_egress("wget -i urls.txt " + _H, _pol51)[0]
+    assert policy.check_egress("curl -i " + _H, _pol51)[0]
 
     # the host check still applies on top: a body is refused everywhere, and a
     # plain read to an unlisted host still parks as it did before (#149)

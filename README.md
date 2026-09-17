@@ -1354,6 +1354,40 @@ now cools a deployment on the *first* 429 rather than after a threshold (#51).
 A Slack agent's traffic is bursty and low-volume, so by the time a threshold is
 reached the burst is over and every failure in it was a wasted round-trip.
 
+## What it costs (#190)
+
+Every model call records what it cost, on the rung that actually answered, into
+the turn's trajectory record -- the per-channel, per-day, scrubbed JSONL that
+already exists, so there is no new store and nothing here talks to a vendor.
+LiteLLM computes the per-response cost; this is capture and rollup.
+
+**Unknown cost is `null`, never `0`.** A subscription rung (the codex one) and
+a model missing from LiteLLM's cost map both produce no number. Recording those
+as zero makes a rollup wrong in the one direction nobody audits -- spending
+that reports as free. Tokens are recorded either way, so an unpriced rung is
+still visible as usage, and every summary that includes one says so:
+
+    $0.0300 over 3 call(s); 1 of them unpriced (a subscription rung or a model
+    with no cost entry) -- the real total is higher than this
+
+**Ask it in the channel.** `report_cost` answers what this thread and this
+channel have spent today, including the turn in flight -- asking mid-turn and
+being told about every turn but this one is the obvious wrong answer. It takes
+**no arguments**: the turn already knows where it is, and a reporting tool that
+accepts a target is one that reports on somewhere else (#151's precedent).
+
+**Roll it up from the host.**
+
+    scripts/costs.py                 # today, every channel
+    scripts/costs.py --days 7
+    scripts/costs.py --channel C123
+
+By channel, by vendor and by day, with unpriced calls counted separately rather
+than folded in. A turn recorded before this landed carries no `calls` key at
+all, and is skipped rather than counted as free.
+
+Enforcing budgets is out of scope and stays LiteLLM's job (#51).
+
 ## Skills and learning
 
 Standing instructions arrive as files (`SKILL.md`, the

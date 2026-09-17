@@ -6,7 +6,7 @@ Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, learning, llm, memory, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, cost, learning, llm, memory, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -103,6 +103,9 @@ def _resume_turn(req_id, approved, command, result, thread_context, channel,
 
 
 def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, slack_client=None, attachments=None):
+    # One turn, one bill (#190). Clearing first matters: a turn that raised
+    # before draining must not charge the next one.
+    cost.start()
     policy = policy_mod.resolve(channel)
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
@@ -176,7 +179,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         # Recorded before the reply goes out, only for channel turns: a script
         # or a test calling handle() directly has no thread to learn from.
         if channel:
-            trajectory.record(channel, user_id, thread_ts, text, trace, answer)
+            trajectory.record(channel, user_id, thread_ts, text, trace, answer, cost.drain())
         retval = _finalize(answer, steps)
         return retval
 
@@ -215,7 +218,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                     {"channel": channel, "policy": policy, "thread_ts": thread_ts},
                 )
             else:
-                result = tools.dispatch(name, args, policy, channel)
+                result = tools.dispatch(name, args, policy, channel, thread_ts)
             # Redact at collection (#72): every downstream copy -- this context,
             # the vendor's logs, the Slack message -- inherits the scrub, and a
             # credential never reaches the model to be repeated later.

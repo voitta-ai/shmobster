@@ -3023,4 +3023,56 @@ try:
 finally:
     llm._RUNG_VENDORS = _rv_saved
 
+# 45) the pre-publish gate says which half of itself ran. It used to print
+# `check-sensitive-terms: clean` on stdout whether or not it had a name
+# wordlist, with the explanation on stderr where a caller reading the result
+# does not look -- so a gate that could not do its job said the same word as
+# one that did. Measured: every run in this repo on 2026-09-16 passed with the
+# name half off, while the list that would have caught something sat in a
+# sibling repo's config directory.
+_gt_dir = os.path.realpath(tempfile.mkdtemp())
+_gt_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "scripts", "check-sensitive-terms.sh")
+_gt_target = os.path.join(_gt_dir, "sample.md")
+with open(_gt_target, "w") as _f:
+    _f.write("nothing to see here\n")
+
+
+def _gt_run(env_extra, target=None):
+    env = dict(os.environ)
+    env["XDG_CONFIG_HOME"] = os.path.join(_gt_dir, "emptyconfig")
+    env.pop("SHMOBSTER_SENSITIVE_TERMS_FILE", None)
+    env.pop("SHMOBSTER_SENSITIVE_TERMS_REQUIRED", None)
+    env.update(env_extra)
+    _p = subprocess.run(["bash", _gt_script, target or _gt_target],
+                        capture_output=True, text=True, timeout=60, env=env)
+    return _p.returncode, _p.stdout.strip()
+
+
+# no wordlist: still exit 0, because CI runs structural-only on purpose (a
+# private wordlist cannot live on a public runner) -- but the line says so
+_rc, _out = _gt_run({})
+assert _rc == 0, (_rc, _out)
+assert "STRUCTURAL ONLY" in _out and "did NOT run" in _out, _out
+
+# ...and a caller that wants the absence to be fatal can say so
+_rc, _out = _gt_run({"SHMOBSTER_SENSITIVE_TERMS_REQUIRED": "1"})
+assert _rc == 2, (_rc, _out)
+
+# with a wordlist, the name half actually runs: a term in it is caught
+_gt_list = os.path.join(_gt_dir, "terms.txt")
+with open(_gt_list, "w") as _f:
+    _f.write("# a comment\n\nzzqqx-internal-codename\n")
+_rc, _out = _gt_run({"SHMOBSTER_SENSITIVE_TERMS_FILE": _gt_list})
+assert _rc == 0 and _out == "check-sensitive-terms: clean", (_rc, _out)
+_gt_leak = os.path.join(_gt_dir, "leak.md")
+with open(_gt_leak, "w") as _f:
+    _f.write("we shipped ZZQQX-Internal-Codename in the notes\n")   # case-insensitive
+_rc, _out = _gt_run({"SHMOBSTER_SENSITIVE_TERMS_FILE": _gt_list}, _gt_leak)
+assert _rc == 1, ("a term in the wordlist must fail the gate", _rc, _out)
+
+# a wordlist pointed at explicitly but absent is an error, not a downgrade
+_rc, _out = _gt_run({"SHMOBSTER_SENSITIVE_TERMS_FILE": os.path.join(_gt_dir, "nope.txt")})
+assert _rc == 2, (_rc, _out)
+
 print(f"selfcheck OK -- shmobster {_b}")

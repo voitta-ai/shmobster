@@ -1641,6 +1641,26 @@ configs, and runs a structural sensitive-term gate ported from skillz
 IPs, internal domains). The name-wordlist half of that gate stays off CI on
 purpose; it reads a private out-of-repo file, see the script header.
 
+**Locally, run it with the wordlist.** The list is per *machine*, not per repo
+-- the names that must not be published are the same whichever checkout you are
+standing in -- so the script looks at
+`~/.config/shmobster/sensitive-terms.txt` and then falls back to
+`~/.config/skillz/sensitive-terms.txt`, which is where the sibling repos keep
+theirs.
+
+A run with no list found anywhere is still exit 0, because that is what CI
+legitimately does. It no longer reports a bare `clean`:
+
+    check-sensitive-terms: clean (STRUCTURAL ONLY -- no name wordlist, the
+    client/employer/project name half did NOT run)
+
+That line is the whole fix. It used to print `clean` either way and put the
+explanation on stderr, where the caller reading the result does not look -- so
+a gate that could not do its job said the same word as one that did. Measured
+2026-09-16: every pre-commit run in this repo had passed with the name half
+off, while a 34-term list sat one directory away under `skillz`. Set
+`SHMOBSTER_SENSITIVE_TERMS_REQUIRED=1` to make the absence fatal instead.
+
 #### Upgrade announcements (#77)
 
 An instance announces itself in its channels the first time it boots on a new

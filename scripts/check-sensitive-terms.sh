@@ -16,15 +16,29 @@
 # this script ships only STRUCTURAL patterns, and reads any name-based terms
 # from a PRIVATE, out-of-repo wordlist (one term per line; blank lines and
 # lines starting with # ignored), at $SHMOBSTER_SENSITIVE_TERMS_FILE, default
-# ~/.config/shmobster/sensitive-terms.txt.
+# ~/.config/shmobster/sensitive-terms.txt and then ~/.config/skillz/.
+#
+# The shared fallback is not tidiness. A wordlist is per MACHINE, not per repo:
+# the names that must not be published are the same whichever checkout you are
+# standing in. Measured 2026-09-16 -- the shmobster path was empty while the
+# skillz one held 34 terms, so every run here passed with the name half off
+# while the list that would have caught something sat one directory away.
+#
+# And a run WITHOUT a wordlist no longer reports a bare "clean". It did, on
+# stdout, with the explanation on stderr where a caller reading the result does
+# not look -- a gate that cannot do its job saying the same word as one that
+# did. Set SHMOBSTER_SENSITIVE_TERMS_REQUIRED=1 to make the absence fatal;
+# CI leaves it unset on purpose, because a private wordlist cannot live on a
+# public runner and structural-only is the honest best it can do there.
 #
 # Usage:
 #   scripts/check-sensitive-terms.sh <path> [<path> ...]
 #   SHMOBSTER_SENSITIVE_TERMS_FILE=/other/list.txt \
 #     scripts/check-sensitive-terms.sh shmobster/ examples/
 #
-# Exit codes: 0 = clean, 1 = matches found, 2 = usage error or a
-# SHMOBSTER_SENSITIVE_TERMS_FILE that was set but does not exist.
+# Exit codes: 0 = clean, 1 = matches found, 2 = usage error, a
+# SHMOBSTER_SENSITIVE_TERMS_FILE that was set but does not exist, or no
+# wordlist found at all while SHMOBSTER_SENSITIVE_TERMS_REQUIRED=1.
 #
 # bash 3.2 compatible (macOS default); no bashisms beyond 3.2.
 
@@ -87,10 +101,25 @@ done < /tmp/.shmobster_structural.$$
 rm -f /tmp/.shmobster_structural.$$
 
 # 2) optional private wordlist (client/account names etc.)
-DEFAULT_TERMS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/shmobster/sensitive-terms.txt"
-terms_file="${SHMOBSTER_SENSITIVE_TERMS_FILE:-$DEFAULT_TERMS_FILE}"
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+DEFAULT_TERMS_FILE="$CONFIG_HOME/shmobster/sensitive-terms.txt"
+# A wordlist is per machine, not per repo. Prefer this repo's own path, then
+# the shared one the sibling repos use.
+SHARED_TERMS_FILE="$CONFIG_HOME/skillz/sensitive-terms.txt"
+terms_file="${SHMOBSTER_SENSITIVE_TERMS_FILE:-}"
+if [ -z "$terms_file" ]; then
+  if [ -f "$DEFAULT_TERMS_FILE" ]; then
+    terms_file="$DEFAULT_TERMS_FILE"
+  elif [ -f "$SHARED_TERMS_FILE" ]; then
+    terms_file="$SHARED_TERMS_FILE"
+  else
+    terms_file="$DEFAULT_TERMS_FILE"
+  fi
+fi
+wordlist_ran=0
 
 if [ -f "$terms_file" ]; then
+  wordlist_ran=1
   CASE_FLAG="-i"
   while IFS= read -r term; do
     case "$term" in
@@ -100,6 +129,7 @@ if [ -f "$terms_file" ]; then
     check_pattern "private-term" "$term" "$@"
   done < "$terms_file"
   CASE_FLAG=""
+  echo "using name wordlist: $terms_file" >&2
 elif [ -n "${SHMOBSTER_SENSITIVE_TERMS_FILE:-}" ]; then
   # Explicitly pointed at a file that isn't there - that is an error, not a
   # silent downgrade to structural-only.
@@ -107,11 +137,23 @@ elif [ -n "${SHMOBSTER_SENSITIVE_TERMS_FILE:-}" ]; then
   exit 2
 else
   echo "note: no name wordlist - structural checks only." >&2
-  echo "      create $DEFAULT_TERMS_FILE (one term per line, # for comments)" >&2
-  echo "      to also match client/employer names. Keep it OUT of this repo." >&2
+  echo "      looked at $DEFAULT_TERMS_FILE" >&2
+  echo "           then $SHARED_TERMS_FILE" >&2
+  echo "      create either (one term per line, # for comments) to also match" >&2
+  echo "      client/employer names. Keep it OUT of this repo." >&2
+  if [ -n "${SHMOBSTER_SENSITIVE_TERMS_REQUIRED:-}" ]; then
+    echo "error: SHMOBSTER_SENSITIVE_TERMS_REQUIRED is set and no wordlist was found" >&2
+    exit 2
+  fi
 fi
 
 if [ "$status" -eq 0 ]; then
-  echo "check-sensitive-terms: clean"
+  # Never a bare "clean" when half the gate did not run. The caller reads this
+  # line; the explanation on stderr is not where they look.
+  if [ "$wordlist_ran" -eq 1 ]; then
+    echo "check-sensitive-terms: clean"
+  else
+    echo "check-sensitive-terms: clean (STRUCTURAL ONLY -- no name wordlist, the client/employer/project name half did NOT run)"
+  fi
 fi
 exit "$status"

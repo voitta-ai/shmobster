@@ -3442,4 +3442,103 @@ for _c in ("C_215S", "C_215K"):
     for _k in approvals.ids(_c):
         approvals.pop(_k, _c)
 
+# 50) a read that parks because one flag COULD have made it a write (#219).
+# READ_VERBS is consulted on the verb alone, so its bar is that no flag can turn
+# the command into a write -- which is why `find` and `sort` were absent, and
+# why this, measured in a live channel, needed a human approval card.
+#
+# Stubbed so that everything except `echo` is unsafe, and restored afterwards.
+# That makes every GRANT below the grant layer's own doing: the classifier
+# cannot vouch for find or sort by accident, which is the only way this check
+# means what it says. (`echo` is not in READ_VERBS and has always relied on the
+# classifier; that is not what is under test here.)
+_rpol = {"cwd": "/tmp"}
+_saved50 = yolt_gate.classify
+yolt_gate.classify = lambda cmd, cwd=None: (
+    ("safe", "read-only") if cmd.split()[0] == "echo"
+    else ("unsafe", "stub: only the grant layer may grant this")
+)
+try:
+
+    _inv = ("cd /tmp && git log --oneline -5 && echo --- && "
+            "find . -maxdepth 2 -not -path './.git*' | sort")
+    _ok, _why = grant.check(_inv, _rpol)
+    assert _ok, (_inv, _why)
+
+    for _c in ("find . -maxdepth 2 -name '*.json'", "find . -type f -print",
+               "find . -newer x -ls", "sort f.txt", "sort -u -n f.txt",
+               "sort -r f.txt | head", "find . -maxdepth 1 2>&1 | sort"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _why)
+
+    # The four that RUN something are the entries to be sure of: execution escapes
+    # the read/write framing entirely, where a missed file-writing flag would only
+    # be an in-tree write the sandbox already confines for every FS_VERBS verb.
+    for _c in ("find . -name x -exec rm {} ;", "find . -name x -execdir rm {} ;",
+               "find . -name x -ok rm {} ;", "find . -name x -okdir rm {} ;",
+               "find . -name x -delete"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+
+    # the GNU-only -fprint family, listed although BSD find answers "-fprint:
+    # unknown primary or operator" -- which find is installed is not a security
+    # property, and voitta-yolt's own find rule omits these deliberately, so its
+    # `find: rules punt` cannot stand in for this check (#219)
+    for _c in ("find . -name x -fprint /tmp/o", "find . -name x -fprint0 /tmp/o",
+               "find . -name x -fprintf /tmp/o '%p'", "find . -name x -fls /tmp/o"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+
+    # every spelling of sort's output flag, because only the first is caught by
+    # comparing against "-o": attached, and bundled behind another short flag
+    for _c in ("sort f -o out.txt", "sort f -oout.txt", "sort f -uo out.txt",
+               "sort f --output out.txt", "sort f --output=out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+
+    # an argument this layer cannot read is a refusal, not a guess: `find . $F`
+    # with F=-delete is a deletion the deny list cannot see, and _no_substitution
+    # does not catch it -- that rejects arguments that RUN a command, and `$F`
+    # merely expands
+    for _c in ("find . $FLAG", 'find . -name "$X" -delete', "sort $F"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+        assert "not a literal" in _why, (_c, _why)
+
+    # the redirect rule still wins over the new tier (#213), and says why
+    _ok, _why = grant.check("find . -maxdepth 1 > out.txt", _rpol)
+    assert not _ok and "redirects output to a file" in _why, _why
+    _ok, _why = grant.check("sort f.txt > out.txt", _rpol)
+    assert not _ok and "redirects output to a file" in _why, _why
+
+    # An adversarial review called the sort cluster rule overbroad -- that `-ro`
+    # and friends are harmless reads being refused. Measured with the real sort:
+    # `sort -ro out.txt f` CREATES out.txt, and `sort -or f` tries to write a
+    # file named `r`. In a short-option cluster every character is an option
+    # letter, and sort's `o` always consumes a filename, so there is no cluster
+    # containing an `o` that does not write.
+    for _c in ("sort -ro out.txt f", "sort -or f", "sort -uo out.txt f"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+    # ...and the clusters that genuinely do not write are not caught by it
+    for _c in ("sort -rn f", "sort -ru f", "sort -k1,1 f", "sort -t, -k2 f"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _why)
+
+    # the same review asked about `-exec ... {} +` as distinct from `{} ;`. The
+    # check matches the -exec token itself, so the terminator never enters into
+    # it -- asserted rather than reasoned, since that is the cheap half.
+    for _c in ("find . -name x -exec rm {} +", "find . -name x -execdir rm {} +",
+               "find . -type f -exec grep q {} +"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+
+    # uniq stays out: its output destination is a bare trailing positional, which
+    # no flag check can filter -- the same shape as AWS_WRITES_OUTFILE, and the
+    # reason that one is a named-operation deny set instead
+    assert not grant.check("uniq f.txt out.txt", _rpol)[0]
+    assert not grant.check("uniq f.txt", _rpol)[0]
+finally:
+    yolt_gate.classify = _saved50
+
 print(f"selfcheck OK -- shmobster {_b}")

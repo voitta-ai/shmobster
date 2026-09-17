@@ -9,6 +9,10 @@ This is the plan for the next several work items, in the order they should be
 taken and with the reasoning that ranked them -- so the next session (or the
 next person) starts from the argument, not from a bare issue list.
 
+Dated records of individual sessions live in `docs/handoff/`; the most recent
+is `docs/handoff/2026-09-17.md`, which carries the credential-scrub state and
+the corrections that session made to its own earlier claims.
+
 Current state: **v0.15.0 is cut; the live box is on v0.8.0 until someone
 upgrades it** -- and that upgrade is now two versions and one inverted
 instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The

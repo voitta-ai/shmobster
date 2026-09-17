@@ -19,6 +19,7 @@ shape rather than an approval card's: a fetch to a host outside `allow_domains`
 is refused rather than queued, because "may this channel reach that place at
 all" is an operator's decision made in advance, not a per-message one. Posting
 into another channel is the same question."""
+import logging
 import re
 
 from . import config, identity
@@ -123,6 +124,23 @@ def _read_permalink(client, url):
     ts = digits[:-6] + "." + digits[-6:]
     r = client.conversations_replies(channel=channel_id, ts=ts, limit=50)
     return _fmt(r.get("messages", []))
+
+
+def react(client, channel, ts, add=None, remove=None):
+    """Best-effort reaction bookkeeping. Needs reactions:write; without it this
+    is a no-op and nothing else changes, which is why no caller checks it.
+
+    Slack rejects `already_reacted` and `no_reaction`, and both mean the state
+    is already what was asked for -- so a retry, or two deliveries of one press,
+    must not turn a cosmetic call into a logged error."""
+    for name, fn in ((remove, "reactions_remove"), (add, "reactions_add")):
+        if not name:
+            continue
+        try:
+            getattr(client, fn)(channel=channel, name=name, timestamp=ts)
+        except Exception as exc:
+            if not any(k in str(exc) for k in ("already_reacted", "no_reaction")):
+                logging.info("reaction %s %s: %s", fn, name, exc)
 
 
 def _scope(target, ctx):

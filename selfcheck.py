@@ -3511,6 +3511,28 @@ try:
     _ok, _why = grant.check("sort f.txt > out.txt", _rpol)
     assert not _ok and "redirects output to a file" in _why, _why
 
+    # An adversarial review called the sort cluster rule overbroad -- that `-ro`
+    # and friends are harmless reads being refused. Measured with the real sort:
+    # `sort -ro out.txt f` CREATES out.txt, and `sort -or f` tries to write a
+    # file named `r`. In a short-option cluster every character is an option
+    # letter, and sort's `o` always consumes a filename, so there is no cluster
+    # containing an `o` that does not write.
+    for _c in ("sort -ro out.txt f", "sort -or f", "sort -uo out.txt f"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+    # ...and the clusters that genuinely do not write are not caught by it
+    for _c in ("sort -rn f", "sort -ru f", "sort -k1,1 f", "sort -t, -k2 f"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _why)
+
+    # the same review asked about `-exec ... {} +` as distinct from `{} ;`. The
+    # check matches the -exec token itself, so the terminator never enters into
+    # it -- asserted rather than reasoned, since that is the cheap half.
+    for _c in ("find . -name x -exec rm {} +", "find . -name x -execdir rm {} +",
+               "find . -type f -exec grep q {} +"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _why)
+
     # uniq stays out: its output destination is a bare trailing positional, which
     # no flag check can filter -- the same shape as AWS_WRITES_OUTFILE, and the
     # reason that one is a named-operation deny set instead

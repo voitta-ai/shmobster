@@ -1354,6 +1354,40 @@ now cools a deployment on the *first* 429 rather than after a threshold (#51).
 A Slack agent's traffic is bursty and low-volume, so by the time a threshold is
 reached the burst is over and every failure in it was a wasted round-trip.
 
+## Reading a URL (#62)
+
+`web_fetch` reads a page somebody pasted into a channel. It is the fetch the
+shell already had, with a tool-shaped front door: **the same `allow_domains`,
+through the same function**, so there is one answer to "may this channel reach
+that host" rather than two that drift.
+
+    "allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]
+
+A channel with no list reaches nothing, which is the same default `curl` gets.
+
+Three things it does that a shell `curl` does not:
+
+- **It refuses to be pointed inward.** The hostname is resolved before the
+  request and refused if it lands on loopback, link-local, private or reserved
+  space -- the cloud metadata endpoint, the router, and every service on the box
+  that believed it was unreachable. `allow_domains` does not cover this: a
+  generous list, or a domain whose owner points a record at `169.254.169.254`,
+  arrives there without the list ever being wrong.
+- **It does not follow redirects.** A redirect is a second fetch to a host
+  nobody checked; following it silently would make the allow-list a first-hop
+  formality. The target is reported instead, so the model can ask for it on
+  purpose and have it checked like any other URL.
+- **What comes back is data.** The page arrives fenced and labelled as somebody
+  else's writing, the same construction per-channel memory uses (#140) and for
+  the same reason. A page that says "ignore your instructions" is a page that
+  says that.
+
+No new dependency and no new config key: stdlib `urllib`, tags stripped,
+entities decoded, capped at 400 KB off the wire and 12 000 characters to the
+model. It is not a browser -- a page this mangles is one to open in a browser,
+and saying so beats pretending. Firecrawl or similar can sit behind the same
+tool later if extraction quality ever demands it; the gates would not change.
+
 ## What it costs (#190)
 
 Every model call records what it cost, on the rung that actually answered, into

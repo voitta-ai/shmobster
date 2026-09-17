@@ -285,8 +285,8 @@ class _FakeSlack:
         self.last = ("history", channel)
         return {"messages": [{"user": "U2", "text": "chan msg"}]}
 
-    def chat_postMessage(self, channel, text, thread_ts=None):
-        self.last = ("post", channel, text, thread_ts)
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
+        self.last = ("post", channel, text, thread_ts, blocks)
         return {"ok": True, "ts": "1.2"}
 
 
@@ -395,8 +395,9 @@ _posted = {}
 
 
 class _FakePost:
-    def chat_postMessage(self, channel, text, thread_ts=None):
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
         _posted["text"] = text
+        _posted["blocks"] = blocks
         return {"ok": True, "ts": "1"}
 
 
@@ -556,11 +557,14 @@ assert _cref.startswith("REFUSED"), _cref
 assert approvals.ids("C1") == [_key3], approvals.ids("C1")
 assert "<@U_STRANGER>" in _posted["text"], _posted
 assert "Approve" in _posted["text"], _posted
-assert "echo refused_click_321" in _posted["text"], _posted
 # the refusal has to say the request is still actionable, not just quote the
-# rule: the card and its buttons are deliberately left standing (#107)
-assert "still live" in _posted["text"], _posted
+# rule: the card and its buttons are deliberately left standing (#107), and
+# since #215 the alert carries a live copy of them rather than pointing up the
+# thread at the original. So the command is in the card, not in `text`.
 assert "still parked" in _posted["text"], _posted
+assert "right here" in _posted["text"], _posted
+assert "card above" not in _posted["text"], _posted
+assert "echo refused_click_321" in str(_posted["blocks"]), _posted
 
 # ...but pending is not the same as clickable, and the queue goes quiet in the
 # middle of a trusted click: it acquires the request, strips the buttons, and
@@ -649,7 +653,7 @@ assert "still parked" not in _posted["text"], _posted
 # is swallowed, so counting the attempt would leave the trusted users never
 # told and every retry suppressed as already-told.
 class _FailingPost:
-    def chat_postMessage(self, channel, text, thread_ts=None):
+    def chat_postMessage(self, channel, text, thread_ts=None, blocks=None):
         raise RuntimeError("slack is down")
 
 
@@ -1530,9 +1534,13 @@ assert admin_tools.dispatch("propose_skill", {"request_id": _key}, _l_ctx).start
 _alerts = []
 class _AlertClient:
     def chat_postMessage(self, **kw):
-        _alerts.append(kw["text"])
+        _alerts.append(kw)
 admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
-assert any("skill proposal `launchd-race`" in t and "Open PR" in t for t in _alerts), _alerts
+assert any("Open PR" in _a["text"] for _a in _alerts), _alerts
+# the proposal's own card rides along, not the approval one: each queue renders
+# its own surface, and a proposal has a name where a command would be (#215)
+assert any("launchd-race" in str(_a.get("blocks")) for _a in _alerts), _alerts
+assert any("open_skill_pr" in str(_a.get("blocks")) for _a in _alerts), _alerts
 assert proposals.peek(_key, "C9") is not None
 # a held proposal refuses the text path the same way approvals do (#105)
 assert proposals.acquire(_key, "C9") is not None
@@ -3298,5 +3306,61 @@ for _c in ("2>&1 cat f", "</dev/null cat f", ">/dev/null cat f"):
 
 # the two spellings of the same write now agree
 assert grant.check("cat f >out.txt", _rpol)[0] is grant.check(">out.txt cat f", _rpol)[0]
+
+# 49) a refused click carries the buttons instead of pointing at them (#215).
+# The card was left standing on purpose (#107) and the alert said so -- "the
+# Approve / Deny buttons on the card above are still live" -- which was true
+# and unusable. Measured in a live thread: the click landed 43 minutes and a
+# dozen messages after the card was posted, the trusted user could not find it,
+# asked the agent to list what was parked, and approved by typing ids. The
+# buttons worked the whole time. "Above" is not a location.
+def _btns(blocks):
+    return [_e.get("action_id") for _b in (blocks or [])
+            for _e in (_b.get("elements") or []) if _e.get("type") == "button"]
+
+
+_r215 = approvals.add("jq . structure.json 2>&1", "C_215", "unknown")
+_posted.clear()
+admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215", "channel": "C_215",
+                                 "thread_ts": "9.9", "client": _FakePost()}, "approve_command")
+assert _btns(_posted["blocks"]) == ["approve_command", "deny_command"], _posted
+# same request, so either card resolves it -- the new one is not a second queue
+# entry, it is a second door onto the same one
+_vals = [_e["value"] for _b in _posted["blocks"] for _e in (_b.get("elements") or [])]
+assert set(_vals) == {_r215}, _vals
+# the reason the card is there survives into the message: blocks win over
+# `text` in the client, so the explanation has to be a block as well
+assert "U_STRANGER_215" in str(_posted["blocks"][0]), _posted["blocks"][0]
+# ...and the command is rendered once. Twice in one message is two chances for
+# a credential to escape the scrubber (#72).
+assert sum("structure.json" in str(_b) for _b in _posted["blocks"]) == 1, _posted["blocks"]
+
+# a held request offers no buttons: another surface is already acting on it,
+# and a button that cannot act is the failure above with the sign flipped
+approvals.acquire(_r215, "C_215")
+_posted.clear()
+admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215b", "channel": "C_215",
+                                 "client": _FakePost()}, "approve_command")
+assert _btns(_posted["blocks"]) == [], _posted
+assert _posted["blocks"] is None, _posted
+approvals.release(_r215)
+
+# nor does an absent one
+_posted.clear()
+admin_tools.refuse_click("nosuchrequest-9", {"user_id": "U_STRANGER_215c", "channel": "C_215",
+                                             "client": _FakePost()}, "approve_command")
+assert _btns(_posted["blocks"]) == [], _posted
+
+# one alert per user per request still holds. Leaving the card standing leaves
+# it re-clickable (#94), and now each alert carries a card of its own, so the
+# dedupe is what keeps a stranger on the button from filling the thread.
+_r215b = approvals.add("ls", "C_215", "unknown")
+_ctx215 = {"user_id": "U_STRANGER_215d", "channel": "C_215", "client": _FakePost()}
+admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
+_posted.clear()
+admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
+assert _posted == {}, "a second click from the same user must post nothing at all"
+for _k in approvals.ids("C_215"):
+    approvals.pop(_k, "C_215")
 
 print(f"selfcheck OK -- shmobster {_b}")

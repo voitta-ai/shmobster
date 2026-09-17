@@ -8,7 +8,7 @@ the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
 policy still bounds its scope when it runs. reload_skills re-reads the skills
 catalog (#74) -- gated too, since it changes which instructions I will follow."""
-from . import approvals, config, learning, policy as policy_mod, proposals, redact, skills, tools
+from . import approvals, config, learning, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
 
 TOOLS = [
     {
@@ -170,17 +170,27 @@ def _trusted_tags():
 _REFUSED = "REFUSED: requester is not a trusted user. Trusted users have been notified."
 
 
-def _post_alert(ctx, alert):
+def _post_alert(ctx, alert, card=None):
     """Post an alert straight to the channel, so the trusted-user tag is
     guaranteed rather than left to the model to relay. Returns whether Slack
     took it: refuse_click alerts at most once per user per request, so it has
-    to know whether the one it is allowed to send actually landed."""
+    to know whether the one it is allowed to send actually landed.
+
+    `card` rides along as blocks when the alert is about something still
+    actionable (#215), so the alert IS the affordance rather than a pointer to
+    one. The alert text becomes the first block: blocks win over `text` in the
+    client, so a card without it would drop the sentence explaining why the
+    card is there, and `text` stays as the notification fallback."""
     client, channel = ctx.get("client"), ctx.get("channel")
     if not (client and channel):
         retval = False
         return retval
+    blocks = None
+    if card:
+        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": alert}}] + list(card)
     try:
-        client.chat_postMessage(channel=channel, text=alert, thread_ts=ctx.get("thread_ts") or None)
+        client.chat_postMessage(channel=channel, text=alert, blocks=blocks,
+                                thread_ts=ctx.get("thread_ts") or None)
     except Exception:
         retval = False
         return retval
@@ -244,6 +254,22 @@ def _mark_alerted(request_id, channel, user_id):
         del _CLICK_ALERTED[next(iter(_CLICK_ALERTED))]
 
 
+def _live_card(queue, key, req):
+    """The still-parked request, rendered fresh and clickable (#215).
+
+    Each queue renders its own surface, so the renderer is chosen by queue
+    rather than by sniffing the dict -- the same split `_QUEUES` already makes
+    for `status`. Returns None when there is nothing to render, so a caller
+    cannot turn a missing request into an empty card."""
+    if req is None:
+        retval = None
+    elif queue is proposals:
+        retval = slack_blocks.proposal(key, req, _trusted_tags())
+    else:
+        retval = slack_blocks.approval(key, req)
+    return retval
+
+
 def refuse_click(request_id, ctx, action_id):
     """A non-trusted user pressed Approve or Deny on a parked command (#94).
 
@@ -270,6 +296,13 @@ def refuse_click(request_id, ctx, action_id):
         return retval
     queue = _QUEUES.get(action_id, approvals)
     _state, req = queue.status(key, channel)
+    # Kept before the flattening below, because rendering a live card needs the
+    # request as its own queue's renderer expects it (#215).
+    live = req
+    # Only the pending branch sets one. A held request is already being acted
+    # on and an absent one cannot be acted on at all, so a card in either would
+    # be a button that does nothing -- the failure this is fixing, inverted.
+    card = None
     if req is not None and "command" not in req:
         # A skill proposal (#129) renders as its name, not a command line.
         req = {"command": f"skill proposal `{req.get('name')}`"}
@@ -300,20 +333,31 @@ def refuse_click(request_id, ctx, action_id):
         )
     else:
         # Says what happens next, not just what the rule is (#107). The card
-        # and its buttons are deliberately left standing, and without being
-        # told so the thread reads this as the click having consumed something
-        # -- which sent one straight to asking the agent to re-raise a request
-        # that was sitting right there, still clickable.
+        # and its buttons are deliberately left standing -- refusing a click
+        # must not consume the request -- and without being told so the thread
+        # reads this as the click having consumed something.
+        #
+        # It used to say the buttons "on the card above" were still live. True,
+        # and useless: "above" is however far the conversation has travelled
+        # since. Measured -- a click landed 43 minutes and a dozen messages
+        # after the card was posted, the alert pointed up at it, and the
+        # trusted user asked the agent to list what was parked and approved by
+        # typing ids instead. The buttons worked the entire time; nobody could
+        # find them. So the alert carries its own (#215), and the click lands
+        # where the conversation is.
+        #
+        # Two cards for one request is fine: both resolve the same id, whichever
+        # is clicked gets rewritten to the claimed state, and a click on the
+        # other then reads "no longer pending", which is true. The command is
+        # not repeated here -- the card renders it, scrubbed, and printing it
+        # twice in one message is how a credential gets two chances (#72).
         alert = (
             f":warning: {who} clicked *{label}* on request [{key}], but only "
-            f"trusted users may act on a parked command -- nothing ran. The request "
-            f"is still parked and the *Approve* / *Deny* buttons on the card above "
-            f"are still live, so {_trusted_tags()} can act on it there."
-            # Scrubbed like every other rendering of a parked command (#72): a
-            # credential rides argv routinely, and this is a fresh channel post.
-            "\n" + redact.scrub(f"```{req['command']}```")
+            f"trusted users may act on a parked command -- nothing ran. It is "
+            f"still parked, so {_trusted_tags()} can act on it right here."
         )
-    if _post_alert(ctx, alert):
+        card = _live_card(queue, key, live)
+    if _post_alert(ctx, alert, card):
         _mark_alerted(key, channel, user_id)
     retval = _REFUSED
     return retval

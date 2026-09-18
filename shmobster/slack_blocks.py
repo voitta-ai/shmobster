@@ -93,10 +93,25 @@ def proposal(key, prop, tags):
     """The "worth a skill?" card (#129): the agent's flag, tagging the trusted
     users who may act on it, with Open PR / Decline. Same shape as the
     approval card so the click handler is shared; the id rides in the value."""
-    text = redact.scrub(
-        f":bulb: *Worth a skill?* [{key}] `{prop['name']}` -- {prop['why']}\n"
-        f"{tags} -- a trusted user decides; nothing is written until then."
-    )
+    # Where it would land and why, before anyone clicks (#210). The classifier
+    # only proposes -- the trusted click is still the gate -- so the card has to
+    # show its reasoning, not just its answer: a proposal a human cannot check
+    # is one they have to take on faith.
+    _scope = prop.get("scope", "channel")
+    _where = ("this channel only" if _scope == "channel" else "every channel")
+    _lines = [f":bulb: *Worth a skill?* [{key}] `{prop['name']}` -- {prop['why']}",
+              f"scope: *{_where}* -- {prop.get('scope_reason') or 'default'}"]
+    if prop.get("amends"):
+        _lines.append(f"may amend the existing `{prop['amends']}` rather than add a sibling")
+    if _scope == "shared":
+        # Named, not offered as a button. Publishing to the public catalog needs
+        # the catalog.json / bundle-symlink / version-bump wiring that
+        # claudeception owns, and a second copy of it here would drift (#210 Q3).
+        _lines.append("if this belongs in the *public* catalog, hand it to the "
+                      "skillz session -- this instance does not publish there")
+    _lines.append(f"{tags} -- a trusted user decides; nothing is written until then. "
+                  f"To change the scope, say so when you approve.")
+    text = redact.scrub("\n".join(_lines))
     retval = [
         {"type": "section", "text": {"type": "mrkdwn", "text": text}},
         {

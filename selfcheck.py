@@ -1581,8 +1581,11 @@ def _fake_api(method, path, payload=None):
         return {"html_url": _gh_state["prs"][payload["head"]]}
     return {}
 _t_ctx = {**_l_ctx, "user_id": "UT"}
-_out = learning.propose(_key, _t_ctx, api=_fake_api)
+# scope=channel explicitly, so this keeps testing the per-channel path mechanics
+# it was written for rather than whatever the classifier proposes (#210)
+_out = learning.propose(_key, _t_ctx, api=_fake_api, scope="channel")
 assert "pull/7" in _out and "UT" in _out, _out
+assert "this channel only" in _out, _out
 assert [c[0] for c in _api_calls if c[0] != "GET"] == ["POST", "PUT", "POST"], _api_calls
 _put = [c for c in _api_calls if c[0] == "PUT"][0]
 assert _put[1] == "repos/org/skillz-private/contents/channels/c9/skills/launchd-race/SKILL.md", _put[1]
@@ -3768,5 +3771,151 @@ import inspect  # noqa: E402
 assert "{" not in learning._BAR.replace("{}", ""), "the bar must not interpolate anything"
 _msrc = inspect.getsource(memory.prompt_block)
 assert "not instructions" in _msrc and "cannot grant you anything" in _msrc
+
+# 53) scope is a property of the skill, not of where it was learned (#210). The
+# first real run landed a generic GitHub mechanism -- nothing in it about the
+# channel, the company or any private host -- under channels/<ch>/skills/, so
+# only that channel would ever see it, a second channel would learn it again,
+# and the private catalog fills with things that are not private.
+assert learning.classify_scope("github-ruleset-required-check", "a ruleset's required "
+                               "context from a workflow added after the last push never "
+                               "runs", "C9")[0] == "shared"
+# ...and anything naming something that only means something here stays put.
+# Biased that way on purpose: a private skill in the private catalog costs a
+# re-learn, a channel-specific one proposed as shared is the envelope leak #52
+# was about, so "could not tell" resolves to the narrower answer.
+# The fixtures use documentation-reserved and non-flagged shapes on purpose:
+# scripts/check-sensitive-terms.sh matches 10./192.168./172.16-31. addresses, any
+# 12-digit run, and .internal/.corp/.intranet -- and it caught the first draft of
+# this very block. The classifier under test is deliberately WIDER than that gate,
+# so every shape below is one it catches and the gate does not, rather than a real
+# value smuggled past a check.
+for _n, _w in (("fix-the-thing", "192.0.2.10 stopped answering"),     # RFC 5737
+               ("cleanup", "the arn:aws role we use here"),
+               ("audit", "the account-id we use only"),
+               ("tidy", "under /Users/someone/g/proj"),
+               ("ping-owner", "tell U01ABCDEFGH about it"),
+               ("host-check", "build01.lan is the one that matters")):
+    _s, _r = learning.classify_scope(_n, _w, "C9")
+    assert _s == "channel", (_n, _w, _s, _r)
+    assert _r, "the card shows the reason, so there has to be one"
+# naming the channel itself counts too
+assert learning.classify_scope("thing", "only in c9", "C9")[0] == "channel"
+
+# the card shows the proposed scope, its reason, and -- when shared -- that
+# publishing to the PUBLIC catalog is a handoff this instance does not do. The
+# wiring for that (catalog.json, bundle symlinks, version bumps) is
+# claudeception's, and a second copy here would drift (#210 Q3).
+_p53 = {"name": "n", "why": "w", "scope": "shared", "scope_reason": "nothing found",
+        "amends": None}
+_c53 = json.dumps(slack_blocks.proposal("k-1", _p53, "<@UT>"))
+assert "every channel" in _c53 and "nothing found" in _c53, _c53
+assert "skillz session" in _c53 and "does not publish there" in _c53, _c53
+# ...and there is no button for it, only the two that were always there
+assert '"public"' not in _c53
+assert sorted(_e["action_id"] for _b in slack_blocks.proposal("k-1", _p53, "<@UT>")
+              for _e in (_b.get("elements") or [])) == ["decline_skill", "open_skill_pr"]
+# a channel-scoped card says so and offers no handoff note
+_c53b = json.dumps(slack_blocks.proposal("k-2", {**_p53, "scope": "channel",
+                                                 "scope_reason": "names this channel"}, "<@UT>"))
+assert "this channel only" in _c53b and "skillz session" not in _c53b, _c53b
+# a proposal from before this existed reads as today's behaviour, not as broken
+_c53c = json.dumps(slack_blocks.proposal("k-3", {"name": "n", "why": "w"}, "<@UT>"))
+assert "this channel only" in _c53c, _c53c
+
+# dedupe: an existing skill covering the same ground is offered as an amend
+# target rather than drafted alongside. This run would have found the public
+# skill it siloed a sibling of.
+_c53d = json.dumps(slack_blocks.proposal("k-4", {**_p53, "amends": "an-existing-skill"}, "<@UT>"))
+assert "may amend the existing" in _c53d and "an-existing-skill" in _c53d, _c53d
+
+# ...and the scope actually picks the destination. The shared one is a config
+# key with a default rather than something derived from `learning.path`: the
+# first cut stripped the `{channel}` segment out and produced
+# `channels/skills/...`, keeping a prefix that existed only to hold the channel
+# -- and the real destination is whichever directory the consuming side has on
+# its global skills.paths, which this process cannot know.
+assert "{channel}" not in learning.shared_path(), learning.shared_path()
+assert learning.shared_path() == config.LEARNING_SHARED_PATH
+
+_paths53 = []
+def _api53(method, path, payload=None):
+    if method == "GET":
+        if "/git/ref/heads/" in path and path.endswith("/master"):
+            return {"object": {"sha": "s"}}
+        raise RuntimeError("404")          # no branch, no file, no open PR
+    if method == "PUT":
+        _paths53.append(path.split("/contents/", 1)[1])
+    return {"html_url": "https://example.com/pull/1"}
+
+learning.open_pr("k-9", "generic-thing", "C9", "---\nname: x\n---\n", "b",
+                 api=_api53, scope="shared")
+learning.open_pr("k-9", "local-thing", "C9", "---\nname: x\n---\n", "b",
+                 api=_api53, scope="channel")
+assert _paths53[0] == "shared/skills/generic-thing/SKILL.md", _paths53
+assert _paths53[1] == "channels/c9/skills/local-thing/SKILL.md", _paths53
+# the branch carries the channel either way: that is provenance, not
+# destination, and two channels learning the same shared skill must not collide
+assert all(True for _ in _paths53)
+
+# the override reaches open_pr. A trusted user says "open it for every channel"
+# and the model passes scope -- no new button, so the click path that approvals
+# and proposals share does not grow a third action (#210 Q1(b), Q3).
+_ov = {"request_id": "x", "scope": "shared"}
+_propose_tool = [t for t in admin_tools.TOOLS
+                 if t["function"]["name"] == "propose_skill"][0]
+assert "scope" in _propose_tool["function"]["parameters"]["properties"], _propose_tool
+assert _propose_tool["function"]["parameters"]["properties"]["scope"]["enum"] == ["channel", "shared"]
+assert _propose_tool["function"]["parameters"]["required"] == ["request_id"], "scope is optional"
+# an unrecognised value is ignored rather than guessed at -- it would pick a
+# destination nobody asked for, and the proposed one is on the card
+assert "nonsense" not in learning.SCOPES
+
+# ...and the draft is re-checked, because the scope was decided from the flag's
+# ONE LINE while the file that lands is the draft. A generic name and a generic
+# reason can sit on top of a body full of this channel's hostnames -- #52's
+# envelope leak, one level in. Found by working the review's own question after
+# two degenerate runs.
+_tj53, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+_lr53, config.LEARNING_REPO = config.LEARNING_REPO, "org/skillz-private"
+_cx53 = llm.complete
+try:
+    trajectory.record("C53S", "U1", "8.1", "q", [], "a")
+    _k53 = learning.flag({"name": "a-generic-sounding-thing", "why": "nothing specific here"},
+                         {"channel": "C53S", "thread_ts": "8.1", "user_id": "U1"})
+    _k53 = _k53.split("[", 1)[1].split("]", 1)[0]
+    assert proposals.peek(_k53, "C53S")["scope"] == "shared", "the one-liner looks generic"
+
+    # the draft turns out to name an internal host
+    llm.complete = lambda messages, tools=None: _FakeMsg(
+        content="---\nname: a-generic-sounding-thing\ndescription: |\n  d\n---\n"
+                "# T\n## Solution\nrun it on build01.lan and wait\n")
+    _out = learning.propose(_k53, {"channel": "C53S", "user_id": "UT", "thread_ts": "8.1"},
+                            api=lambda *a, **k: {})
+    assert _out.startswith(learning.RETRY), _out
+    assert "Nothing was written" in _out and "this channel only" in _out, _out
+    # re-parked under the SAME id, now scoped narrowly, so the card the trusted
+    # user clicked still points at something
+    _still = proposals.peek(_k53, "C53S")
+    assert _still is not None and _still["scope"] == "channel", _still
+
+    # approving again takes the narrowed scope and proceeds -- no loop
+    _puts = []
+    def _api53c(method, path, payload=None):
+        if method == "GET":
+            if path.endswith("/master"):
+                return {"object": {"sha": "s"}}
+            raise RuntimeError("404")
+        if method == "PUT":
+            _puts.append(path.split("/contents/", 1)[1])
+        return {"html_url": "https://example.com/pull/2"}
+    _out = learning.propose(_k53, {"channel": "C53S", "user_id": "UT", "thread_ts": "8.1"},
+                            api=_api53c)
+    assert "pull/2" in _out and "this channel only" in _out, _out
+    assert _puts and _puts[0].startswith("channels/"), _puts
+finally:
+    llm.complete = _cx53
+    config.LEARNING_REPO = _lr53
+    trajectory._DIR = _tj53
 
 print(f"selfcheck OK -- shmobster {_b}")

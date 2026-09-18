@@ -3636,4 +3636,94 @@ finally:
     for _k in approvals.ids("C_222"):
         approvals.pop(_k, "C_222")
 
+# 52) the bar names the shape the self-check missed, and says so in both places
+# it is read (#211). First real run: a correction turn -- the agent's earlier
+# answer in the thread was wrong, a trusted user supplied three counter-facts,
+# and it re-derived the right mechanism and stated it as a general rule -- did
+# not flag. The card came a turn later, only once a trusted user asked. The old
+# bar named three shapes and all three were things you DO, so a turn that mostly
+# read facts and reasoned did not register as work.
+assert "wrong and you now know why" in learning._BAR, learning._BAR
+assert "CONCLUSION, not the tool calls" in learning._BAR, learning._BAR
+assert "STRONGEST shape" in learning._BAR, learning._BAR
+# ...and flagging must not become a thing that happens when asked for
+assert "answer that question" in learning._BAR, learning._BAR
+assert "card on demand" in learning._BAR, learning._BAR
+
+# One string, two readers. The bar reaches the model as this tool's description
+# AND as a system-prompt block, and two copies that must agree is how they stop
+# agreeing -- so it is the same object, not two strings that look alike.
+assert learning.TOOLS[0]["function"]["description"] == learning._BAR
+assert learning._BAR in learning.prompt_block()
+
+# the block is only offered where a PR can follow the flag (#129)
+_sys_with = handler._system_prompt()
+assert "When to flag this thread as a skill" not in _sys_with, \
+    "the bar must come from learning, not be baked into the spine"
+
+# ...and the turn says whether it could have flagged and did not. Nothing else
+# could tell: a self-check that silently never fires and one that fires and
+# declines produce the same empty thread, which is why the first real run's
+# miss had to be noticed by a human asking in-channel.
+_tj52, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+_lr52, config.LEARNING_REPO = config.LEARNING_REPO, "o/r"
+_cx52, llm.complete = llm.complete, (lambda messages, tools=None: _FakeMsg(content="done"))
+try:
+    # offered (learning enabled) and the turn did not call it
+    handler.handle("what is 2+2", channel="C52", thread_ts="5.2", slack_client=_fs)
+    _r = trajectory.thread("C52", "5.2")
+    assert _r and _r[-1]["flag_skill"] == "offered, not used", _r[-1]
+
+    # ...and the bar is in the prompt the model actually saw, not just in the
+    # tool description it reads when already deciding to call something (#211)
+    _seen = {}
+    llm.complete = lambda messages, tools=None: (
+        _seen.setdefault("system", messages[0]["content"]), _FakeMsg(content="done"))[1]
+    handler.handle("hello", channel="C52", thread_ts="5.4", slack_client=_fs)
+    assert "When to flag this thread as a skill" in _seen["system"], _seen["system"][:200]
+    assert "wrong and you now know why" in _seen["system"]
+
+    # off where no PR can follow the flag -- no tool, no bar, and the row says so
+    config.LEARNING_REPO = ""
+    _seen.clear()
+    handler.handle("hello", channel="C52", thread_ts="5.3", slack_client=_fs)
+    assert "When to flag this thread as a skill" not in _seen["system"]
+    _r = trajectory.thread("C52", "5.3")
+    assert _r and _r[-1]["flag_skill"] == "not offered", _r[-1]
+finally:
+    trajectory._DIR = _tj52
+    config.LEARNING_REPO = _lr52
+    llm.complete = _cx52
+
+# a record written without the argument at all still carries the field, so a
+# reader never has to guess whether an absent value means "not offered" or
+# "written before this existed"
+trajectory._DIR = tempfile.mkdtemp()
+trajectory.record("C53", "U", "1.1", "q", [], "a")
+assert trajectory.thread("C53", "1.1")[0]["flag_skill"] == "not offered"
+trajectory._DIR = _tj52
+
+# ...and a turn that DID flag reads back as such. The branch matches on
+# learning.NAMES, so this also pins that set: propose_skill and decline_skill
+# are trusted-only and live in admin_tools, and a turn where a trusted user
+# proposed must not read back as the agent having flagged on its own initiative
+# -- which is the exact distinction #211 is about.
+assert learning.NAMES == {"flag_skill"}, learning.NAMES
+_tj52b, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+_lr52b, config.LEARNING_REPO = config.LEARNING_REPO, "o/r"
+_cx52b = llm.complete
+_flagged52 = [_FakeMsg(tool_calls=[_FakeCall("f1", "flag_skill",
+                                             '{"name": "a-thing", "why": "w"}')]),
+              _FakeMsg(content="flagged")]
+llm.complete = lambda messages, tools=None: _flagged52.pop(0)
+try:
+    handler.handle("fix it", channel="C54", thread_ts="6.1",
+                   user_id="U1", slack_client=_fs)
+    _r = trajectory.thread("C54", "6.1")
+    assert _r and _r[-1]["flag_skill"] == "used", _r[-1]
+finally:
+    trajectory._DIR = _tj52b
+    config.LEARNING_REPO = _lr52b
+    llm.complete = _cx52b
+
 print(f"selfcheck OK -- shmobster {_b}")

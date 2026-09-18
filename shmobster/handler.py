@@ -107,12 +107,14 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     # before draining must not charge the next one.
     cost.start()
     policy = policy_mod.resolve(channel)
+    flagging = False
     tool_schemas = list(tools.TOOLS)
     if slack_client is not None:
         tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
         # The flag is offered only where a PR can follow it (#129).
         if learning.enabled():
             tool_schemas += learning.TOOLS
+            flagging = True
     # Skills are offered only when some are configured, and the menu is rebuilt
     # per turn so a reload_skills takes effect without a restart (#74).
     skill_menu = skills.prompt_block(channel)
@@ -121,6 +123,14 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     system = _system_prompt()
     if skill_menu:
         system += "\n\n" + skill_menu
+    # The bar for flagging, in view while the answer is composed (#211). It was
+    # only ever in the tool description, which the model reads once it is
+    # already deciding to call something -- so a turn whose *conclusion* was the
+    # skill-worthy part had nothing prompting the judgment at the moment the
+    # conclusion was being written. Same string as the tool description, from
+    # learning._BAR, so the two cannot drift apart.
+    if flagging:
+        system += "\n\n" + learning.prompt_block()
     _ident = [
         f"You are running shmobster {build()} -- report exactly that when asked "
         "which version or build you are."
@@ -179,7 +189,17 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         # Recorded before the reply goes out, only for channel turns: a script
         # or a test calling handle() directly has no thread to learn from.
         if channel:
-            trajectory.record(channel, user_id, thread_ts, text, trace, answer, cost.drain())
+            # "offered, not used" is the row #211 exists to make greppable: the
+            # tool was in view for this turn and no card came of it. Read
+            # alongside the turn's step count, which `trace` already carries.
+            if not flagging:
+                _flag = "not offered"
+            elif any(s.get("tool") in learning.NAMES for s in trace):
+                _flag = "used"
+            else:
+                _flag = "offered, not used"
+            trajectory.record(channel, user_id, thread_ts, text, trace, answer,
+                              cost.drain(), flag_skill=_flag)
         retval = _finalize(answer, steps)
         return retval
 

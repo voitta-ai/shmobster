@@ -71,7 +71,7 @@ def _path(channel, when):
     return retval
 
 
-def record(channel, user_id, thread_ts, text, steps, answer, calls=None):
+def record(channel, user_id, thread_ts, text, steps, answer, calls=None, flag_skill=None):
     """Append one turn. Never raises: a turn that cannot be recorded still
     happened, and the reply is on its way to the channel."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -88,6 +88,19 @@ def record(channel, user_id, thread_ts, text, steps, answer, calls=None):
         # list rather than being absent, so a reader can tell "no calls" from
         # "recorded before costs existed".
         "calls": list(calls or []),
+        # Whether the turn could have flagged and did not (#211). The feature
+        # promises a self-check the agent runs on its own initiative, and the
+        # first real run skipped the most skill-worthy turn in the thread -- a
+        # correction -- flagging only when a trusted user asked. That is
+        # indistinguishable from working correctly unless it is written down.
+        #
+        # Deliberately NOT the model's reason for declining: capturing that
+        # would mean asking every turn, which costs a model call per turn to
+        # answer "no" almost always. This records the auditable half instead --
+        # the tool was in view, the turn did `steps` many tool calls, and no
+        # card came of it. A run of those with a high step count is the shape
+        # #211 was filed about, and now it is greppable rather than anecdotal.
+        "flag_skill": flag_skill or "not offered",
     }
     path = _path(channel, now)
     try:

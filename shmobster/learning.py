@@ -32,22 +32,62 @@ _STATE_KEY = "skill_threads"
 _STATE_MAX = 500
 _SLUG = re.compile(r"[^a-z0-9-]+")
 
+# The bar, written once (#211). It reaches the model twice -- as this tool's
+# description, and as a block in the system prompt where it is in view while the
+# answer is being composed. Two copies that must agree is how they stop agreeing,
+# so there is one string and both readers get it verbatim.
+#
+# What the first real run exposed: the feature promises an end-of-turn
+# self-check, and there is no such thing. `flag_skill` is a tool called during
+# composition, so a judgment about the turn's conclusion is being asked for
+# through a mechanism that runs before the conclusion exists. The bar cannot
+# create the missing hook, but it can stop describing the wrong subject -- the
+# old text named three shapes, all of them things you DO, and the turn it missed
+# was one where the agent mostly read three facts and thought.
+_BAR = (
+    "Flag the work in THIS thread as worth turning into a reusable skill, so a "
+    "trusted user can decide. At most once per thread, at the end of a turn.\n"
+    "Judge the turn's CONCLUSION, not the tool calls that produced it. A turn "
+    "that ran no commands and reasoned its way to a general rule can meet the "
+    "bar; a turn that ran ten and answered a routine question does not.\n"
+    "Shapes that meet it:\n"
+    "- non-obvious investigation or debugging;\n"
+    "- a workaround found by trial and error;\n"
+    "- a project quirk the docs do not cover;\n"
+    "- your earlier answer in this thread was wrong and you now know why. This "
+    "is the STRONGEST shape, not the weakest: the thread now holds both the "
+    "wrong belief and the evidence that corrected it, which is exactly what "
+    "someone hitting the same thing next would need. Do not skip it because the "
+    "correction came from facts a user handed you -- what is worth writing down "
+    "is the rule you derived, not who supplied the input.\n"
+    "Routine work, a documentation lookup, or an answer you already knew is not "
+    "a skill.\n"
+    "If someone asks why you did NOT flag something, answer that question. Do "
+    "not flag in place of answering: a card produced on request is a card on "
+    "demand, which is the one thing this must not be.\n"
+    "Flagging writes nothing: it posts a card tagging the trusted users, who "
+    "may open the PR or decline."
+)
+
+
+def prompt_block():
+    """The bar, for the system prompt (#211).
+
+    In view while the answer is being composed, rather than only in a tool
+    description the model reads when it is already deciding to call something.
+    Reference, not instruction to obey blindly -- and unlike the memory block
+    (#140) this one is authored here, not by a channel, so it needs no
+    not-instructions fence."""
+    retval = "## When to flag this thread as a skill\n\n" + _BAR
+    return retval
+
+
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "flag_skill",
-            "description": (
-                "Flag the work in THIS thread as worth turning into a reusable skill, "
-                "so a trusted user can decide. Call it at most once per thread, at "
-                "the end of a turn, and only when the work met the bar: it needed "
-                "non-obvious investigation or debugging, a workaround found by "
-                "trial and error, or a project quirk the docs do not cover -- and "
-                "someone facing the same thing again would be faster for having it "
-                "written down. Routine work, a documentation lookup, or an answer "
-                "you already knew is not a skill. Flagging writes nothing: it posts "
-                "a card tagging the trusted users, who may open the PR or decline."
-            ),
+            "description": _BAR,
             "parameters": {
                 "type": "object",
                 "properties": {

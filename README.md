@@ -1701,6 +1701,27 @@ a gate that could not do its job said the same word as one that did. Measured
 off, while a 34-term list sat one directory away under `skillz`. Set
 `SHMOBSTER_SENSITIVE_TERMS_REQUIRED=1` to make the absence fatal instead.
 
+#### The sensitive-term gate has a half CI cannot run (#204)
+
+`scripts/check-sensitive-terms.sh` has two halves. The **structural** half --
+token shapes, cloud account ids, private addresses, internal hostnames -- runs
+anywhere, and is what CI runs. The **name** half needs a wordlist of client,
+employer and project names, which is per-machine and deliberately in no repo, so
+a public runner cannot have one.
+
+That gap is not theoretical: a client name reached this public repo in a merged
+doc and CI passed it, because the only half that could have caught it was the
+half CI does not have.
+
+So install the hook on any machine that pushes:
+
+    git config core.hooksPath scripts/hooks
+
+It runs the same script over the same paths before a push, with whatever
+wordlist that machine has. Put yours at `~/.config/shmobster/sensitive-terms.txt`
+or `~/.config/skillz/sensitive-terms.txt`, one term per line. `git push
+--no-verify` bypasses it for a push you have checked yourself.
+
 #### Upgrade announcements (#77)
 
 An instance announces itself in its channels the first time it boots on a new

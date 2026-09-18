@@ -29,6 +29,30 @@ _RESULT_MAX = 600
 _TEXT_MAX = 4000
 
 
+# How a non-zero exit is spelled, in one place (#233). Three readers care -- the
+# model, this module's disposition, and the resume path's "it ran" -- and three
+# independent substring matches is how they stop agreeing.
+#
+# It lives here rather than in tools because tools already imports this module,
+# and because this is where a result's text is turned into what it means.
+FAILED_PREFIX = "FAILED (exit "
+
+
+def failed(result):
+    """Whether a run_shell result records a non-zero exit.
+
+    A containment check rather than a prefix one, because the resume path sees
+    this wrapped: `run_approved` returns "APPROVED by <@u> and ran: <cmd>\n<out>"
+    and the marker sits after the command line.
+
+    That makes a false positive possible -- output that quotes the marker
+    verbatim -- and that is the direction to be wrong in. Claiming a failure
+    that did not happen is visible in the next line of output and costs a
+    re-read; missing one is the bug this exists to fix."""
+    retval = FAILED_PREFIX in (result or "")
+    return retval
+
+
 def disposition(tool, result):
     """What happened to one tool call, from the text it returned. run_shell
     says so in its first words; every other tool either answered or refused."""
@@ -40,6 +64,13 @@ def disposition(tool, result):
             retval = "blocked"
         elif head.startswith("exec error"):
             retval = "error"
+        elif failed(result):
+            # Ran and exited non-zero, which used to record as "ran" like any
+            # other (#233). "error" is kept for the cases where the command
+            # never started -- a timeout, a sandbox that would not wrap -- so a
+            # reader can still tell "we could not run it" from "it ran and
+            # said no".
+            retval = "failed"
         else:
             retval = "ran"
     elif head.startswith("APPROVED"):

@@ -3918,4 +3918,81 @@ finally:
     config.LEARNING_REPO = _lr53
     trajectory._DIR = _tj53
 
+# 54) a failed command and a successful one used to reach the model identically
+# (#233). The status was named only when there was NO output, so a command that
+# failed and printed something was indistinguishable from one that worked. The
+# one reader that had the status was the log line, which is the reader that does
+# not need it.
+#
+# Measured live on v0.20.0: `gh api ...` with no credential in the sandbox exits
+# non-zero and prints its own advice, and all that reached the model was the
+# advice. The turn read it as findings.
+_p54 = {"cwd": "/tmp"}
+_r = tools.execute("sh -c 'echo some output; exit 3'", _p54)
+assert _r.startswith(trajectory.FAILED_PREFIX), _r
+assert "some output" in _r, _r
+assert trajectory.disposition("run_shell", _r) == "failed", _r
+# silent failure keeps saying so
+assert trajectory.disposition("run_shell", tools.execute("sh -c 'exit 4'", _p54)) == "failed"
+# ...and success is untouched: no marker, no new noise in front of the output
+for _c in ("echo hi", "sh -c 'echo fine; exit 0'"):
+    _ok = tools.execute(_c, _p54)
+    assert not _ok.startswith(trajectory.FAILED_PREFIX), _ok
+    assert trajectory.disposition("run_shell", _ok) == "ran", _ok
+    assert not trajectory.failed(_ok), _ok
+
+# Truncation cannot eat the marker: the output is capped first and the status is
+# prepended after, so the marker is never in the part that gets cut. Asserted
+# because an adversarial review's one finding that would have been a real defect
+# was exactly this, and reading the order of operations is not measuring it.
+_long = tools.execute("sh -c 'head -c 20000 /dev/zero | tr \"\\0\" x; exit 7'", _p54)
+assert _long.startswith(trajectory.FAILED_PREFIX), _long[:40]
+assert "[truncated]" in _long, "the cap still applies"
+assert trajectory.disposition("run_shell", _long) == "failed"
+# ...and it survives the trajectory's own result cap, because it is at the head
+assert trajectory.step("run_shell", {"command": "x"}, _long)["disposition"] == "failed"
+# ...and the wrapped, truncated form the resume path would see
+assert trajectory.failed("APPROVED by <@U1> and ran: c\n" + _long)
+
+# The collision the same review raised is real and is the direction to be wrong
+# in: a SUCCESSFUL command printing the marker reads as failed, and a FAILING
+# one can never read as successful, because the marker is prepended by us rather
+# than matched for.
+_collide = tools.execute("sh -c 'echo \"FAILED (exit 9) from a log line\"; exit 0'", _p54)
+assert trajectory.disposition("run_shell", _collide) == "failed", "documented false positive"
+for _rc in (1, 2, 126, 255):
+    assert tools.execute("sh -c 'echo x; exit %d'" % _rc, _p54).startswith(trajectory.FAILED_PREFIX)
+
+# "error" still means the command never started -- a timeout, a sandbox that
+# would not wrap -- so a reader can tell "we could not run it" from "it ran and
+# said no", which the single "ran" bucket could not
+assert trajectory.disposition("run_shell", "exec error: timed out after 5s") == "error"
+assert trajectory.disposition("run_shell", "NOT RUN -- pending approval [k] (mutating)") == "parked"
+assert trajectory.disposition("run_shell", "BLOCKED by channel policy: no") == "blocked"
+
+# The resume path sees the result WRAPPED -- run_approved returns
+# "APPROVED by <@u> and ran: <cmd>\n<out>" -- so the marker is not at the head.
+# That is why failed() is a containment check and not a prefix one.
+_wrapped = "APPROVED by <@U1> and ran: gh api repos/o/r\n" + _r
+assert trajectory.failed(_wrapped), _wrapped
+assert not trajectory.failed("APPROVED by <@U1> and ran: echo hi\nhi")
+
+# and the resumed turn is told which it was, rather than only that it ran
+_saved54, llm.complete = llm.complete, (lambda messages, tools=None: _FakeMsg(content="ok"))
+_seen54 = {}
+llm.complete = lambda messages, tools=None: (
+    _seen54.setdefault("user", messages[1]["content"]), _FakeMsg(content="ok"))[1]
+try:
+    handler.resume("k-1", True, "gh api repos/o/r", _wrapped, channel=None)
+    assert "it ran and FAILED" in _seen54["user"], _seen54["user"][:300]
+    assert "not as findings" in _seen54["user"], _seen54["user"][:300]
+    _seen54.clear()
+    handler.resume("k-2", True, "echo hi", "APPROVED by <@U1> and ran: echo hi\nhi", channel=None)
+    assert "it ran and succeeded" in _seen54["user"], _seen54["user"][:300]
+    _seen54.clear()
+    handler.resume("k-3", False, "echo hi", "", channel=None)
+    assert "it did not run" in _seen54["user"], _seen54["user"][:300]
+finally:
+    llm.complete = _saved54
+
 print(f"selfcheck OK -- shmobster {_b}")

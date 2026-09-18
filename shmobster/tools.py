@@ -250,7 +250,24 @@ def execute(command, policy):
         out = (proc.stdout or "") + (proc.stderr or "")
         if len(out) > _MAX_OUTPUT:
             out = out[:_MAX_OUTPUT] + "\n...[truncated]"
-        retval = out.strip() or f"(exit {proc.returncode}, no output)"
+        out = out.strip()
+        # The status reaches the model, not only the log (#233). It used to be
+        # named only when there was no output at all, so a command that failed
+        # AND printed something was indistinguishable from one that worked:
+        # `gh api ...` without a credential exits non-zero and prints its own
+        # advice, and all the model saw was the advice. The one reader that had
+        # the status was the log line above, which is the reader that does not
+        # need it.
+        #
+        # First, because it is the thing most likely to change how the output is
+        # read, and because everything downstream that classifies a result looks
+        # at the head.
+        if proc.returncode == 0:
+            retval = out or "(exit 0, no output)"
+        elif out:
+            retval = f"{trajectory.FAILED_PREFIX}{proc.returncode})\n{out}"
+        else:
+            retval = f"{trajectory.FAILED_PREFIX}{proc.returncode}), no output"
     except subprocess.TimeoutExpired as exc:
         # Its str() is "Command '<argv>' timed out", and since #116 argv
         # carries the whole seatbelt profile -- a screenful per line. The

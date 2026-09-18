@@ -91,8 +91,17 @@ def _resume_turn(req_id, approved, command, result, thread_context, channel,
     # Scrubbed here as well as upstream: a command line carries credentials
     # routinely, and this text becomes a turn, a trajectory record and whatever
     # the model quotes back (#72, and the same rule approvals follows).
-    body = (f"it ran, and its output was:\n<output>\n{redact.scrub(result)}\n</output>"
-            if approved else "it did not run.")
+    # "It ran" was all the model was told, whatever the command exited with
+    # (#233). A failure that printed something read exactly like a success, and
+    # the turn carried on from it -- which is how a turn ends up reporting what
+    # a command "found" when the command was declining to run at all.
+    if not approved:
+        body = "it did not run."
+    else:
+        outcome = ("it ran and FAILED -- treat its output as a failure report, not "
+                   "as findings" if trajectory.failed(result)
+                   else "it ran and succeeded")
+        body = f"{outcome}. Its output was:\n<output>\n{redact.scrub(result)}\n</output>"
     text = _RESUME_TEMPLATE.format(
         user=user_id or "someone", verdict="approved" if approved else "denied",
         req_id=req_id, command=redact.scrub(command), body=body,

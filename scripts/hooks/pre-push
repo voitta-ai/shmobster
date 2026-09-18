@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Run the sensitive-term gate before anything leaves this machine.
+#
+# CI runs the same script, and CI can only ever run HALF of it: the name
+# wordlist is per-machine and deliberately not in any repo, so a public runner
+# has no way to match a client, employer or project name. The structural half
+# (token shapes, account ids, private addresses, internal hostnames) is all CI
+# can check.
+#
+# That gap is not theoretical. A client name reached this PUBLIC repo in a
+# merged doc and CI passed it, because the only half that could have caught it
+# was the half CI does not have. This hook is the other half, and it only works
+# where the wordlist lives -- which is here.
+#
+# Install:  git config core.hooksPath scripts/hooks
+# Bypass:   git push --no-verify   (for a push you have already checked)
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+# The same paths CI scans. requirements.txt is deliberately absent: a sha256
+# hash contains 12-digit runs and matches the account-id shape, so including it
+# would train everyone to ignore this hook's output.
+if ! bash scripts/check-sensitive-terms.sh \
+       shmobster/ examples/ deploy/ docs/ workspace/ README.md selfcheck.py; then
+    echo "" >&2
+    echo "pre-push: refused. A sensitive term is in the tree above." >&2
+    echo "  This repo is public. Fix the line, or re-run with --no-verify if you" >&2
+    echo "  have checked it yourself and it is a false positive." >&2
+    exit 1
+fi

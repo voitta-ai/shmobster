@@ -3784,12 +3784,18 @@ assert learning.classify_scope("github-ruleset-required-check", "a ruleset's req
 # Biased that way on purpose: a private skill in the private catalog costs a
 # re-learn, a channel-specific one proposed as shared is the envelope leak #52
 # was about, so "could not tell" resolves to the narrower answer.
-for _n, _w in (("fix-the-thing", "10.0.13.4 stopped answering"),
+# The fixtures use documentation-reserved and non-flagged shapes on purpose:
+# scripts/check-sensitive-terms.sh matches 10./192.168./172.16-31. addresses, any
+# 12-digit run, and .internal/.corp/.intranet -- and it caught the first draft of
+# this very block. The classifier under test is deliberately WIDER than that gate,
+# so every shape below is one it catches and the gate does not, rather than a real
+# value smuggled past a check.
+for _n, _w in (("fix-the-thing", "192.0.2.10 stopped answering"),     # RFC 5737
                ("cleanup", "the arn:aws role we use here"),
-               ("audit", "account-id 123456789012 only"),
+               ("audit", "the account-id we use only"),
                ("tidy", "under /Users/someone/g/proj"),
                ("ping-owner", "tell U01ABCDEFGH about it"),
-               ("host-check", "build01.corp is the one that matters")):
+               ("host-check", "build01.lan is the one that matters")):
     _s, _r = learning.classify_scope(_n, _w, "C9")
     assert _s == "channel", (_n, _w, _s, _r)
     assert _r, "the card shows the reason, so there has to be one"
@@ -3883,7 +3889,7 @@ try:
     # the draft turns out to name an internal host
     llm.complete = lambda messages, tools=None: _FakeMsg(
         content="---\nname: a-generic-sounding-thing\ndescription: |\n  d\n---\n"
-                "# T\n## Solution\nrun it on build01.corp and wait\n")
+                "# T\n## Solution\nrun it on build01.lan and wait\n")
     _out = learning.propose(_k53, {"channel": "C53S", "user_id": "UT", "thread_ts": "8.1"},
                             api=lambda *a, **k: {})
     assert _out.startswith(learning.RETRY), _out

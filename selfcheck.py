@@ -3941,6 +3941,28 @@ for _c in ("echo hi", "sh -c 'echo fine; exit 0'"):
     assert trajectory.disposition("run_shell", _ok) == "ran", _ok
     assert not trajectory.failed(_ok), _ok
 
+# Truncation cannot eat the marker: the output is capped first and the status is
+# prepended after, so the marker is never in the part that gets cut. Asserted
+# because an adversarial review's one finding that would have been a real defect
+# was exactly this, and reading the order of operations is not measuring it.
+_long = tools.execute("sh -c 'head -c 20000 /dev/zero | tr \"\\0\" x; exit 7'", _p54)
+assert _long.startswith(trajectory.FAILED_PREFIX), _long[:40]
+assert "[truncated]" in _long, "the cap still applies"
+assert trajectory.disposition("run_shell", _long) == "failed"
+# ...and it survives the trajectory's own result cap, because it is at the head
+assert trajectory.step("run_shell", {"command": "x"}, _long)["disposition"] == "failed"
+# ...and the wrapped, truncated form the resume path would see
+assert trajectory.failed("APPROVED by <@U1> and ran: c\n" + _long)
+
+# The collision the same review raised is real and is the direction to be wrong
+# in: a SUCCESSFUL command printing the marker reads as failed, and a FAILING
+# one can never read as successful, because the marker is prepended by us rather
+# than matched for.
+_collide = tools.execute("sh -c 'echo \"FAILED (exit 9) from a log line\"; exit 0'", _p54)
+assert trajectory.disposition("run_shell", _collide) == "failed", "documented false positive"
+for _rc in (1, 2, 126, 255):
+    assert tools.execute("sh -c 'echo x; exit %d'" % _rc, _p54).startswith(trajectory.FAILED_PREFIX)
+
 # "error" still means the command never started -- a timeout, a sandbox that
 # would not wrap -- so a reader can tell "we could not run it" from "it ran and
 # said no", which the single "ran" bucket could not

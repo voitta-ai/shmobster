@@ -3865,4 +3865,51 @@ assert _propose_tool["function"]["parameters"]["required"] == ["request_id"], "s
 # destination nobody asked for, and the proposed one is on the card
 assert "nonsense" not in learning.SCOPES
 
+# ...and the draft is re-checked, because the scope was decided from the flag's
+# ONE LINE while the file that lands is the draft. A generic name and a generic
+# reason can sit on top of a body full of this channel's hostnames -- #52's
+# envelope leak, one level in. Found by working the review's own question after
+# two degenerate runs.
+_tj53, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+_lr53, config.LEARNING_REPO = config.LEARNING_REPO, "org/skillz-private"
+_cx53 = llm.complete
+try:
+    trajectory.record("C53S", "U1", "8.1", "q", [], "a")
+    _k53 = learning.flag({"name": "a-generic-sounding-thing", "why": "nothing specific here"},
+                         {"channel": "C53S", "thread_ts": "8.1", "user_id": "U1"})
+    _k53 = _k53.split("[", 1)[1].split("]", 1)[0]
+    assert proposals.peek(_k53, "C53S")["scope"] == "shared", "the one-liner looks generic"
+
+    # the draft turns out to name an internal host
+    llm.complete = lambda messages, tools=None: _FakeMsg(
+        content="---\nname: a-generic-sounding-thing\ndescription: |\n  d\n---\n"
+                "# T\n## Solution\nrun it on build01.corp and wait\n")
+    _out = learning.propose(_k53, {"channel": "C53S", "user_id": "UT", "thread_ts": "8.1"},
+                            api=lambda *a, **k: {})
+    assert _out.startswith(learning.RETRY), _out
+    assert "Nothing was written" in _out and "this channel only" in _out, _out
+    # re-parked under the SAME id, now scoped narrowly, so the card the trusted
+    # user clicked still points at something
+    _still = proposals.peek(_k53, "C53S")
+    assert _still is not None and _still["scope"] == "channel", _still
+
+    # approving again takes the narrowed scope and proceeds -- no loop
+    _puts = []
+    def _api53c(method, path, payload=None):
+        if method == "GET":
+            if path.endswith("/master"):
+                return {"object": {"sha": "s"}}
+            raise RuntimeError("404")
+        if method == "PUT":
+            _puts.append(path.split("/contents/", 1)[1])
+        return {"html_url": "https://example.com/pull/2"}
+    _out = learning.propose(_k53, {"channel": "C53S", "user_id": "UT", "thread_ts": "8.1"},
+                            api=_api53c)
+    assert "pull/2" in _out and "this channel only" in _out, _out
+    assert _puts and _puts[0].startswith("channels/"), _puts
+finally:
+    llm.complete = _cx53
+    config.LEARNING_REPO = _lr53
+    trajectory._DIR = _tj53
+
 print(f"selfcheck OK -- shmobster {_b}")

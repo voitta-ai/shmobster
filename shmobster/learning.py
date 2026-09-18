@@ -439,6 +439,28 @@ def propose_acquired(key, prop, ctx, api=_gh, scope=None):
         proposals.restore(key, prop)
         retval = f"{RETRY} the draft for `{name}` had no usable frontmatter; nothing was written, the proposal is still open."
         return retval
+    # The scope was decided from the flag's ONE LINE; the file is what actually
+    # lands. Re-run the classifier on the draft, because the name and the reason
+    # can be generic while the body is not -- which is the whole shape of #52's
+    # envelope leak, one level in.
+    #
+    # When they disagree in the unsafe direction, re-park rather than pick.
+    # Choosing silently would either ship a channel-specific skill to every
+    # channel, or overrule a trusted user who asked for `shared`. Re-parking
+    # hands them the new fact and keeps the decision theirs -- the same move
+    # this function already makes for a draft with no usable frontmatter.
+    #
+    # An explicit override skips this: they have now been told once, and a
+    # second refusal on the same grounds would be a loop rather than a warning.
+    _draft_scope, _draft_reason = classify_scope(name, text, channel)
+    if scope not in SCOPES and _scope == "shared" and _draft_scope == "channel":
+        proposals.restore(key, {**prop, "scope": "channel", "scope_reason": _draft_reason})
+        retval = (f"{RETRY} the draft for `{name}` {_draft_reason}, which the one-line flag "
+                  f"did not show. Nothing was written. Re-parked as *this channel only* -- "
+                  f"approve again to take that, or ask for `shared` explicitly to override "
+                  f"now that the draft has been read.")
+        return retval
+
     link = _permalink({**ctx, "thread_ts": thread_ts})
     body = (
         f"Proposed from a shmobster turn in `#{channel_slug(channel)}`, flagged by the agent "

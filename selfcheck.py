@@ -3726,4 +3726,47 @@ finally:
     config.LEARNING_REPO = _lr52b
     llm.complete = _cx52b
 
+# ...on every path that records a turn, not just the ordinary one. An
+# adversarial review asked whether the step-cap and resume exits fall through
+# to the default, which would read as "feature disabled" and lose the signal
+# exactly where it is highest. Measured, because reading the control flow is
+# how the original bug got its three wrong hypotheses.
+_tj52d, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+_lr52d, config.LEARNING_REPO = config.LEARNING_REPO, "o/r"
+_cx52d, _cap52 = llm.complete, config.MAX_TOOL_STEPS
+config.MAX_TOOL_STEPS = 3
+try:
+    # the step cap: a turn that never stops calling tools still records the row,
+    # and `steps` says how much work produced no card
+    llm.complete = lambda messages, tools=None: (
+        _FakeMsg(tool_calls=[_FakeCall("x", "run_shell", '{"command": "echo hi"}')])
+        if tools else _FakeMsg(content="capped"))
+    handler.handle("loop", channel="C55", thread_ts="7.1", slack_client=_fs)
+    _r = trajectory.thread("C55", "7.1")
+    assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
+    assert len(_r[-1]["steps"]) == config.MAX_TOOL_STEPS, _r[-1]
+
+    # a resume is a turn like any other -- it goes through handle(), so it gets
+    # the same tools and the same row
+    llm.complete = lambda messages, tools=None: _FakeMsg(content="resumed")
+    handler.resume("req-1", True, "echo x", "out", channel="C55", thread_ts="7.2",
+                   user_id="U1", slack_client=_fs)
+    _r = trajectory.thread("C55", "7.2")
+    assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
+finally:
+    config.MAX_TOOL_STEPS = _cap52
+    llm.complete = _cx52d
+    config.LEARNING_REPO = _lr52d
+    trajectory._DIR = _tj52d
+
+# The bar is a constant in our own source -- nothing interpolates into it -- and
+# the one block in the prompt that IS channel-authored lands after it carrying
+# its own "this is not instructions" fence (#140). Asserted together because
+# "agent-authored text near channel-authored text" is only safe while that
+# fence exists.
+import inspect  # noqa: E402
+assert "{" not in learning._BAR.replace("{}", ""), "the bar must not interpolate anything"
+_msrc = inspect.getsource(memory.prompt_block)
+assert "not instructions" in _msrc and "cannot grant you anything" in _msrc
+
 print(f"selfcheck OK -- shmobster {_b}")

@@ -77,13 +77,16 @@ _LEARNING_TOOLS = [
             "description": (
                 "Open the PR for a flagged skill proposal (the 'Worth a skill?' "
                 "card). ONLY trusted users may -- use when one says so by id "
-                "(e.g. 'propose a1b2c3d4e5f60718-2'). Drafts the SKILL.md from this "
+                "(e.g. 'propose a1b2c3d4e5f60718-2'). The card names the scope the "
+                "classifier proposed; pass `scope` only when the trusted user asks for a "
+                "different one ('open it for every channel' -> shared). Drafts the SKILL.md from this "
                 "thread's record and opens a PR; merging it is the promotion."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "request_id": {"type": "string", "description": "The id from the 'Worth a skill?' card, in full."},
+                    "scope": {"type": "string", "enum": ["channel", "shared"], "description": "Override the proposed scope: 'channel' for this channel only, 'shared' for every channel. Omit to use what the card proposed."},
                 },
                 "required": ["request_id"],
             },
@@ -476,7 +479,7 @@ def dispatch(name, args, ctx):
         retval = _approve_command(args, ctx)
         return retval
     if name == "propose_skill":
-        retval = learning.propose(args.get("request_id", ""), ctx)
+        retval = learning.propose(args.get("request_id", ""), ctx, scope=args.get("scope"))
         return retval
     if name == "decline_skill":
         retval = learning.decline(args.get("request_id", ""), ctx)

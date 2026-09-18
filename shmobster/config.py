@@ -120,6 +120,11 @@ _learning = _cfg.get("learning", {})
 LEARNING_REPO = _learning.get("repo", "")
 LEARNING_BASE = _learning.get("base", "master")
 LEARNING_PATH = _learning.get("path", "channels/{channel}/skills/{name}/SKILL.md")
+# Where an every-channel skill lands (#210). Optional: the default needs no
+# action, and it is deliberately a sibling of `channels/` rather than inside it,
+# because a skill that is not about any channel does not belong under a
+# directory named for them.
+LEARNING_SHARED_PATH = _learning.get("shared_path", "shared/skills/{name}/SKILL.md")
 
 # Per-channel policy (Iter #4): channel_id -> {cwd, aws_profile, github_repos}.
 # Unlisted channels fall back to default_policy. This is the capability envelope

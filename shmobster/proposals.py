@@ -28,14 +28,22 @@ _LOCK = threading.Lock()
 canonical = approvals.canonical
 
 
-def add(name, why, channel, thread_ts, user_id):
+def add(name, why, channel, thread_ts, user_id, scope="channel", scope_reason="",
+        amends=None):
     key = f"{_NONCE}-{next(_ids)}"
-    logging.info("proposals: flagged [%s] in %s by %s (%s): %s", key, channel, user_id,
-                 repr(redact.scrub(name)), repr(redact.scrub(why)))
+    logging.info("proposals: flagged [%s] in %s by %s (%s, scope=%s): %s", key, channel,
+                 user_id, repr(redact.scrub(name)), scope, repr(redact.scrub(why)))
     with _LOCK:
         _PENDING[key] = {
             "name": name, "why": why, "channel": channel, "thread_ts": thread_ts,
             "user_id": user_id, "surfaced": False,
+            # Where this would land and why, decided at flag time so the card
+            # can show it before anyone clicks (#210). `channel` is the
+            # status-quo default, so an older restored proposal with neither
+            # field reads as today's behaviour rather than as an error.
+            "scope": scope, "scope_reason": scope_reason,
+            # An existing skill this may amend instead of siblinging.
+            "amends": amends,
         }
         while len(_PENDING) > _MAX:
             victim = next((k for k in _PENDING if k != key), None)

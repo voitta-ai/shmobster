@@ -131,6 +131,94 @@ def mark_thread(thread_ts, status):
     state.put(_STATE_KEY, data)
 
 
+# Scope is a property of the SKILL, not of where it was learned (#210). The
+# first real run landed a generic GitHub mechanism -- nothing in it about the
+# channel, the company or any private host -- under `channels/m-and-a/skills/`,
+# where only that channel would ever see it and the private catalog fills up
+# with things that are not private. #130 chose per-channel storage to solve
+# #52's envelope leak, which is right for a skill that IS channel-scoped and
+# wrong as the default for one whose content is generic.
+#
+# So the draft is classified and the card shows the proposed scope. The
+# classifier only proposes: the trusted click is still the gate, and a trusted
+# user overrides in words through propose_skill's `scope`.
+SCOPES = ("channel", "shared")
+
+# What makes a skill channel-scoped: something in it that only means anything
+# here. Deliberately crude and deliberately biased towards `channel` -- a
+# private skill in the private catalog is the status quo and costs a re-learn,
+# while a channel-specific one proposed as shared is an envelope leak, which is
+# the thing #52 was about. "Could not tell" resolves to the narrower answer.
+_PRIVATE_HINTS = re.compile(
+    r"""(
+        \b(?:\d{1,3}\.){3}\d{1,3}\b            # an address
+      | \b[A-Za-z0-9-]+\.(?:internal|local|corp|lan|priv|intranet)\b
+      | \b(?:arn:aws|acct|account[-_ ]?id)\b
+      | \b[0-9]{12}\b                           # an aws account id
+      | \bi-[0-9a-f]{8,}\b | \bvpc-[0-9a-f]{6,}\b | \bsg-[0-9a-f]{6,}\b
+      | \bU[A-Z0-9]{8,}\b | \bC[A-Z0-9]{8,}\b   # slack user / channel ids
+      | /Users/[A-Za-z0-9._-]+                  # somebody's home directory
+    )""",
+    re.X,
+)
+
+
+def classify_scope(name, why, channel):
+    """(scope, reason). Which catalog this belongs in, and why -- the reason is
+    shown on the card, because a proposal a human cannot check is a proposal
+    they have to take on faith."""
+    hay = f"{name} {why}"
+    hit = _PRIVATE_HINTS.search(hay)
+    if hit:
+        retval = ("channel", f"names something specific to here ({hit.group(0)[:40]})")
+        return retval
+    slug = channel_slug(channel)
+    if slug and slug in hay.lower():
+        retval = ("channel", f"names this channel ({slug})")
+        return retval
+    retval = ("shared", "nothing channel-specific found in the name or reason")
+    return retval
+
+
+def amend_candidate(name, why, channel):
+    """An existing skill this might amend, or None (#210).
+
+    The first real run drafted a sibling of a public skill that already covered
+    the same ground, because nothing looked. This searches what this instance
+    can actually see -- the loaded index -- and matches on the name's words. It
+    does NOT reach the public skillz catalog: that needs a network call from the
+    host process, and a missed duplicate costs a review comment while a new
+    fetch path costs a review of its own."""
+    words = {w for w in name.split("-") if len(w) > 3}
+    if not words:
+        return None
+    best, score = None, 0
+    for entry in skills.view(channel):
+        hay = f"{entry.get('name', '')} {entry.get('summary', '')}".lower()
+        n = sum(1 for w in words if w in hay)
+        if n > score:
+            best, score = entry, n
+    # Two shared significant words is the bar. One is a coincidence ("github"),
+    # and requiring the whole name back would only ever match itself.
+    retval = best if score >= 2 else None
+    return retval
+
+
+def shared_path():
+    """Where an every-channel skill lands (#210).
+
+    Configured, not derived. The first cut of this stripped the `{channel}`
+    segment out of `learning.path`, which turned
+    `channels/{channel}/skills/...` into `channels/skills/...` -- keeping a
+    prefix that existed only to hold the channel. The deeper problem is that
+    the destination is not a function of the per-channel template at all: it is
+    whichever directory the operator has on the consuming side's global
+    `skills.paths`, and this process cannot know that. So it is a key, with a
+    default that needs no action."""
+    retval = config.LEARNING_SHARED_PATH
+    return retval
+
+
 def flag(args, ctx):
     """The model's flag. Parks a proposal for the ingest to render; refuses a
     second flag on a thread that already has one, or was declined."""
@@ -147,7 +235,11 @@ def flag(args, ctx):
         return retval
     name = _slug(args.get("name"))
     why = " ".join(str(args.get("why") or "").split())[:300]
-    key = proposals.add(name, why, channel, thread_ts, ctx.get("user_id"))
+    scope, reason = classify_scope(name, why, channel)
+    amend = amend_candidate(name, why, channel)
+    key = proposals.add(name, why, channel, thread_ts, ctx.get("user_id"),
+                        scope=scope, scope_reason=reason,
+                        amends=(amend or {}).get("name"))
     mark_thread(thread_ts, "flagged")
     retval = (
         f"flagged [{key}] `{name}` -- a card tagging the trusted users will follow "
@@ -242,7 +334,7 @@ def _optional(api, path):
     return retval
 
 
-def open_pr(key, name, channel, text, body, api=_gh):
+def open_pr(key, name, channel, text, body, api=_gh, scope="channel"):
     """Branch, file and PR in learning.repo. Returns the PR URL.
 
     Resumable, keyed on the proposal id: a retry after a failure part-way
@@ -251,7 +343,13 @@ def open_pr(key, name, channel, text, body, api=_gh):
     makes a second branch for the same one."""
     repo, base = config.LEARNING_REPO, config.LEARNING_BASE
     cslug = channel_slug(channel)
-    path = config.LEARNING_PATH.format(channel=cslug, name=name)
+    # Scope picks the destination inside the same catalog (#210): the
+    # per-channel path, or the same template with the channel segment removed.
+    template = config.LEARNING_PATH if scope == "channel" else shared_path()
+    path = template.format(channel=cslug, name=name)
+    # The branch keeps the channel either way -- it is provenance, not
+    # destination, and two channels learning the same shared skill must not
+    # collide on one branch name.
     branch = f"skill/{cslug}/{name}-{proposals.canonical(key)}"
     if _optional(api, f"repos/{repo}/git/ref/heads/{branch}") is None:
         sha = api("GET", f"repos/{repo}/git/ref/heads/{base}")["object"]["sha"]
@@ -288,9 +386,15 @@ def _permalink(ctx):
     return retval
 
 
-def propose(key, ctx, api=_gh):
+def propose(key, ctx, api=_gh, scope=None):
     """A trusted user said yes, by text: acquire, then the acquired core.
-    Trust is the caller's check (admin_tools), the same as approve_command."""
+    Trust is the caller's check (admin_tools), the same as approve_command.
+
+    `scope` overrides what the classifier proposed at flag time (#210). The
+    classifier only ever proposes; this is the override, and it arrives in
+    words ("open it for every channel") rather than as another button, so the
+    click path that approvals and proposals share does not grow a third
+    action."""
     channel = ctx.get("channel")
     k = proposals.canonical(key)
     prop = proposals.acquire(k, channel)
@@ -304,18 +408,22 @@ def propose(key, ctx, api=_gh):
         retval = f"no pending skill proposal '{k}' in this channel.{also}"
         return retval
     try:
-        retval = propose_acquired(k, prop, ctx, api=api)
+        retval = propose_acquired(k, prop, ctx, api=api, scope=scope)
     finally:
         proposals.release(k)
     return retval
 
 
-def propose_acquired(key, prop, ctx, api=_gh):
+def propose_acquired(key, prop, ctx, api=_gh, scope=None):
     """The work, for a proposal the caller owns (#105). On a transient failure
     the proposal goes back under the SAME id via restore(); on success it is
     consumed with finish()."""
     channel = ctx.get("channel")
     name, why, thread_ts = prop["name"], prop["why"], prop["thread_ts"]
+    # What the classifier proposed, unless a trusted user said otherwise. An
+    # unrecognised value is ignored rather than guessed at: it would pick a
+    # destination nobody asked for, and the proposed one is on the card.
+    _scope = scope if scope in SCOPES else prop.get("scope", "channel")
     # Every failure below is one that may not repeat -- the waterfall was
     # down, the record file was not there yet, GitHub blinked -- so none of
     # them is a decline. The proposal goes back under the SAME id and the
@@ -336,11 +444,16 @@ def propose_acquired(key, prop, ctx, api=_gh):
         f"Proposed from a shmobster turn in `#{channel_slug(channel)}`, flagged by the agent "
         f"and opened by <@{ctx.get('user_id')}>.\n\n**Why:** {why}\n\n"
         + (f"**Thread:** {link}\n\n" if link else "")
+        + (f"**Scope:** {'this channel only' if _scope == 'channel' else 'every channel'}"
+           + (f" -- {prop.get('scope_reason')}" if prop.get("scope_reason") else "")
+           + (f", overridden by <@{ctx.get('user_id')}>" if scope in SCOPES else "") + "\n\n")
+        + (f"**May amend:** `{prop['amends']}` -- check whether this belongs as a section there "
+           f"rather than as a new file.\n\n" if prop.get("amends") else "")
         + "Merging this PR is what makes the skill load (learning L1, #130); until then it is a proposal.\n\n"
         "Provenance: shmobster #129."
     )
     try:
-        url = open_pr(key, name, channel, text, redact.scrub(body), api=api)
+        url = open_pr(key, name, channel, text, redact.scrub(body), api=api, scope=_scope)
     except Exception as exc:  # noqa: BLE001
         logging.exception("learning: could not open the PR for %s", name)
         proposals.restore(key, prop)
@@ -349,7 +462,9 @@ def propose_acquired(key, prop, ctx, api=_gh):
     proposals.finish(key)
     mark_thread(thread_ts, "proposed")
     logging.info("learning: PR opened for %s in %s by %s: %s", name, channel, ctx.get("user_id"), url)
-    retval = f"PR opened by <@{ctx.get('user_id')}> for `{name}`: {url}\nMerging it is the promotion; nothing loads until then."
+    _where = "this channel only" if _scope == "channel" else "every channel"
+    retval = (f"PR opened by <@{ctx.get('user_id')}> for `{name}` ({_where}): {url}\n"
+              f"Merging it is the promotion; nothing loads until then.")
     return retval
 
 

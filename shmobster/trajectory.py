@@ -40,6 +40,12 @@ def disposition(tool, result):
             retval = "blocked"
         elif head.startswith("exec error"):
             retval = "error"
+        elif head.startswith("FAILED"):
+            # Ran and exited non-zero (#233). Separate from "error", which is
+            # this agent failing to run it at all, and from "ran": a turn that
+            # cited a failed command as its source is the thing the learning
+            # loop has to be able to see afterwards.
+            retval = "failed"
         else:
             retval = "ran"
     elif head.startswith("APPROVED"):

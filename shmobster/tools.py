@@ -250,7 +250,21 @@ def execute(command, policy):
         out = (proc.stdout or "") + (proc.stderr or "")
         if len(out) > _MAX_OUTPUT:
             out = out[:_MAX_OUTPUT] + "\n...[truncated]"
-        retval = out.strip() or f"(exit {proc.returncode}, no output)"
+        # The exit status reaches the model, not only the log (#233). A failed
+        # command and a successful one used to arrive in the same shape,
+        # because the status was named only when there was no output at all --
+        # so `gh api` without a credential handed back its "run gh auth login"
+        # banner, which reads as ordinary output, and a turn cited it as file
+        # content. The marker leads the string so `trajectory.disposition` can
+        # read it in the first word, the way it already reads NOT RUN and
+        # BLOCKED, and so the approval resume text carries it unchanged.
+        body = out.strip()
+        if proc.returncode == 0:
+            retval = body or "(exit 0, no output)"
+        elif body:
+            retval = f"FAILED (exit {proc.returncode})\n{body}"
+        else:
+            retval = f"FAILED (exit {proc.returncode}, no output)"
     except subprocess.TimeoutExpired as exc:
         # Its str() is "Command '<argv>' timed out", and since #116 argv
         # carries the whole seatbelt profile -- a screenful per line. The

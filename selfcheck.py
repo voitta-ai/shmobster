@@ -177,6 +177,27 @@ yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 blocked = tools.run_shell("rm -rf /tmp/x", {})
 assert blocked.startswith("NOT RUN"), blocked
 
+# 2a) a non-zero exit says so in the result, not only in the log (#233). The
+# case that motivated it prints a plausible-looking banner on the way out, so
+# "it produced text" cannot be what the model reads as success.
+yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
+_failed = tools.execute("echo 'To get started with GitHub CLI, please run: gh auth login'; exit 4", {})
+assert _failed.startswith("FAILED (exit 4)"), _failed
+assert "gh auth login" in _failed, "the output itself is still reported"
+assert trajectory.disposition("run_shell", _failed) == "failed", _failed
+_quiet = tools.execute("exit 3", {})
+assert _quiet == "FAILED (exit 3, no output)", _quiet
+# A success keeps the shape it always had, including the empty case.
+_ok = tools.execute("echo fine", {})
+assert _ok == "fine" and trajectory.disposition("run_shell", _ok) == "ran", _ok
+assert tools.execute("true", {}) == "(exit 0, no output)", "an empty success is unchanged"
+# The approval resume text carries the same string, so a failed command that a
+# human approved does not arrive at the model looking like output (#169).
+_resumed = handler._RESUME_TEMPLATE.format(
+    user="U1", verdict="approved", req_id="r-1", command="gh api repos/x/y",
+    body=f"it ran, and its output was:\n<output>\n{_failed}\n</output>")
+assert "FAILED (exit 4)" in _resumed, _resumed
+
 
 # 3) handler tool-loop: model asks to run a command, then answers
 class _FakeFn:

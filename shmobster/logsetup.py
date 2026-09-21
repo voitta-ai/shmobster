@@ -8,6 +8,7 @@ handler is exactly the kind of thing that should be checkable offline.
 import logging
 import logging.handlers
 import os
+import stat
 
 from . import config
 
@@ -53,6 +54,59 @@ def handler():
     retval = _PrivateRotatingFileHandler(
         config.LOG_PATH, maxBytes=config.LOG_MAX_BYTES, backupCount=config.LOG_BACKUPS,
     )
+    return retval
+
+
+# 10 MB is logsetup's own rollover size, so a supervisor file past it is one
+# that would already have rotated had the managed log been on (#230).
+_STDERR_BIG = 10 * 1024 * 1024
+
+
+def warnings():
+    """What is wrong with where this process's log is actually going (#230).
+
+    Two things, and the second is the one that cost 251 MB.
+
+    **The managed log is opt-in and silently off.** Without `logging.path`,
+    handler() returns a StreamHandler and everything goes to stderr, where the
+    supervisor decides the mode and nothing rotates -- which is the exact
+    failure #155 was written to fix, still reachable by leaving one key out.
+
+    **The supervisor's own file exists either way.** launchd redirects stderr
+    to StandardErrorPath whatever the config says, and the crash that matters
+    happens in slack_app's App() constructor at *import*, before main() ever
+    calls setup(). So a crash-looping box writes the same traceback into an
+    unrotated file forever, and configuring logging.path does not stop it.
+
+    Found by fstat on our own stderr rather than by reading the plist: the
+    process does not know its StandardErrorPath, but it can ask what fd 2 is.
+    That covers launchd, nohup, `2>file` and anything else, and says nothing
+    when stderr is a tty or a pipe."""
+    retval = []
+    if not config.LOG_PATH:
+        retval.append(
+            "logging.path is unset, so the agent logs to stderr and whatever "
+            "started it owns the file -- unrotated, at a mode this process did "
+            "not choose. Set logging.path (see the example config) to get the "
+            "rotating 0600 log (#155)"
+        )
+    try:
+        st = os.fstat(2)
+    except OSError:
+        st = None
+    if st is not None and stat.S_ISREG(st.st_mode):
+        if st.st_mode & 0o077:
+            retval.append(
+                f"stderr is a file with mode {st.st_mode & 0o777:04o} -- readable "
+                "beyond its owner. It holds every command every channel asked for"
+            )
+        if st.st_size > _STDERR_BIG:
+            retval.append(
+                f"stderr is a file of {st.st_size // (1024 * 1024)} MB and nothing "
+                "here rotates it -- the supervisor redirected it (launchd's "
+                "StandardErrorPath), so rotation is the supervisor's job "
+                "(newsyslog.d) or the file needs truncating"
+            )
     return retval
 
 

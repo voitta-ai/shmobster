@@ -136,6 +136,54 @@ def _sort_refusal(texts):
 
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal}
 
+# Fetch verbs this layer can vouch for when the host is already allow-listed
+# (#239). Only `curl`, which writes to stdout unless told otherwise; see
+# `Walker.fetch` for why `wget` is not here.
+EGRESS_READS = frozenset(("curl",))
+
+# curl's ways of putting the response in a file instead of on stdout. `-J`
+# takes the name from a header the server controls, which is why it is refused
+# alongside the two that name the file locally.
+_FETCH_WRITE_LONG = frozenset((
+    "--output", "--remote-name", "--remote-name-all", "--remote-header-name",
+    "--output-dir", "--create-dirs",
+))
+_FETCH_WRITE_LETTERS = frozenset("oOJ")
+
+
+def _quoted_non_flag(raw):
+    """True when this argument cannot be an option, although it expands.
+
+    Two properties together, and neither alone is enough. The quotes mean the
+    expansion produces ONE argument rather than splitting on whitespace, so
+    `"$OPTS"` with OPTS=`-d@/etc/passwd` is a single word rather than a flag
+    and its value -- and that single word IS an option, which is why the
+    second property matters: the first character must be a literal that cannot
+    begin one. `"X-Api-Key: $TOKEN"` starts with `X`; `"$OPTS"` starts with the
+    expansion and is refused; `"-H"` starts with a dash and is refused."""
+    if len(raw) < 3 or raw[0] not in "\"'" or raw[-1] != raw[0]:
+        return False
+    first = raw[1]
+    retval = first.isalnum() or first in "/._:@%+"
+    return retval
+
+
+def _fetch_write_flag(texts):
+    """The flag making this fetch write a file, or None.
+
+    Clusters count: `-sO url` saves to a file as surely as `-O url`, and this
+    is the same reasoning `_sort_refusal` spells out -- a single-dash cluster
+    is a set of option letters, not a word."""
+    retval = None
+    for t in texts:
+        if t.split("=", 1)[0] in _FETCH_WRITE_LONG:
+            retval = t.split("=", 1)[0]
+            break
+        if t.startswith("-") and not t.startswith("--") and set(t[1:]) & _FETCH_WRITE_LETTERS:
+            retval = t
+            break
+    return retval
+
 
 # git subcommands that cannot mutate the repository whatever follows them.
 # `branch`, `remote`, `config`, `tag`, `checkout` and `switch` are absent because
@@ -448,6 +496,8 @@ class _Walker:
             retval = self.gh(args)
         elif verb == "aws":
             retval = self.aws(args)
+        elif verb in EGRESS_READS and not self.writes_file:
+            retval = self.fetch(verb, text, args)
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
@@ -501,6 +551,61 @@ class _Walker:
         texts = [_unquote(_text(a, self.src)) for a in args]
         why = _FLAG_REFUSAL[verb](texts)
         retval = (False, why) if why else (True, f"{verb}: read-only")
+        return retval
+
+    def fetch(self, verb, text, args):
+        """A `curl` to a host the channel has already allow-listed (#239).
+
+        The credential half of a channel and the network half never met: a
+        policy could hold `api.example.com` in `allow_domains` and the token to
+        use it in `env`, and every `curl` still parked, because this layer had
+        no rule for fetch verbs and voitta-yolt 2.0.x delegates them here. The
+        tool that does honour `allow_domains` -- `web_fetch` -- sends no
+        headers, so the authenticated read had no uncarded path at all.
+
+        Nothing about what may be reached moves: `check_egress` is the same
+        function, with the same answers, and it already refuses a host that is
+        not statically visible, a host outside the list, and the upload-shaped
+        flags #222 added. What moves is that meeting those conditions is now a
+        grant rather than a fall-through to a classifier that will punt.
+
+        `wget` is deliberately not here. It writes the response to a file by
+        default, so the no-output-flag rule below would have to be inverted for
+        it, and an inverted default is how this kind of guard gets a hole."""
+        texts = []
+        for a in args:
+            raw = _text(a, self.src)
+            if _static(a):
+                texts.append(_unquote(raw))
+            elif _quoted_non_flag(raw):
+                # The case this grant exists for: `-H "X-Api-Key: $TOKEN"`,
+                # where the credential comes from the channel's `env` and never
+                # appears in argv. Inside quotes an expansion cannot split into
+                # further arguments, and a literal first character that is not
+                # a dash cannot become an option -- so this word is a value,
+                # whatever it expands to, and there is no flag here to read.
+                continue
+            else:
+                retval = (False, f"{verb}: an argument is not a literal, so its flags cannot be read")
+                return retval
+        # Reach first, shape second. Both refuse, but `curl -sXPOST` carries an
+        # option letter inside its attached value ("POST" holds an O), and the
+        # cluster scan below cannot tell that from `-sO`. Asking check_egress
+        # first means such a command is refused for carrying a request body,
+        # which is what it does, rather than for a file it does not write.
+        allowed, why = policy_mod.check_egress(text, self.policy)
+        if not allowed:
+            retval = (False, why)
+            return retval
+        hit = _fetch_write_flag(texts)
+        if hit:
+            # A fetch that also writes a file is two powers in one command, and
+            # the file is the response body -- content from off the box landing
+            # in the channel's tree under a name the command chose. That can
+            # have its own card; reading to stdout is what this grants.
+            retval = (False, f"{verb}: {hit} writes the response to a file")
+            return retval
+        retval = (True, f"{verb}: fetch to a host in allow_domains")
         return retval
 
     def cd(self, args):

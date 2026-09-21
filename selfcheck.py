@@ -2205,6 +2205,50 @@ try:
                "gh issue view 3", "aws s3 ls", "aws ec2 describe-instances"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok and "read-only" in _why, (_c, _ok, _why)
+    # reads that used to cost a card because their verb was missing (#236).
+    # `git branch` lists, `for-each-ref` has no writing form at all, and
+    # `gh auth status` reports which account is logged in.
+    for _c in ("git branch", "git branch -a", "git branch -r -v",
+               "git branch --show-current", "git branch --sort=committerdate",
+               "git branch --sort committerdate", "git branch --format='%(refname)'",
+               "git for-each-ref --format='%(refname)'", "gh auth status"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _ok, _why)
+    # ...and the ways each of those becomes something else. Deletion, rename
+    # and copy destroy repository state the sandbox does not confine, so an
+    # unlisted flag parks rather than passing; a positional is a branch
+    # creation, which is why the `--list <pattern>` form parks with it;
+    # `--show-token` prints the credential; every other `gh auth` subcommand
+    # changes it.
+    for _c, _frag in (("git branch -D topic", "flag -D"),
+                      ("git branch -d topic", "flag -d"),
+                      ("git branch -m old new", "flag -m"),
+                      ("git branch -C a b", "flag -C"),
+                      ("git branch --set-upstream-to=origin/x", "flag --set-upstream-to"),
+                      ("git branch -u origin/x", "flag -u"),
+                      ("git branch newtopic", "branch name"),
+                      ("git branch --list 'feat/*'", "branch name"),
+                      ("git branch -f topic HEAD~1", "flag -f"),
+                      ('git branch "$NAME"', "not literal"),
+                      ("gh auth status --show-token", "prints the credential"),
+                      ("gh auth status -t", "prints the credential"),
+                      ("gh auth login", None),
+                      ("gh auth refresh", None),
+                      ("gh auth token", None)):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+        if _frag:
+            assert _frag in _why, (_c, _why)
+    # the redirect rule still shadows the new grants
+    for _c in ("git branch -a > out.txt", "gh auth status > out.txt",
+               "git for-each-ref > out.txt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+    # ...and the flag walk survives `git -C <dir>` before the subcommand
+    _ok, _why = grant.check("git -C /tmp branch -a", _rpol)
+    assert _ok, _why
+    _ok, _why = grant.check("git -C /tmp branch -D topic", _rpol)
+    assert not _ok and "flag -D" in _why, _why
     # ...and the things that look like reads but are not. Each of these was
     # `safe` under voitta-yolt 1.6.0, which is why READ_VERBS is not parity
     # with it: `git branch -D`, `git remote add` and `git config <k> <v>` all

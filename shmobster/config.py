@@ -2,7 +2,9 @@
 ./shmobster-config.json. See examples/shmobster-config-example.json and README.
 
 Holds everything per-deployment: Slack tokens, agent identity, and the ordered
-waterfall. Gitignored; keep it chmod 600 if it holds literal secrets.
+waterfall. Gitignored, and chmod 600 -- but a literal secret in it is a defect, not a
+thing to protect with mode bits: #73 requires ${VAR} references here too,
+and secret_warnings() says so at startup (#231).
 
 Secrets should be referenced from the environment rather than pasted in:
 any string value may contain ${VAR} and is expanded from the process
@@ -59,7 +61,72 @@ def _interpolate(obj: Any) -> Any:
     return retval
 
 
+# A value this repo says must never be a literal (#73, #231). Matched on the KEY
+# rather than on the value's shape, because a key named `bot_token` is a
+# credential whatever is in it, and because guessing from the value means
+# maintaining a list of every vendor's prefix.
+_SECRET_KEY = re.compile(r"(token|api[_-]?key|secret|password|passwd|credential)", re.I)
+
+
+def _literal_secrets(raw, path=""):
+    """Config keys that name a credential and hold something other than a
+    ${VAR} reference. Returns paths only -- never values, not even truncated.
+
+    Must run on the RAW config, before _interpolate. Afterwards a `${VAR}`
+    reference has already become the value it referenced, so a correctly
+    configured deployment and a badly configured one look identical. That is
+    the whole reason this could not be a check on the loaded config."""
+    retval = []
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            retval += _literal_secrets(v, f"{path}/{k}")
+    elif isinstance(raw, list):
+        for i, v in enumerate(raw):
+            retval += _literal_secrets(v, f"{path}[{i}]")
+    elif isinstance(raw, str) and raw and _SECRET_KEY.search(path.rsplit("/", 1)[-1]):
+        if not _ENV_REF.fullmatch(raw.strip()):
+            retval.append(path)
+    return retval
+
+
+def secret_warnings():
+    """Startup warnings about credentials at rest in the config file.
+
+    CLAUDE.md has said since #73 that config values are `${VAR}` references,
+    "including in a running deployment's own shmobster-config.json, not just
+    the example". It was a sentence, and a sentence is a test nobody wrote:
+    two full-machine credential sweeps ran past a deployment holding both
+    Slack tokens as literals without either noticing.
+
+    Warn by default, fatal under SHMOBSTER_REQUIRE_ENV_SECRETS=1 -- the same
+    shape #204 gave the sensitive-term gate, and for the same reason. Failing
+    startup outright would brick a running box on upgrade over a condition that
+    predates the upgrade, and the agent being down does not remove the token
+    from the file. What it does remove is the operator's chance to read the
+    warning.
+
+    Never names a value. The point is a file that should not hold secrets, so
+    quoting one into a log would be the same mistake one layer along."""
+    retval = []
+    offenders = _literal_secrets(_RAW)
+    if offenders:
+        retval.append(
+            "config holds literal credentials where #73 requires ${VAR} references: "
+            + ", ".join(offenders)
+            + " -- move the values into the environment (launchctl setenv / the "
+              "plist's EnvironmentVariables on macOS) and replace each with ${VAR}"
+        )
+    try:
+        mode = os.stat(_PATH).st_mode & 0o777
+    except OSError:
+        mode = None
+    if mode is not None and mode & 0o077:
+        retval.append(f"{_PATH} is mode {mode:04o}; it is readable beyond its owner. chmod 600 it")
+    return retval
+
+
 def _load() -> Any:
+    global _RAW
     if not os.path.exists(_PATH):
         raise SystemExit(
             f"config not found: {_PATH}\n"
@@ -68,10 +135,12 @@ def _load() -> Any:
         )
     with open(_PATH, "r") as f:
         raw = json.load(f)
+    _RAW = raw
     retval = _interpolate(raw)
     return retval
 
 
+_RAW: Any = {}
 _cfg = _load()
 _slack = _cfg.get("slack", {})
 _agent = _cfg.get("agent", {})

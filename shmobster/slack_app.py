@@ -4,6 +4,7 @@ configured channel(s), reply in-thread, one clear message on error (never spam).
 Works with a fresh app (from deploy/slack-app-manifest.yaml) or the existing
 @Shmobster bot's tokens -- same code; only .env differs."""
 import logging
+import os
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -423,6 +424,20 @@ def main():
     # to be asked.
     for warning in yolt_gate.preflight():
         logging.warning("yolt preflight: %s", warning)
+    # Credentials at rest in the config file (#231). Warn by default and fail
+    # under SHMOBSTER_REQUIRE_ENV_SECRETS=1 -- the shape #204 gave the
+    # sensitive-term gate. Refusing to start outright would brick a box on
+    # upgrade over a condition that predates the upgrade, and a stopped agent
+    # does not remove the token from the file; it only removes the operator's
+    # chance to read this.
+    _secret_warnings = config.secret_warnings()
+    for warning in _secret_warnings:
+        logging.warning("config: %s", warning)
+    if _secret_warnings and os.getenv("SHMOBSTER_REQUIRE_ENV_SECRETS") == "1":
+        raise SystemExit(
+            "refusing to start: SHMOBSTER_REQUIRE_ENV_SECRETS=1 and the config "
+            "holds credentials at rest (see the warnings above)"
+        )
     if sandbox.gh_file_backed():
         logging.warning(
             "gh keeps its token in %s, not the keychain; the file is denied to every "

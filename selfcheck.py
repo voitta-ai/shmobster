@@ -3995,4 +3995,71 @@ try:
 finally:
     llm.complete = _saved54
 
+# 55) credentials at rest in the config file (#231). The fixtures below are
+# deliberately NOT token-shaped: the check is about a value that is not a
+# ${VAR} reference, and nothing about its shape. A realistic `xoxb-...` here
+# trips the repo's own sensitive-term gate -- which it did, on the first
+# draft of this block, for the second time in this repo's test data. CLAUDE.md has said since
+# #73 that config values are ${VAR} references, "including in a running
+# deployment's own shmobster-config.json, not just the example". It was a
+# sentence, and a sentence is a test nobody wrote: two full-machine credential
+# sweeps ran past a deployment holding five literal credentials without either
+# noticing.
+assert config._literal_secrets({"slack": {"bot_token": "pasted-in-not-a-reference"}}) == ["/slack/bot_token"]
+assert config._literal_secrets({"slack": {"bot_token": "${SLACK_BOT_TOKEN}"}}) == []
+# whitespace around a reference is still a reference
+assert config._literal_secrets({"a": {"api_key": "  ${K}  "}}) == []
+# lists are walked, and the path says which rung
+assert config._literal_secrets({"waterfall": [{"api_key": "${A}"}, {"api_key": "lit"}]}) \
+    == ["/waterfall[1]/api_key"]
+# matched on the KEY, because a key named bot_token is a credential whatever is
+# in it, and guessing from the value means maintaining every vendor's prefix
+for _k in ("bot_token", "api_key", "api-key", "apikey", "client_secret", "password", "passwd", "credential"):
+    assert config._literal_secrets({_k: "x"}) == ["/" + _k], _k
+for _k in ("model", "label", "cwd", "name", "workspace", "base"):
+    assert config._literal_secrets({_k: "x"}) == [], _k
+# an empty value is absence, not a leak
+assert config._literal_secrets({"api_key": ""}) == []
+
+# THE load-bearing property: this runs on the RAW config. After _interpolate a
+# ${VAR} reference has already become the value it referenced, so a correctly
+# configured deployment and a badly configured one are indistinguishable --
+# which is why it could not be a check on the loaded config.
+os.environ["SELFCHECK_A_TOKEN"] = "came-from-the-environment"
+_interp = config._interpolate({"slack": {"bot_token": "${SELFCHECK_A_TOKEN}"}})
+assert _interp["slack"]["bot_token"] == "came-from-the-environment"
+assert config._literal_secrets(_interp) == ["/slack/bot_token"], \
+    "the interpolated form looks like a literal -- that is the point"
+assert config._literal_secrets({"slack": {"bot_token": "${SELFCHECK_A_TOKEN}"}}) == []
+
+# the warning names paths and never a value, because the complaint is about a
+# file holding secrets and quoting one into a log is the same mistake along one
+_raw55, config._RAW = config._RAW, {"slack": {"bot_token": "NEVER-LOG-THIS"}}
+_path55, config._PATH = config._PATH, os.path.join(tempfile.mkdtemp(), "c.json")
+try:
+    with open(config._PATH, "w") as _f:
+        _f.write("{}")
+    os.chmod(config._PATH, 0o600)
+    _w = config.secret_warnings()
+    assert any("/slack/bot_token" in _x for _x in _w), _w
+    assert not any("NEVER-LOG-THIS" in _x for _x in _w), "a value reached the warning"
+    assert not any("mode" in _x for _x in _w), "0600 must not warn"
+    # ...and a file readable past its owner is its own warning
+    os.chmod(config._PATH, 0o644)
+    assert any("readable beyond its owner" in _x for _x in config.secret_warnings())
+    # a clean config warns about nothing
+    config._RAW = {"slack": {"bot_token": "${X}"}}
+    os.chmod(config._PATH, 0o600)
+    assert config.secret_warnings() == []
+finally:
+    config._RAW, config._PATH = _raw55, _path55
+
+# warn by default, fatal only under the opt-in -- the shape #204 gave the
+# sensitive-term gate. Refusing to start would brick a box on upgrade over a
+# condition that predates it, and a stopped agent does not remove the token
+# from the file; it removes the operator's chance to read the warning.
+_app_src = open("shmobster/slack_app.py").read()
+assert "SHMOBSTER_REQUIRE_ENV_SECRETS" in _app_src
+assert "config.secret_warnings()" in _app_src
+
 print(f"selfcheck OK -- shmobster {_b}")

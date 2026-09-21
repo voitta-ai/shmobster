@@ -4062,4 +4062,61 @@ _app_src = open("shmobster/slack_app.py").read()
 assert "SHMOBSTER_REQUIRE_ENV_SECRETS" in _app_src
 assert "config.secret_warnings()" in _app_src
 
+# 56) where the log actually goes, said at startup (#230). Two compounding
+# facts, measured on the development box: logging.path was unset, so #155's
+# rotating 0600 handler was never installed; and launchd redirects stderr to
+# StandardErrorPath regardless, where the file reached 251 MB at mode 0644 and
+# nothing rotated it.
+#
+# The second is the one that matters, because it is not fixed by setting
+# logging.path: the crash that filled it happens in slack_app's App()
+# constructor at IMPORT, before main() ever calls setup().
+_lp56, config.LOG_PATH = config.LOG_PATH, ""
+try:
+    assert any("logging.path is unset" in _w for _w in logsetup.warnings())
+finally:
+    config.LOG_PATH = _lp56
+
+# Detected by fstat on our own fd 2, not by reading the plist -- the process
+# does not know its StandardErrorPath but can ask what stderr IS. That covers
+# launchd, nohup and `2>file` alike, and stays quiet on a tty or a pipe.
+config.LOG_PATH = "logs/x.log"          # managed log ON; supervisor file separate
+_r56, _w56 = os.pipe()
+_saved56 = os.dup(2)
+try:
+    os.dup2(_w56, 2)
+    assert logsetup.warnings() == [], "a pipe is not a file to complain about"
+finally:
+    os.dup2(_saved56, 2)
+    os.close(_saved56); os.close(_r56); os.close(_w56)
+
+# ...and the live shape: a big, world-readable redirect target
+_d56 = tempfile.mkdtemp()
+_f56 = os.path.join(_d56, "err.log")
+with open(_f56, "wb") as _fh:
+    _fh.truncate(251 * 1024 * 1024)     # sparse; costs no disk
+os.chmod(_f56, 0o644)
+_saved56 = os.dup(2)
+try:
+    os.close(2); os.open(_f56, os.O_WRONLY)
+    _w = logsetup.warnings()
+finally:
+    os.close(2); os.dup2(_saved56, 2); os.close(_saved56)
+assert any("readable beyond its owner" in _x for _x in _w), _w
+assert any("251 MB" in _x and "rotates" in _x for _x in _w), _w
+# a small 0600 redirect target is fine and says nothing
+os.chmod(_f56, 0o600)
+os.truncate(_f56, 1024)
+_saved56 = os.dup(2)
+try:
+    os.close(2); os.open(_f56, os.O_WRONLY)
+    _w = logsetup.warnings()
+finally:
+    os.close(2); os.dup2(_saved56, 2); os.close(_saved56)
+assert _w == [], _w
+config.LOG_PATH = _lp56
+
+# and it is wired where an operator will see it
+assert "logsetup.warnings()" in open("shmobster/slack_app.py").read()
+
 print(f"selfcheck OK -- shmobster {_b}")

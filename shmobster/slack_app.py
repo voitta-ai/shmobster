@@ -430,6 +430,11 @@ def main():
     # upgrade over a condition that predates the upgrade, and a stopped agent
     # does not remove the token from the file; it only removes the operator's
     # chance to read this.
+    # Where this process's log is actually going (#230). Emitted before the
+    # config warnings so the operator learns the log is unmanaged BEFORE being
+    # told what is in it -- the second is worth less if the first is unread.
+    for warning in logsetup.warnings():
+        logging.warning("logging: %s", warning)
     _secret_warnings = config.secret_warnings()
     for warning in _secret_warnings:
         logging.warning("config: %s", warning)

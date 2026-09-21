@@ -18,11 +18,15 @@ import glob
 import json
 import logging
 import os
+import re
 import threading
 
 from . import redact
 
 _DIR = os.getenv("SHMOBSTER_TRAJECTORIES", "trajectories")
+# `tools.execute`'s marker for a non-zero exit, at the start of a line so a
+# command whose own output quotes the word is not read as a failure.
+_FAILED_LINE = re.compile(r"(?:^|\n)FAILED \(exit ")
 _LOCK = threading.Lock()
 _ARGS_MAX = 1000
 _RESULT_MAX = 600
@@ -49,7 +53,12 @@ def disposition(tool, result):
         else:
             retval = "ran"
     elif head.startswith("APPROVED"):
-        retval = "approved"
+        # An approved command that then failed is two facts, and the record
+        # kept only the first: `run_approved` leads with its own approval
+        # header, so the failure marker sits on the next line where a head-only
+        # check cannot see it. The highest-risk commands are exactly the ones
+        # that reach here (#233).
+        retval = "approved-failed" if _FAILED_LINE.search(result or "") else "approved"
     elif head.startswith("REFUSED"):
         retval = "refused"
     else:

@@ -193,6 +193,16 @@ assert _ok == "fine" and trajectory.disposition("run_shell", _ok) == "ran", _ok
 assert tools.execute("true", {}) == "(exit 0, no output)", "an empty success is unchanged"
 # The approval resume text carries the same string, so a failed command that a
 # human approved does not arrive at the model looking like output (#169).
+# ...and an approved command that then failed is recorded as both facts, not
+# just the approval: `run_approved` leads with its own header, so a head-only
+# check would call a failed deploy "approved".
+_appr = f"APPROVED by <@U1> and ran: gh api repos/x/y\n{_failed}"
+assert trajectory.disposition("approve_command", _appr) == "approved-failed", _appr
+_appr_ok = "APPROVED by <@U1> and ran: echo hi\nhi"
+assert trajectory.disposition("approve_command", _appr_ok) == "approved", _appr_ok
+# a command whose own output merely mentions the word is still an approval
+_appr_quote = "APPROVED by <@U1> and ran: echo x\nthe build FAILED (exit 1) yesterday"
+assert trajectory.disposition("approve_command", _appr_quote) == "approved", _appr_quote
 _resumed = handler._RESUME_TEMPLATE.format(
     user="U1", verdict="approved", req_id="r-1", command="gh api repos/x/y",
     body=f"it ran, and its output was:\n<output>\n{_failed}\n</output>")

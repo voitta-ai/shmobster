@@ -4084,6 +4084,25 @@ assert trajectory.disposition("run_shell", "BLOCKED by channel policy: no") == "
 _wrapped = "APPROVED by <@U1> and ran: gh api repos/o/r\n" + _r
 assert trajectory.failed(_wrapped), _wrapped
 assert not trajectory.failed("APPROVED by <@U1> and ran: echo hi\nhi")
+# ...and the RECORD of that turn says both things. The head is the approval, so
+# a head-only reading called a failed deploy "approved", and the commands on
+# this path are the ones a human was asked about.
+assert trajectory.disposition("approve_command", _wrapped) == "approved-failed", _wrapped
+assert trajectory.disposition("approve_command",
+                              "APPROVED by <@U1> and ran: echo hi\nhi") == "approved"
+assert trajectory.step("approve_command", {"request_id": "k"},
+                       _wrapped)["disposition"] == "approved-failed"
+# a refusal is still a refusal, whatever the command it names did
+assert trajectory.disposition("approve_command", "REFUSED: not trusted") == "refused"
+# The collision failed() documents reaches this path too, and in one more way:
+# the wrapper quotes the COMMAND as well as its output, so a successful
+# `grep "FAILED (exit " app.log` records as approved-failed. Inherited on
+# purpose rather than fixed here -- the same trade run_shell already makes, and
+# the same direction to be wrong in, since the wrong reading is visible in the
+# very next line while the missed failure is what the record is for.
+_grep_cmd = 'APPROVED by <@U1> and ran: grep "' + trajectory.FAILED_PREFIX + '" app.log\n(exit 0, no output)'
+assert trajectory.disposition("approve_command", _grep_cmd) == "approved-failed", \
+    "documented false positive, asserted so it is a decision rather than a surprise"
 
 # and the resumed turn is told which it was, rather than only that it ran
 _saved54, llm.complete = llm.complete, (lambda messages, tools=None: _FakeMsg(content="ok"))

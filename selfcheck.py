@@ -2210,7 +2210,7 @@ try:
     # `gh auth status` reports which account is logged in.
     for _c in ("git branch", "git branch -a", "git branch -r -v",
                "git branch --show-current", "git branch --sort=committerdate",
-               "git branch --sort committerdate", "git branch --format='%(refname)'",
+               "git branch --format='%(refname)'",
                "git for-each-ref --format='%(refname)'", "gh auth status"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok, (_c, _ok, _why)
@@ -2230,8 +2230,20 @@ try:
                       ("git branch --list 'feat/*'", "branch name"),
                       ("git branch -f topic HEAD~1", "flag -f"),
                       ('git branch "$NAME"', "not literal"),
+                      # a detached value is read as a branch name, because
+                      # git's optional-value flags do not consume the next
+                      # word: `git branch --color newtopic` CREATES newtopic
+                      ("git branch --color newtopic", "branch name"),
+                      ("git branch --column newtopic", "branch name"),
+                      ("git branch --abbrev 7", "branch name"),
+                      ("git branch --sort committerdate", "branch name"),
+                      # cobra booleans take an = form, which an exact-token
+                      # check let through
                       ("gh auth status --show-token", "prints the credential"),
+                      ("gh auth status --show-token=true", "prints the credential"),
+                      ("gh auth status --show-token=false", "prints the credential"),
                       ("gh auth status -t", "prints the credential"),
+                      ("gh auth status -ht", "prints the credential"),
                       ("gh auth login", None),
                       ("gh auth refresh", None),
                       ("gh auth token", None)):

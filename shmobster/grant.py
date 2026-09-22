@@ -144,23 +144,26 @@ def _git_branch_refusal(rest):
     literal -- a branch name this layer cannot read is a branch name it cannot
     vouch for."""
     retval = None
-    skip = False
     for t in rest:
         if t is None:
             retval = "git branch: an argument is not literal"
             break
-        if skip:
-            skip = False
-            continue
         if not t.startswith("-"):
+            # Every non-flag word is read as a branch name, including one that
+            # is really the value of a preceding flag: `git branch --sort
+            # committerdate` parks and `--sort=committerdate` does not. That
+            # costs one spelling and closes the hole underneath it -- git's
+            # optional-value flags (`--color`, `--column`, `--abbrev`, each
+            # documented `[=<value>]`) do NOT consume the next word, so a
+            # parser that skipped it would read `git branch --color newtopic`
+            # as a listing when git reads it as a branch creation (Codex
+            # adversarial review, #242).
             retval = f"git branch: {t!r} is a branch name, not a flag"
             break
         head = t.split("=", 1)[0]
         if head not in _GIT_BRANCH_READ_FLAGS:
             retval = f"git branch: flag {head}"
             break
-        if "=" not in t and head in _GIT_BRANCH_VALUE_FLAGS:
-            skip = True
     return retval
 
 
@@ -191,18 +194,34 @@ _GIT_BRANCH_READ_FLAGS = frozenset((
     "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
     "--abbrev", "--no-abbrev",
 ))
-# The value-taking ones above, in their detached spelling: `--sort committerdate`
-# puts a word after the flag that is not a branch name. Their `=` form needs no
-# entry here -- it arrives as one token and matches by prefix.
-_GIT_BRANCH_VALUE_FLAGS = frozenset((
-    "--sort", "--format", "--contains", "--no-contains", "--merged",
-    "--no-merged", "--points-at", "--abbrev", "--color", "--column",
-))
 
 # `gh auth status` reports which account is logged in; every other `gh auth`
 # subcommand changes the credential, and `--show-token` prints it (#236).
+#
+# The flag is matched on its name, not on the whole token: gh's flags are
+# cobra booleans, so `--show-token=true` is the same request as `--show-token`
+# and an exact-token check let it through (Codex adversarial review, #242).
+# Any single-dash cluster containing `t` goes with it -- `gh auth status` has
+# no other short flag worth the distinction.
 _GH_AUTH_READ = "status"
-_GH_AUTH_REFUSED_FLAGS = frozenset(("-t", "--show-token"))
+_GH_AUTH_REFUSED_LONG = frozenset(("--show-token",))
+_GH_AUTH_REFUSED_LETTERS = frozenset("t")
+
+
+def _gh_auth_refusal(texts):
+    """Why this `gh auth status` is not a read, or None."""
+    retval = None
+    for t in texts:
+        if t is None:
+            retval = "gh auth status: an argument is not literal"
+            break
+        if t.split("=", 1)[0] in _GH_AUTH_REFUSED_LONG:
+            retval = "gh auth status --show-token: prints the credential"
+            break
+        if t.startswith("-") and not t.startswith("--") and set(t[1:]) & _GH_AUTH_REFUSED_LETTERS:
+            retval = "gh auth status -t: prints the credential"
+            break
+    return retval
 
 # `gh <noun> <action>` pairs that only read. `api` is deliberately absent: it
 # takes -X POST, and it reaches any repo the token reaches, which is the open
@@ -683,11 +702,9 @@ class _Walker:
             # subcommand changes the credential (#236). `--show-token` prints
             # it, and `_words` drops dashed tokens, so the flags are read from
             # the arguments themselves rather than from `words`.
-            texts = [_text(a, self.src) if _static(a) else None for a in args]
-            if any(t in _GH_AUTH_REFUSED_FLAGS for t in texts if t):
-                retval = (False, "gh auth status --show-token: prints the credential")
-            else:
-                retval = (True, "gh auth status: read-only")
+            texts = [_unquote(_text(a, self.src)) if _static(a) else None for a in args]
+            why = _gh_auth_refusal(texts)
+            retval = (False, why) if why else (True, "gh auth status: read-only")
         return retval
 
     def aws(self, args):

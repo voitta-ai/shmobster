@@ -147,6 +147,57 @@ GIT_READ = frozenset((
     "describe", "shortlog", "cat-file", "ls-tree",
 ))
 
+# Reads that need their flags checked rather than their verb trusted (#236).
+# The same tier v0.18.0 built for `find` and `sort`, applied where GIT_READ's
+# flag-independence bar excludes a command that is nearly always a read.
+#
+# `git branch` lists; it also deletes, renames, copies and creates. The bar that
+# separates them is not one flag -- it is "names a branch". `git branch` with a
+# positional argument CREATES, so the predicate is: no write flag AND no
+# positional. That is an argv shape this layer already parses.
+_GIT_BRANCH_WRITES = frozenset((
+    "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
+    "--edit-description", "--set-upstream-to", "--unset-upstream", "-u",
+    "--set-upstream", "-f", "--force",
+))
+
+# `git for-each-ref` has no writing form at all. --python/--shell/--tcl change
+# the quoting of its output and nothing else, and --format is a value flag.
+# Listed here rather than in GIT_READ only to keep the "why is this safe"
+# reasoning next to branch's, which is the one that needs it.
+_GIT_FLAG_CHECKED = frozenset(("branch", "for-each-ref"))
+
+
+def _git_branch_reads(rest):
+    """(ok, why) for `git branch`. Everything unreadable is a refusal."""
+    if any(r is None for r in rest):
+        retval = (False, "git branch: an argument is not a literal")
+        return retval
+    hit = next((r for r in rest if r in _GIT_BRANCH_WRITES
+                or r.startswith(("--set-upstream-to=", "--copy=", "--move="))), None)
+    if hit:
+        retval = (False, f"git branch: flag {hit} writes")
+        return retval
+    # A positional creates a branch. `--format=x` and `--sort=y` are flags, and
+    # `--format x` puts its value in a position -- so value flags are consumed
+    # rather than counted, the same way _words does it.
+    _VALUE = frozenset(("--format", "--sort", "--contains", "--no-contains",
+                        "--merged", "--no-merged", "--points-at", "--color"))
+    skip = False
+    for r in rest:
+        if skip:
+            skip = False
+            continue
+        if r in _VALUE:
+            skip = True
+            continue
+        if not r.startswith("-"):
+            retval = (False, f"git branch {r}: a positional argument creates a branch")
+            return retval
+    retval = (True, "git branch: read-only")
+    return retval
+
+
 # `gh <noun> <action>` pairs that only read. `api` is deliberately absent: it
 # takes -X POST, and it reaches any repo the token reaches, which is the open
 # scope question in #150.
@@ -584,6 +635,9 @@ class _Walker:
                 retval = (ok, f"git commit: {why}")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
             retval = (True, f"git {sub}: read-only")
+        elif sub in _GIT_FLAG_CHECKED and not self.writes_file and not writes_flag:
+            retval = (_git_branch_reads(rest) if sub == "branch"
+                      else (True, "git for-each-ref: read-only"))
         else:
             retval = (False, f"git {sub}: not a local write")
         return retval
@@ -617,6 +671,14 @@ class _Walker:
         if (words is not None and len(words) >= 2 and not self.writes_file
                 and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS):
             retval = (True, f"gh {words[0]} {words[1]}: read-only")
+        elif (words is not None and len(words) >= 2 and not self.writes_file
+                and words[0] == "auth" and words[1] == "status"):
+            # `gh auth` is not a noun in the GH_READ sense -- its subcommands
+            # are login, logout, refresh, setup-git, status and token, and only
+            # one of those reads (#236). Listed as an exact pair rather than by
+            # adding `auth` to the nouns, because `token` PRINTS THE CREDENTIAL
+            # and `login`/`refresh`/`setup-git` mutate the host's auth state.
+            retval = (True, "gh auth status: read-only")
         return retval
 
     def aws(self, args):

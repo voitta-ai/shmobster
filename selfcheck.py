@@ -4119,4 +4119,59 @@ config.LOG_PATH = _lp56
 # and it is wired where an operator will see it
 assert "logsetup.warnings()" in open("shmobster/slack_app.py").read()
 
+# 57) three commands that only read, parking for a human (#236). Measured in a
+# live channel on v0.20.0: `git log` and `git status` granted while `git branch
+# -a`, `git for-each-ref` and `gh auth status` parked -- and a combined read
+# parks if any one part does, so `git log && git branch -a && git status` cost
+# a card for the half that was already answered.
+#
+# Stubbed to unsafe so every grant below is the grant layer's own, never the
+# classifier vouching by accident.
+_saved57, yolt_gate.classify = yolt_gate.classify, (
+    lambda cmd, cwd=None: ("unsafe", "stub: only the grant layer may grant this"))
+_pol57 = {"cwd": "/tmp", "github_repos": ["*"]}
+try:
+    for _c in ("git -C /tmp branch -a", "git for-each-ref --format='%(refname)'",
+               "gh auth status",
+               "git branch -a --format='%(refname:short)'",
+               "git branch --sort=-committerdate", "git branch --merged main",
+               "git branch -vv", "git branch -r"):
+        _ok, _why = grant.check(_c, _pol57)
+        assert _ok, (_c, _why)
+
+    # git branch's bar is not one flag: it lists, deletes, renames, copies AND
+    # creates. "No write flag AND no positional" is what separates them --
+    # `git branch <name>` creates, which no flag check alone would catch.
+    for _c in ("git branch -d old", "git branch -D old", "git branch --delete old",
+               "git branch -m a b", "git branch -M a b", "git branch --move a b",
+               "git branch -c a b", "git branch --copy a b", "git branch -u origin/x",
+               "git branch --set-upstream-to=origin/x", "git branch --unset-upstream",
+               "git branch --edit-description", "git branch -f x origin/main",
+               "git branch newbranch"):
+        _ok, _why = grant.check(_c, _pol57)
+        assert not _ok, (_c, _why)
+    assert "positional" in grant.check("git branch newbranch", _pol57)[1]
+    # an argument this layer cannot read is a refusal, not a guess
+    assert not grant.check("git branch $X", _pol57)[0]
+
+    # gh auth is an exact pair, not a noun: only `status` reads. `token` PRINTS
+    # THE CREDENTIAL, and login/logout/refresh/setup-git mutate the host's auth.
+    for _c in ("gh auth login", "gh auth logout", "gh auth token",
+               "gh auth refresh", "gh auth setup-git"):
+        _ok, _why = grant.check(_c, _pol57)
+        assert not _ok, (_c, _why)
+
+    # the redirect rule still wins over the new reads (#213)
+    for _c in ("git branch -a > out.txt", "gh auth status > o",
+               "git for-each-ref > refs.txt"):
+        assert not grant.check(_c, _pol57)[0], _c
+    # ...and a descriptor dup does not count as one
+    assert grant.check("git branch -a 2>&1 | head", _pol57)[0]
+
+    # the combined read from the issue now grants whole
+    _ok, _why = grant.check("git log --oneline -5 && git branch -a && git status", _pol57)
+    assert _ok, _why
+finally:
+    yolt_gate.classify = _saved57
+
 print(f"selfcheck OK -- shmobster {_b}")

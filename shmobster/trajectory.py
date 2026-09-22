@@ -74,7 +74,13 @@ def disposition(tool, result):
         else:
             retval = "ran"
     elif head.startswith("APPROVED"):
-        retval = "approved"
+        # Two facts, and this kept only the first. `run_approved` returns
+        # "APPROVED by <@u> and ran: <cmd>\n<out>", so the marker sits where
+        # the head check cannot see it -- which `failed()` already describes,
+        # having been written for this wrapping. The commands that reach here
+        # are the ones a human was asked about, so "it was approved" and "it
+        # failed" are both worth recording (#233).
+        retval = "approved-failed" if failed(result) else "approved"
     elif head.startswith("REFUSED"):
         retval = "refused"
     else:

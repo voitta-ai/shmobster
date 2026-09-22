@@ -173,15 +173,48 @@ def _fetch_write_flag(texts):
 
     Clusters count: `-sO url` saves to a file as surely as `-O url`, and this
     is the same reasoning `_sort_refusal` spells out -- a single-dash cluster
-    is a set of option letters, not a word."""
+    is a set of option letters, not a word.
+
+    The three devices are not files, the same exception the redirect rule makes
+    (`_DEV_OK`): `curl -o /dev/null -w '%{http_code}'` asks for a status code
+    and keeps the body, which is the cheapest read there is and was costing a
+    card. The destination is only trusted when it is the next word, attached
+    (`-o/dev/null`) or after `=`; a cluster like `-sO` names no destination at
+    all, so it stays refused."""
     retval = None
-    for t in texts:
-        if t.split("=", 1)[0] in _FETCH_WRITE_LONG:
-            retval = t.split("=", 1)[0]
+    for i, t in enumerate(texts):
+        head = t.split("=", 1)[0]
+        if head in _FETCH_WRITE_LONG or (t.startswith("-") and not t.startswith("--")
+                                         and set(t[1:]) & _FETCH_WRITE_LETTERS):
+            if _writes_device_only(t, texts[i + 1:], head):
+                continue
+            retval = head if head in _FETCH_WRITE_LONG else t
             break
-        if t.startswith("-") and not t.startswith("--") and set(t[1:]) & _FETCH_WRITE_LETTERS:
-            retval = t
-            break
+    return retval
+
+
+def _writes_device_only(token, after, head):
+    """True when this output flag's destination is /dev/null or a standard
+    stream, so nothing is written to a file after all.
+
+    Only `-o` / `--output` name a destination this can read. `-O` takes the
+    name from the URL and `-J` from a response header, so a token carrying
+    either is never exempt however it is spelled.
+
+    The short form is read the way curl reads it: in a cluster, `o` consumes
+    the rest of the token if there is any (`-so/dev/null`, `-o/dev/null`) and
+    otherwise the next word (`-so /dev/null`)."""
+    if head == "--output" or token.startswith("--output="):
+        dest = token.split("=", 1)[1] if "=" in token else (after[0] if after else None)
+    elif token.startswith("-") and not token.startswith("--"):
+        cluster = token[1:]
+        if set(cluster) & set("OJ") or "o" not in cluster:
+            return False
+        tail = cluster.split("o", 1)[1]
+        dest = tail if tail else (after[0] if after else None)
+    else:
+        return False
+    retval = dest in _DEV_OK
     return retval
 
 
@@ -766,6 +799,27 @@ class _Walker:
         elif sub == "branch" and not self.writes_file and not writes_flag:
             why = _git_branch_refusal(rest)
             retval = (False, why) if why else (True, "git branch: listing")
+        elif sub == "remote" and not self.writes_file and not writes_flag:
+            # `git remote` and `git remote -v` list what is configured, from
+            # the local config and nothing else. Every other form is a write
+            # (`add`, `remove`, `rename`, `set-url`, `prune`) or a fetch
+            # (`show`, `update`), and `remote` is in policy's network list, so
+            # granting those here would also step around the egress check --
+            # which `policy.check` does not repeat for a granted command.
+            if all(t in ("-v", "--verbose") for t in rest):
+                retval = (True, "git remote: listing")
+            else:
+                retval = (False, "git remote: only the bare listing is read-only")
+        elif sub == "worktree" and not self.writes_file and not writes_flag:
+            # `git worktree list` reads the same administrative file `git
+            # worktree add` writes, and `add`, `remove`, `move`, `prune`,
+            # `repair` and `lock` all write it or the filesystem. Named rather
+            # than flag-checked, because the subcommand is the whole question.
+            if rest[:1] == ["list"] and all(t in ("--porcelain", "-v", "--verbose", "-z")
+                                            for t in rest[1:]):
+                retval = (True, "git worktree list: listing")
+            else:
+                retval = (False, "git worktree: only `list` is read-only")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
             retval = (True, f"git {sub}: read-only")
         else:

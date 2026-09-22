@@ -947,6 +947,14 @@ if True:
     # our own values, whatever shape they are
     assert "vendor-key-shaped-like-nothing-known" not in redact.scrub("leak: vendor-key-shaped-like-nothing-known")
     assert "policy-env-value-abcdefghijkl" not in redact.scrub("env: policy-env-value-abcdefghijkl")
+    # a credential inside a remote URL, which is what `git remote -v` prints
+    # and the reason an adversarial review called that grant a disclosure. It
+    # is caught on the way out, so the grant does not need to refuse the -v
+    # form: the redactor knows the userinfo shape whatever the password is.
+    if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):
+        _remote_v = "origin\thttps://user:hunter2@example.com/o/r.git (fetch)"
+        assert "hunter2" not in redact.scrub(_remote_v), redact.scrub(_remote_v)
+        assert "example.com/o/r.git" in redact.scrub(_remote_v), "the URL itself still reads"
     # ordinary output is untouched -- a redactor that eats git SHAs gets disabled
     # a 40-char hex run is exactly what a naive base64 rule eats -- the point
     _sha = "1a2b3c4d5e6f7a8b" + "9c0d1e2f3a4b5c6d7e8f9a0b"
@@ -1862,7 +1870,15 @@ try:
     for _c in ("curl https://example.com/x",
                "curl -s https://example.com/x",
                'curl -s -H "X-Token: $A_TOKEN" https://example.com/v1/files',
-               "curl -sSL https://sub.githubusercontent.com/f"):
+               "curl -sSL https://sub.githubusercontent.com/f",
+               # the three devices are not files, the same exception the
+               # redirect rule makes. `-o /dev/null -w '%{http_code}'` is a
+               # status-code probe and was costing a card. Every spelling curl
+               # itself accepts (measured: `--output=` is not one of them).
+               'curl -s -o /dev/null -w "%{http_code}" https://example.com/x',
+               "curl -so /dev/null https://example.com/x",
+               "curl --output /dev/null https://example.com/x",
+               "curl -o /dev/stdout https://example.com/x"):
         _ok, _why = grant.check(_c, _eg)
         assert _ok and "allow_domains" in _why, (_c, _ok, _why)
     # nothing about reach moved: the same refusals, now as this layer's reasons
@@ -1881,6 +1897,21 @@ try:
             # a fetch that writes the response to a file is a card of its own,
             # including the cluster and header-named spellings
             ("curl -o out.json https://example.com/x", "writes the response to a file"),
+            # ...and the device exception does not extend to a real path that
+            # merely lives under /dev, nor to the flags whose destination this
+            # cannot read at all
+            ("curl -o /dev/shm/x https://example.com/x", "writes the response to a file"),
+            ("curl -so/tmp/x https://example.com/x", "writes the response to a file"),
+            # the ATTACHED device spelling still parks, one guard earlier: the
+            # upload check refuses on the letter without pairing it with its
+            # value (its own documented trade), and "/dev/null" carries a `d`.
+            # Left alone rather than taught to parse curl's clusters -- that
+            # check is the one #222 exists for, and `-o /dev/null` detached is
+            # the spelling that matters.
+            ("curl -o/dev/null https://example.com/x", "request body"),
+            ("curl -so/dev/null https://example.com/x", "request body"),
+            ("curl -sOo /dev/null https://example.com/x", "writes the response to a file"),
+            ("curl -J -o /dev/null https://example.com/x", "writes the response to a file"),
             ("curl -sO https://example.com/x", "writes the response to a file"),
             ("curl --output-dir /tmp -O https://example.com/x", "writes the response to a file"),
             ("curl -OJ https://example.com/x", "writes the response to a file"),
@@ -2303,8 +2334,28 @@ try:
         assert not _ok, (_c, _ok, _why)
         if _frag:
             assert _frag in _why, (_c, _why)
+    # `git remote` and `git remote -v` read the local config; every other form
+    # writes it or contacts the remote, and policy.check does not repeat the
+    # egress guard for a command this layer granted
+    for _c in ("git remote", "git remote -v", "git remote --verbose"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _ok, _why)
+    for _c in ("git worktree list", "git worktree list --porcelain"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _ok, _why)
+    for _c in ("git worktree add ../wt b", "git worktree remove ../wt",
+               "git worktree prune", "git worktree move ../a ../b",
+               "git worktree repair", "git worktree lock ../wt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
+    for _c in ("git remote add o https://e/r", "git remote remove o",
+               "git remote rename a b", "git remote set-url o https://e/r",
+               "git remote prune o", "git remote show o", "git remote update"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
     # the redirect rule still shadows the new grants
     for _c in ("git branch -a > out.txt", "gh auth status > out.txt",
+               "git remote -v > out.txt",
                "git for-each-ref > out.txt"):
         _ok, _why = grant.check(_c, _rpol)
         assert not _ok, (_c, _ok, _why)

@@ -947,6 +947,14 @@ if True:
     # our own values, whatever shape they are
     assert "vendor-key-shaped-like-nothing-known" not in redact.scrub("leak: vendor-key-shaped-like-nothing-known")
     assert "policy-env-value-abcdefghijkl" not in redact.scrub("env: policy-env-value-abcdefghijkl")
+    # a credential inside a remote URL, which is what `git remote -v` prints
+    # and the reason an adversarial review called that grant a disclosure. It
+    # is caught on the way out, so the grant does not need to refuse the -v
+    # form: the redactor knows the userinfo shape whatever the password is.
+    if os.path.exists(os.path.join(_real_hooks, "secret_redact.py")):
+        _remote_v = "origin\thttps://user:hunter2@example.com/o/r.git (fetch)"
+        assert "hunter2" not in redact.scrub(_remote_v), redact.scrub(_remote_v)
+        assert "example.com/o/r.git" in redact.scrub(_remote_v), "the URL itself still reads"
     # ordinary output is untouched -- a redactor that eats git SHAs gets disabled
     # a 40-char hex run is exactly what a naive base64 rule eats -- the point
     _sha = "1a2b3c4d5e6f7a8b" + "9c0d1e2f3a4b5c6d7e8f9a0b"

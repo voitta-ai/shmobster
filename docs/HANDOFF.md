@@ -13,7 +13,7 @@ Dated records of individual sessions live in `docs/handoff/`; the most recent
 is `docs/handoff/2026-09-17.md`, which carries the credential-scrub state and
 the corrections that session made to its own earlier claims.
 
-Current state: **v0.22.0 is cut; the live box is on v0.8.0 until someone
+Current state: **v0.22.1 is cut; the live box is on v0.8.0 until someone
 upgrades it** -- and that upgrade is now two versions and one inverted
 instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The
 exec path is YOLT (its own rules only, #148) -> egress allow-list (#149) ->
@@ -34,7 +34,7 @@ reverses what v0.8.0 shipped.
 **The security re-audit is closed.** #123 and all ten of its findings are
 resolved, along with #184 and #186, which the re-audit did not find and the
 adversarial reviews did. What remains is #191 and #208. #23 closed with v0.13.0; #140 and #190 with
-v0.14.0; #62 and #206 with v0.15.0; #213 with v0.16.0; #215 with v0.17.0; #219 with v0.18.0; #222 with v0.19.0; #211, #210 and #227 with v0.20.0; #233 with v0.21.0; #231 with v0.22.0. **Ten releases in a
+v0.14.0; #62 and #206 with v0.15.0; #213 with v0.16.0; #215 with v0.17.0; #219 with v0.18.0; #222 with v0.19.0; #211, #210 and #227 with v0.20.0; #233 with v0.21.0; #231 with v0.22.0; #230 with v0.22.1. **Ten releases in a
 row added no config key, and v0.20.0 adds one optional, defaulted key** -- criterion 1 -- and #62 did not reset it after all: stdlib
 urllib reads a pasted link without a vendor or a token. #1 closed as superseded by the README and this file.
 

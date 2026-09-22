@@ -137,15 +137,91 @@ def _sort_refusal(texts):
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal}
 
 
+def _git_branch_refusal(rest):
+    """Why this `git branch` is not a listing, or None when it is (#236).
+
+    `rest` is the words after the subcommand, with None for any that is not a
+    literal -- a branch name this layer cannot read is a branch name it cannot
+    vouch for."""
+    retval = None
+    for t in rest:
+        if t is None:
+            retval = "git branch: an argument is not literal"
+            break
+        if not t.startswith("-"):
+            # Every non-flag word is read as a branch name, including one that
+            # is really the value of a preceding flag: `git branch --sort
+            # committerdate` parks and `--sort=committerdate` does not. That
+            # costs one spelling and closes the hole underneath it -- git's
+            # optional-value flags (`--color`, `--column`, `--abbrev`, each
+            # documented `[=<value>]`) do NOT consume the next word, so a
+            # parser that skipped it would read `git branch --color newtopic`
+            # as a listing when git reads it as a branch creation (Codex
+            # adversarial review, #242).
+            retval = f"git branch: {t!r} is a branch name, not a flag"
+            break
+        head = t.split("=", 1)[0]
+        if head not in _GIT_BRANCH_READ_FLAGS:
+            retval = f"git branch: flag {head}"
+            break
+    return retval
+
+
 # git subcommands that cannot mutate the repository whatever follows them.
-# `branch`, `remote`, `config`, `tag`, `checkout` and `switch` are absent because
-# a flag flips each into a write (-D, add, a value, -d, --). `grep` is absent
-# because `git grep -O<cmd>` opens matches in a pager of its choosing, which
-# runs that command even when stdout is a pipe -- measured, not assumed.
+# `remote`, `config`, `tag`, `checkout` and `switch` are absent because a flag
+# flips each into a write (add, a value, -d, --). `grep` is absent because
+# `git grep -O<cmd>` opens matches in a pager of its choosing, which runs that
+# command even when stdout is a pipe -- measured, not assumed. `branch` is
+# handled below instead, by flags: it belongs here in spirit and not in this
+# set, because `git branch -D x` deletes.
 GIT_READ = frozenset((
     "status", "log", "show", "diff", "rev-parse", "ls-files", "blame",
-    "describe", "shortlog", "cat-file", "ls-tree",
+    "describe", "shortlog", "cat-file", "ls-tree", "for-each-ref",
 ))
+
+# `git branch`'s listing form, as an allowlist rather than a list of the ways
+# it writes (#236). The deny-list shape used for `find` and `sort` is wrong
+# here: those write a file the sandbox still confines, while the ways `branch`
+# writes -- delete, rename, copy, retarget an upstream -- destroy repository
+# state the sandbox has no opinion about, so an unlisted flag must park rather
+# than pass. A positional argument is a write too: `git branch <name>` creates,
+# and `git branch --list <pattern>` cannot be told apart from it here, so the
+# pattern form parks and the plain listing does not.
+_GIT_BRANCH_READ_FLAGS = frozenset((
+    "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-l", "--list",
+    "-q", "--quiet", "-i", "--ignore-case", "--show-current", "--color",
+    "--no-color", "--column", "--no-column", "--sort", "--format",
+    "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+    "--abbrev", "--no-abbrev",
+))
+
+# `gh auth status` reports which account is logged in; every other `gh auth`
+# subcommand changes the credential, and `--show-token` prints it (#236).
+#
+# The flag is matched on its name, not on the whole token: gh's flags are
+# cobra booleans, so `--show-token=true` is the same request as `--show-token`
+# and an exact-token check let it through (Codex adversarial review, #242).
+# Any single-dash cluster containing `t` goes with it -- `gh auth status` has
+# no other short flag worth the distinction.
+_GH_AUTH_READ = "status"
+_GH_AUTH_REFUSED_LONG = frozenset(("--show-token",))
+_GH_AUTH_REFUSED_LETTERS = frozenset("t")
+
+
+def _gh_auth_refusal(texts):
+    """Why this `gh auth status` is not a read, or None."""
+    retval = None
+    for t in texts:
+        if t is None:
+            retval = "gh auth status: an argument is not literal"
+            break
+        if t.split("=", 1)[0] in _GH_AUTH_REFUSED_LONG:
+            retval = "gh auth status --show-token: prints the credential"
+            break
+        if t.startswith("-") and not t.startswith("--") and set(t[1:]) & _GH_AUTH_REFUSED_LETTERS:
+            retval = "gh auth status -t: prints the credential"
+            break
+    return retval
 
 # `gh <noun> <action>` pairs that only read. `api` is deliberately absent: it
 # takes -X POST, and it reaches any repo the token reaches, which is the open
@@ -582,6 +658,9 @@ class _Walker:
             else:
                 ok, why = self.probe.commit_allowed(directory)
                 retval = (ok, f"git commit: {why}")
+        elif sub == "branch" and not self.writes_file and not writes_flag:
+            why = _git_branch_refusal(rest)
+            retval = (False, why) if why else (True, "git branch: listing")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
             retval = (True, f"git {sub}: read-only")
         else:
@@ -614,9 +693,18 @@ class _Walker:
         through to YOLT -- and at 2.0.x that means the command parks."""
         words = self._words(args, GH_VALUE_FLAGS)
         retval = None
-        if (words is not None and len(words) >= 2 and not self.writes_file
-                and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS):
+        if words is None or self.writes_file:
+            return retval
+        if len(words) >= 2 and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS:
             retval = (True, f"gh {words[0]} {words[1]}: read-only")
+        elif len(words) >= 2 and words[0] == "auth" and words[1] == _GH_AUTH_READ:
+            # Which account is logged in is a read; every other `gh auth`
+            # subcommand changes the credential (#236). `--show-token` prints
+            # it, and `_words` drops dashed tokens, so the flags are read from
+            # the arguments themselves rather than from `words`.
+            texts = [_unquote(_text(a, self.src)) if _static(a) else None for a in args]
+            why = _gh_auth_refusal(texts)
+            retval = (False, why) if why else (True, "gh auth status: read-only")
         return retval
 
     def aws(self, args):

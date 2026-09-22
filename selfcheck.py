@@ -2340,6 +2340,14 @@ try:
     for _c in ("git remote", "git remote -v", "git remote --verbose"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok, (_c, _ok, _why)
+    for _c in ("git worktree list", "git worktree list --porcelain"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _ok, _why)
+    for _c in ("git worktree add ../wt b", "git worktree remove ../wt",
+               "git worktree prune", "git worktree move ../a ../b",
+               "git worktree repair", "git worktree lock ../wt"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert not _ok, (_c, _ok, _why)
     for _c in ("git remote add o https://e/r", "git remote remove o",
                "git remote rename a b", "git remote set-url o https://e/r",
                "git remote prune o", "git remote show o", "git remote update"):

@@ -810,6 +810,16 @@ class _Walker:
                 retval = (True, "git remote: listing")
             else:
                 retval = (False, "git remote: only the bare listing is read-only")
+        elif sub == "worktree" and not self.writes_file and not writes_flag:
+            # `git worktree list` reads the same administrative file `git
+            # worktree add` writes, and `add`, `remove`, `move`, `prune`,
+            # `repair` and `lock` all write it or the filesystem. Named rather
+            # than flag-checked, because the subcommand is the whole question.
+            if rest[:1] == ["list"] and all(t in ("--porcelain", "-v", "--verbose", "-z")
+                                            for t in rest[1:]):
+                retval = (True, "git worktree list: listing")
+            else:
+                retval = (False, "git worktree: only `list` is read-only")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
             retval = (True, f"git {sub}: read-only")
         else:

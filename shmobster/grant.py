@@ -151,49 +151,70 @@ GIT_READ = frozenset((
 # The same tier v0.18.0 built for `find` and `sort`, applied where GIT_READ's
 # flag-independence bar excludes a command that is nearly always a read.
 #
-# `git branch` lists; it also deletes, renames, copies and creates. The bar that
-# separates them is not one flag -- it is "names a branch". `git branch` with a
-# positional argument CREATES, so the predicate is: no write flag AND no
-# positional. That is an argv shape this layer already parses.
-_GIT_BRANCH_WRITES = frozenset((
-    "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy",
-    "--edit-description", "--set-upstream-to", "--unset-upstream", "-u",
-    "--set-upstream", "-f", "--force",
+# `git branch` lists; it also deletes, renames, copies and creates. A DENY list
+# of writing flags cannot gate it, and an adversarial review was right about
+# why: git's parse-options accepts unambiguous long-option ABBREVIATIONS.
+# Measured against real git, in a scratch repo:
+#
+#     git branch --dele victim          -> Deleted branch victim (was 53eaf90).
+#     git branch --mov other renamed    -> renamed it
+#
+# `--dele` is not `--delete` and no list of exact spellings contains every
+# prefix of every writing flag. So the rule is inverted: only these exact
+# spellings are known reads, and everything else -- an abbreviation of a read
+# flag included -- parks. An unusual spelling of a listing costs one card; the
+# alternative costs a branch.
+_GIT_BRANCH_READ_FLAGS = frozenset((
+    "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose",
+    "-q", "--quiet", "-l", "--list", "--show-current",
+    "-i", "--ignore-case", "--omit-empty",
+    "--no-color", "--no-column", "--no-abbrev",
+))
+# ...and the ones whose value is OPTIONAL and attached-only: `--color=never`,
+# `--column=dense`, `--abbrev=7`. Never consume a following word for these --
+# `git branch --color never` would make `never` a positional, which is a
+# branch name.
+_GIT_BRANCH_READ_OPTIONAL_VALUE_FLAGS = frozenset(("--color", "--column", "--abbrev"))
+# ...the ones that take a value, which may arrive attached (`--sort=x`) or as
+# the next word (`--sort x`). Both spellings are reads either way.
+_GIT_BRANCH_READ_VALUE_FLAGS = frozenset((
+    "--format", "--sort", "--contains", "--no-contains",
+    "--merged", "--no-merged", "--points-at",
 ))
 
 # `git for-each-ref` has no writing form at all. --python/--shell/--tcl change
-# the quoting of its output and nothing else, and --format is a value flag.
-# Listed here rather than in GIT_READ only to keep the "why is this safe"
-# reasoning next to branch's, which is the one that needs it.
+# the quoting of its output and nothing else.
 _GIT_FLAG_CHECKED = frozenset(("branch", "for-each-ref"))
 
 
 def _git_branch_reads(rest):
-    """(ok, why) for `git branch`. Everything unreadable is a refusal."""
+    """(ok, why) for `git branch`. An allowlist, because a deny list cannot
+    survive git's long-option abbreviations -- see the measurement above.
+
+    Two ways to fail: a flag that is not a known read, or a positional. The
+    positional is the one no flag check would catch on its own, because
+    `git branch <name>` CREATES."""
     if any(r is None for r in rest):
         retval = (False, "git branch: an argument is not a literal")
         return retval
-    hit = next((r for r in rest if r in _GIT_BRANCH_WRITES
-                or r.startswith(("--set-upstream-to=", "--copy=", "--move="))), None)
-    if hit:
-        retval = (False, f"git branch: flag {hit} writes")
-        return retval
-    # A positional creates a branch. `--format=x` and `--sort=y` are flags, and
-    # `--format x` puts its value in a position -- so value flags are consumed
-    # rather than counted, the same way _words does it.
-    _VALUE = frozenset(("--format", "--sort", "--contains", "--no-contains",
-                        "--merged", "--no-merged", "--points-at", "--color"))
     skip = False
     for r in rest:
         if skip:
             skip = False
             continue
-        if r in _VALUE:
-            skip = True
-            continue
-        if not r.startswith("-"):
-            retval = (False, f"git branch {r}: a positional argument creates a branch")
+        if r.startswith("-"):
+            head = r.split("=", 1)[0]
+            if head in _GIT_BRANCH_READ_VALUE_FLAGS:
+                skip = "=" not in r
+                continue
+            if head in _GIT_BRANCH_READ_OPTIONAL_VALUE_FLAGS:
+                continue
+            if r in _GIT_BRANCH_READ_FLAGS:
+                continue
+            retval = (False, f"git branch: {r} is not a known read-only flag")
             return retval
+        retval = (False, f"git branch {r}: a positional argument creates a branch")
+        return retval
     retval = (True, "git branch: read-only")
     return retval
 
@@ -671,7 +692,7 @@ class _Walker:
         if (words is not None and len(words) >= 2 and not self.writes_file
                 and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS):
             retval = (True, f"gh {words[0]} {words[1]}: read-only")
-        elif (words is not None and len(words) >= 2 and not self.writes_file
+        elif (words is not None and len(words) == 2 and not self.writes_file
                 and words[0] == "auth" and words[1] == "status"):
             # `gh auth` is not a noun in the GH_READ sense -- its subcommands
             # are login, logout, refresh, setup-git, status and token, and only

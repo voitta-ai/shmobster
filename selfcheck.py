@@ -4154,10 +4154,40 @@ try:
     # an argument this layer cannot read is a refusal, not a guess
     assert not grant.check("git branch $X", _pol57)[0]
 
+    # THE BYPASS an adversarial review found, and it was real: git's
+    # parse-options accepts unambiguous long-option ABBREVIATIONS, so a deny
+    # list of exact spellings cannot gate this. Measured against real git in a
+    # scratch repo -- `git branch --dele victim` printed "Deleted branch
+    # victim" and `git branch --mov a b` renamed one. The rule is therefore an
+    # ALLOWLIST: an abbreviation of a writing flag is not a known read, and
+    # neither is an abbreviation of a reading one, which costs a card.
+    for _c in ("git branch --dele victim", "git branch --del victim",
+               "git branch --delet x", "git branch --d x",
+               "git branch --mov a b", "git branch --cop a b",
+               "git branch --set-upstream-t=origin/x",
+               "git branch --verb", "git branch --sho"):
+        _ok, _why = grant.check(_c, _pol57)
+        assert not _ok, (_c, _why)
+        assert "not a known read-only flag" in _why or "positional" in _why, (_c, _why)
+
+    # a value flag's two spellings are both reads, and an OPTIONAL-value flag is
+    # attached-only -- `git branch --color never` makes `never` a branch name
+    for _c in ("git branch --format '%(refname:short)'", "git branch --format='%(x)'",
+               "git branch --sort=-committerdate", "git branch --points-at HEAD",
+               "git branch --no-merged main", "git branch -a --color=never",
+               "git branch --column=dense", "git branch --abbrev=7",
+               "git branch --color", "git branch --no-color",
+               "git branch --all --verbose", "git branch --show-current"):
+        _ok, _why = grant.check(_c, _pol57)
+        assert _ok, (_c, _why)
+    assert not grant.check("git branch --color never", _pol57)[0]
+
     # gh auth is an exact pair, not a noun: only `status` reads. `token` PRINTS
     # THE CREDENTIAL, and login/logout/refresh/setup-git mutate the host's auth.
     for _c in ("gh auth login", "gh auth logout", "gh auth token",
-               "gh auth refresh", "gh auth setup-git"):
+               "gh auth refresh", "gh auth setup-git",
+               # exactly two words: a trailing token is not a status read
+               "gh auth status extra"):
         _ok, _why = grant.check(_c, _pol57)
         assert not _ok, (_c, _why)
 

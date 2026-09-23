@@ -271,8 +271,29 @@ assert "nearing the limit" not in capped, capped
 # carries no note at all
 assert "nearing the limit" in handler._finalize("done", config.WARN_TOOL_STEPS)
 assert "nearing the limit" in handler._finalize("done", config.MAX_TOOL_STEPS - 1)
-assert "stopped at the" in handler._finalize("done", config.MAX_TOOL_STEPS)
+assert "stopped at the" in handler._finalize("done", config.MAX_TOOL_STEPS, capped=True)
 assert ":warning:" not in handler._finalize("done", 1)
+# The boundary the count alone cannot see: `steps` is incremented before each
+# model call, so a turn that ANSWERS on the last allowed iteration also reaches
+# MAX_TOOL_STEPS -- and it finished. It gets the soft warning, never the
+# cut-off note, or the reply would invite work that is already done.
+_last = {"n": 0}
+
+
+def _answers_on_last(messages, tools=None):
+    _last["n"] += 1
+    if _last["n"] < config.MAX_TOOL_STEPS:
+        return _FakeMsg(tool_calls=[_FakeCall(f"c{_last['n']}", "run_shell",
+                                              '{"command": "echo x"}')])
+    return _FakeMsg(content="finished on the last step")
+
+
+llm.complete = _answers_on_last
+_edge = handler.handle("work to the edge")
+assert "finished on the last step" in _edge, _edge
+assert "stopped at the" not in _edge, _edge
+assert "nearing the limit" in _edge, _edge
+assert _last["n"] == config.MAX_TOOL_STEPS, _last
 
 # 7) config validation: tool-step bounds must be positive ints
 for bad in (0, -1, True, 2.5, "3"):

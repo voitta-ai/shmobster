@@ -27,11 +27,24 @@ def _agent_marker():
 
 
 def _finalize(answer, steps):
-    """Prefix the agent marker; warn on the reply once the loop neared the cap.
+    """Prefix the agent marker; say so when the loop neared or hit the cap.
     Scrubbed again on the way out -- the model can quote a credential it read
     before this turn, or one a human typed into the thread (#72)."""
     out = f"{_agent_marker()} {redact.scrub(answer)}"
-    if steps >= config.WARN_TOOL_STEPS:
+    if steps >= config.MAX_TOOL_STEPS:
+        # At the cap the turn did not finish: the loop stopped calling tools
+        # and asked for an answer from whatever it had. "Nearing the limit" was
+        # wrong there in the way that matters -- it reads as a healthy turn
+        # with a note, so the text above it reads as a conclusion instead of an
+        # interim report, and nobody knows to ask for the rest. Seen live on a
+        # turn whose answer ended "now let's add the next three screens", which
+        # was a plan rather than a result.
+        out += (
+            f"\n\n:warning: stopped at the {config.MAX_TOOL_STEPS}-tool-step limit, "
+            "so this is what I had, not a finished job. Ask me to continue and "
+            "I will pick up from here."
+        )
+    elif steps >= config.WARN_TOOL_STEPS:
         out += (
             f"\n\n:warning: used {steps}/{config.MAX_TOOL_STEPS} tool steps "
             "(nearing the limit -- consider narrowing the request)."

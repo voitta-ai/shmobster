@@ -261,7 +261,18 @@ llm.complete = _always_tool
 capped = handler.handle("keep going")
 assert "best-effort summary" in capped, capped
 assert "stopped after" not in capped, capped
-assert "3/3 tool steps" in capped, capped  # nearing-limit warning fired
+# At the cap the turn was cut short, and the note says that rather than
+# "nearing the limit" -- which read as a healthy turn with a footnote, leaving
+# an interim answer looking like a conclusion.
+assert "stopped at the 3-tool-step limit" in capped, capped
+assert "not a finished job" in capped and "continue" in capped, capped
+assert "nearing the limit" not in capped, capped
+# ...while short of the cap it is still the softer warning, and a brief turn
+# carries no note at all
+assert "nearing the limit" in handler._finalize("done", config.WARN_TOOL_STEPS)
+assert "nearing the limit" in handler._finalize("done", config.MAX_TOOL_STEPS - 1)
+assert "stopped at the" in handler._finalize("done", config.MAX_TOOL_STEPS)
+assert ":warning:" not in handler._finalize("done", 1)
 
 # 7) config validation: tool-step bounds must be positive ints
 for bad in (0, -1, True, 2.5, "3"):

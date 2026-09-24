@@ -26,12 +26,25 @@ def _agent_marker():
     return retval
 
 
-def _finalize(answer, steps):
-    """Prefix the agent marker; warn on the reply once the loop neared the cap.
+def _finalize(answer, steps, capped=False):
+    """Prefix the agent marker; say so when the loop neared or hit the cap.
     Scrubbed again on the way out -- the model can quote a credential it read
     before this turn, or one a human typed into the thread (#72)."""
     out = f"{_agent_marker()} {redact.scrub(answer)}"
-    if steps >= config.WARN_TOOL_STEPS:
+    if capped:
+        # At the cap the turn did not finish: the loop stopped calling tools
+        # and asked for an answer from whatever it had. "Nearing the limit" was
+        # wrong there in the way that matters -- it reads as a healthy turn
+        # with a note, so the text above it reads as a conclusion instead of an
+        # interim report, and nobody knows to ask for the rest. Seen live on a
+        # turn whose answer ended "now let's add the next three screens", which
+        # was a plan rather than a result.
+        out += (
+            f"\n\n:warning: stopped at the {config.MAX_TOOL_STEPS}-tool-step limit, "
+            "so this is what I had, not a finished job. Ask me to continue and "
+            "I will pick up from here."
+        )
+    elif steps >= config.WARN_TOOL_STEPS:
         out += (
             f"\n\n:warning: used {steps}/{config.MAX_TOOL_STEPS} tool steps "
             "(nearing the limit -- consider narrowing the request)."
@@ -194,7 +207,12 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     steps = 0
     trace = []  # every tool call this turn, for the trajectory record (#129)
 
-    def _done(answer):
+    def _done(answer, capped=False):
+        # `capped` is passed rather than inferred from the step count, because
+        # `steps` is incremented before each model call: a turn that answers on
+        # the last allowed iteration reaches MAX_TOOL_STEPS having finished,
+        # and telling that one it was cut off invites the user to ask for work
+        # that is already done (Codex adversarial review, #251).
         # Recorded before the reply goes out, only for channel turns: a script
         # or a test calling handle() directly has no thread to learn from.
         if channel:
@@ -209,7 +227,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 _flag = "offered, not used"
             trajectory.record(channel, user_id, thread_ts, text, trace, answer,
                               cost.drain(), flag_skill=_flag)
-        retval = _finalize(answer, steps)
+        retval = _finalize(answer, steps, capped)
         return retval
 
     while steps < config.MAX_TOOL_STEPS:
@@ -259,5 +277,5 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     # answer from what we gathered, instead of a dead-end "(stopped)" message.
     final = llm.complete(messages)
     answer = final.content or "(reached the tool-step limit without a definitive answer)"
-    retval = _done(answer)
+    retval = _done(answer, capped=True)
     return retval

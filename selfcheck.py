@@ -2513,6 +2513,47 @@ try:
                "aws sso get-role-credentials --role-name r"):
         _ok, _why = grant.check(_c, _rpol)
         assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+
+    # 35a) an unattended channel (#253): the declared scope is the boundary, so
+    # inside its repos and its tree the destructive commands run too. The point
+    # is enabling the people in that channel, not protecting them from their
+    # own workspace.
+    _un = {"cwd": ".", "unattended": True, "github_repos": ["o/r"],
+           "allow_domains": ["github.com", "api.github.com"]}
+    for _c in ("rm -rf build", "gh pr merge 3",
+               "gh api -X POST repos/o/r/issues -f title=x",
+               "git reset --hard origin/master", "git branch -D topic",
+               "mv a b", "chmod 600 f", "git worktree add ../wt b",
+               "gh release create v1 --notes x"):
+        _ok, _why = grant.check(_c, _un)
+        assert _ok and "unattended" in _why, (_c, _ok, _why)
+    # ...and the same channel WITHOUT the key keeps every one of those carded
+    for _c in ("rm -rf build", "gh pr merge 3", "git branch -D topic"):
+        _ok, _why = grant.check(_c, dict(_un, unattended=False))
+        assert not _ok, (_c, _ok, _why)
+    # What unattended does NOT buy, because each one leaves the blast radius
+    # the operator drew:
+    for _c, _frag in (
+            # a host this channel was never given, by push or by fetch
+            ("git push https://elsewhere.test/o/r", "elsewhere.test"),
+            ("curl https://elsewhere.test/x", "elsewhere.test"),
+            # an interpreter: the sandbox holds the filesystem, not the
+            # network, so this would be an uncarded fetch to anywhere
+            ("python3 -c 'import urllib.request'", None),
+            ("sh -c 'rm -rf build'", None),
+            ("bash script.sh", None),
+            ("node -e 'x'", None),
+            # and the things refused before this layer decides anything
+            ("sudo rm -rf /", "sudo"),
+            ("rm -rf $(cat targets)", "command substitution")):
+        _ok, _why = grant.check(_c, _un)
+        assert not _ok, (_c, _ok, _why)
+        if _frag:
+            assert _frag in _why, (_c, _why)
+    # policy still decides WHICH repo: this layer grants the verb, and a
+    # command must pass both
+    assert not policy.check("gh api repos/other/secret/issues", _un)[0]
+    assert policy.check("gh api repos/o/r/issues", _un)[0]
 finally:
     yolt_gate.classify = _saved_classify
 

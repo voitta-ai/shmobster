@@ -658,6 +658,28 @@ machine's channel layout is versioned separately from the token/key config:
     here, only names -- and a name in this list is as deliberate a grant as an
     `env` entry, so do not list a credential a channel should not hold.
     Policy-file only: `set_policy` over chat cannot add one.
+  - `unattended` -- `true` makes this channel's own scope the boundary instead
+    of each command's shape (#253). `git`, `gh` and the file verbs then run
+    with no approval card, destructive ones included: `rm -rf`, `git push
+    --force`, `gh pr merge`, `gh api -X POST`. It is for a channel that exists
+    to work on one or two repos, where the people in it are being enabled
+    rather than supervised, and a mess in their own workspace is theirs to
+    make.
+
+    What it does not change, because each of these leaves that workspace:
+    `github_repos` still decides which repo a `git`/`gh` command may name,
+    `allow_domains` still decides which hosts may be reached (a `git push` to
+    an unlisted remote still parks), the sandbox still confines writes to the
+    tree, and this deployment's own config stays unreachable. Interpreters --
+    `sh`, `bash`, `python3`, `node` -- keep parking on purpose: the sandbox
+    holds the filesystem and not the network, so `python3 -c` with a socket
+    would be an uncarded fetch to anywhere and `allow_domains` would be
+    decorative.
+
+    Policy-file only, for the reason `env_passthrough` is: a channel must not
+    be able to talk itself into this. Every boot logs which channels have it,
+    with their repos and tree, because a channel that never parks anything
+    looks exactly like a quiet one.
 
 Because `env` may hold secrets, treat `shmobster-policies.json` like the main
 config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /

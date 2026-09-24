@@ -52,6 +52,23 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # Filesystem writes the sandbox confines to the tree.
 FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed"))
 
+# Verbs an unattended channel runs without a card (#253), because their blast
+# radius is the scope the operator already drew: `git` and `gh` are held to the
+# channel's `github_repos` by `_check_github`, and the file verbs to its tree by
+# the sandbox. `rm` is here and `cp` is in FS_VERBS for the same reason -- in an
+# unattended channel the distinction between them stopped being interesting.
+#
+# What is NOT here matters more. Interpreters (`sh`, `bash`, `python3`, `node`,
+# `perl`, `ruby`) stay carded although they cannot escape the tree, because the
+# sandbox confines the filesystem and not the network: `python3 -c` with a
+# socket is an uncarded fetch to anywhere, which would make `allow_domains`
+# decorative. `curl` and `wget` keep their own rule for the same reason, and
+# `sudo` is refused before this point.
+UNATTENDED_VERBS = frozenset((
+    "git", "gh", "rm", "rmdir", "cp", "mv", "mkdir", "touch", "tee", "ln",
+    "chmod", "chown", "sed", "truncate", "install", "patch",
+))
+
 # Reads that stay reads whatever flags they are given (#177). voitta-yolt 2.0.x
 # delegates every ordinary read to a host classifier this agent does not have,
 # answering `unknown`, so without this list `cat README.md` parks for an approval
@@ -454,6 +471,9 @@ class _Walker:
         self.tracked = start_dir
         self.start_dir = start_dir
         self.policy = policy or {}
+        # File-only channel opt-in (#253), read once per walk. Not settable
+        # through `set_policy`, so a channel cannot talk itself into it.
+        self.unattended = bool(self.policy.get("unattended"))
         self.probe = gitstate.GitProbe()
         self.reasons = []
         # Raised while walking the body of a redirect that writes to a real
@@ -597,6 +617,21 @@ class _Walker:
             return (False, f"{verb}: command substitution in arguments")
         if verb == "cd":
             retval = self.cd(args)
+        elif self.unattended and verb in UNATTENDED_VERBS:
+            # The channel's scope is its boundary (#253). Inside its own repos
+            # and its own tree, a card was protecting nobody from anything the
+            # operator had not already allowed: the point of the channel is to
+            # be an aide there. So `rm -rf build`, `git push --force` and
+            # `gh pr merge` run -- `git` and `gh` still answer to
+            # `_check_github` for WHICH repo, the file verbs to the sandbox for
+            # which tree.
+            #
+            # Egress is still asked, because reach is the one thing the scope
+            # does not describe: `git push` to a remote outside `allow_domains`
+            # leaves the blast radius the operator drew, and leaving it is what
+            # a card is still for.
+            allowed, why = policy_mod.check_egress(text, self.policy)
+            retval = (True, f"{verb}: unattended channel") if allowed else (False, why)
         elif verb in FS_VERBS:
             retval = (True, f"{verb}: in-tree write")
         elif verb == "git":

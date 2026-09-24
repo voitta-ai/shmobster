@@ -9,7 +9,7 @@ import os
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -435,6 +435,17 @@ def main():
     # told what is in it -- the second is worth less if the first is unread.
     for warning in logsetup.warnings():
         logging.warning("logging: %s", warning)
+    # Which channels stopped asking (#253). An unattended channel is
+    # indistinguishable from a quiet one in the logs, so the operator who set it
+    # up weeks ago is told at every boot, by name and with its bounds.
+    for _ch, _pol in sorted(config.CHANNEL_POLICIES.items()):
+        if _pol.get("unattended"):
+            logging.warning(
+                "channel %s is UNATTENDED: git, gh and file commands run there with no "
+                "approval card, destructive ones included, bounded by github_repos %s "
+                "and the tree %s", _ch,
+                _pol.get("github_repos") or "(UNRESTRICTED -- every repo the token reaches)",
+                policy_mod.cwd_for(_pol))
     _secret_warnings = config.secret_warnings()
     for warning in _secret_warnings:
         logging.warning("config: %s", warning)

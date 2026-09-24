@@ -130,7 +130,7 @@ def _trusted_tags():
     return retval
 
 
-def run_shell(command, policy, channel=None, user_id=None):
+def run_shell(command, policy, channel=None, user_id=None, thread_ts=None):
     decision, reason = yolt_gate.classify(command, cwd=policy_mod.cwd_for(policy))
     # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
     # box, and a fetch to a host this channel was not given is a mutation of
@@ -158,7 +158,8 @@ def run_shell(command, policy, channel=None, user_id=None):
         # to stop asking about. The grant layer still has to vouch for the
         # verb, and repo scope, egress and the sandbox are unchanged.
         refused = decision == "deny" and not policy.get("unattended")
-        granted, why = (False, reason) if refused else grant.check(command, policy)
+        granted, why = (False, reason) if refused else grant.check(
+            command, policy, channel, thread_ts)
         if granted:
             logging.info(
                 "run_shell: granted in %s (%s): %s",
@@ -388,7 +389,7 @@ def capabilities(policy, channel=None):
 
 def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
     if name == "run_shell":
-        retval = run_shell(args.get("command", ""), policy, channel, user_id)
+        retval = run_shell(args.get("command", ""), policy, channel, user_id, thread_ts)
     elif name == "web_fetch":
         retval = web.tool(args.get("url", ""), policy)
     elif name == "report_cost":

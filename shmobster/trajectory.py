@@ -53,6 +53,55 @@ def failed(result):
     return retval
 
 
+def check_witness(records, check_command):
+    """(ok, why) -- did `check_command` pass in this thread, most recently?
+
+    The gate READS this. It never runs the check, and that is the invariant
+    everything here rests on: **the agent cannot fabricate a passing record,
+    because producing one means running the command through yolt, the egress
+    list, the grant layer, the sandbox and, if any of those says so, an
+    approval card.** The trustworthiness is inherited from the gate chain, not
+    from what the check means. A `check_command` of `true` witnesses nothing,
+    and is recorded as witnessing exactly that.
+
+    What it witnesses is therefore narrow and worth saying in full: *a command
+    the operator named ran in this thread, under those gates, exited zero, and
+    nothing has run since.* Not that the code is correct. The name says
+    `check_passed` rather than anything about laws or correctness for that
+    reason -- a name that promises more than the mechanism delivers is the
+    defect this repo has spent a week removing from verdict strings.
+
+    Staleness is handled by requiring the check to be the LAST shell command
+    that ran, rather than by detecting which steps wrote. Write detection would
+    inherit the open holes in that surface -- voitta-yolt#157's protected-write
+    coverage, and `curl -K`, whose options come from a file and never appear in
+    argv at all -- and an undetected write would leave a witness that is stale
+    rather than false, granting where it should card. "Nothing ran after it"
+    needs no write detection and cannot be wrong that way. It costs strictness:
+    any command between the check and the commit invalidates the witness, which
+    suits the natural order (edit, stage, check, commit) and refuses the rest.
+    """
+    ran = [r for step in records for r in (step.get("steps") or [])
+           if r.get("tool") == "run_shell"
+           and r.get("disposition") in ("ran", "failed")]
+    if not ran:
+        retval = (False, f"no run of {check_command!r} in this thread")
+        return retval
+    last = ran[-1]
+    try:
+        args = json.loads(last.get("args") or "{}")
+    except (TypeError, ValueError):
+        args = {}
+    if str(args.get("command", "")).strip() != check_command.strip():
+        retval = (False, f"the last command to run was not {check_command!r}")
+        return retval
+    if last.get("disposition") != "ran":
+        retval = (False, f"{check_command!r} ran and did not pass")
+        return retval
+    retval = (True, f"check passed since last write: {check_command}")
+    return retval
+
+
 def disposition(tool, result):
     """What happened to one tool call, from the text it returned. run_shell
     says so in its first words; every other tool either answered or refused."""

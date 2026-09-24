@@ -5,6 +5,7 @@
     },
     "C0SCOPEDCHANNEL": {
       "cwd": "/path/to/project",
+      "check_command": "make check",
       "github_repos": [
         "your-org/your-repo"
       ],

@@ -45,7 +45,7 @@ import os
 import tree_sitter
 import tree_sitter_bash
 
-from . import gitstate, policy as policy_mod, yolt_gate
+from . import gitstate, policy as policy_mod, trajectory, yolt_gate
 
 _LANG = tree_sitter.Language(tree_sitter_bash.language())
 
@@ -449,11 +449,16 @@ def _resolve(target, tracked):
 
 
 class _Walker:
-    def __init__(self, src, start_dir, policy=None):
+    def __init__(self, src, start_dir, policy=None, channel=None, thread_ts=None):
         self.src = src
         self.tracked = start_dir
         self.start_dir = start_dir
-        self.policy = policy or {}
+        self.policy = policy
+        # Identity of the turn, so a commit grant can read this thread's
+        # own record (#238). Absent for a direct call, which then cannot
+        # satisfy a check_command -- the safe direction.
+        self.channel = channel
+        self.thread_ts = thread_ts or {}
         self.probe = gitstate.GitProbe()
         self.reasons = []
         # Raised while walking the body of a redirect that writes to a real
@@ -727,6 +732,30 @@ class _Walker:
         retval = (True, "cd")
         return retval
 
+    def checked(self, why):
+        """Narrow a commit grant by the channel's declared check (#238).
+
+        Reads a witness; runs nothing. A channel with no `check_command` gets
+        the three blast-radius predicates it always had.
+
+        The command string goes in the grounds on purpose. The operator defines
+        what "checked" means for a channel and this layer cannot judge the
+        string -- `check_command: "true"` tightens nothing. Policing the value
+        would be dishonest about which of us knows the project; printing it is
+        not, so the log reads `check passed since last write: true` and a human
+        can see the conjunct is vacuous."""
+        cmd = (self.policy or {}).get("check_command")
+        if not cmd:
+            retval = (True, why)
+            return retval
+        if not (self.channel and self.thread_ts):
+            retval = (False, f"{why}, but a check_command needs a thread to read")
+            return retval
+        ok, detail = trajectory.check_witness(
+            trajectory.thread(self.channel, self.thread_ts), cmd)
+        retval = (True, f"{why}, {detail}") if ok else (False, f"{why}, but {detail}")
+        return retval
+
     def git(self, args):
         directory = self.tracked
         sub = None
@@ -795,6 +824,16 @@ class _Walker:
                 retval = (False, "git commit: directory not statically known")
             else:
                 ok, why = self.probe.commit_allowed(directory)
+                if ok:
+                    # A CONJUNCT, and it cannot be traded against the three
+                    # above (#238). Those measure blast radius -- is this
+                    # branch work, is it yours, is it reflog-recoverable. This
+                    # one asks whether the thing being committed passes a check
+                    # the operator named. They are orthogonal, so passing a
+                    # check must never buy a commit on the default branch, and
+                    # a channel with no check_command is exactly as gated as
+                    # before.
+                    ok, why = self.checked(why)
                 retval = (ok, f"git commit: {why}")
         elif sub == "branch" and not self.writes_file and not writes_flag:
             why = _git_branch_refusal(rest)
@@ -881,14 +920,14 @@ class _Walker:
         return retval
 
 
-def check(command, policy):
+def check(command, policy, channel=None, thread_ts=None):
     """(granted, reason). `reason` lists every segment's grounds when granted,
     or the first refusal when not."""
     src = command.encode("utf-8")
     tree = tree_sitter.Parser(_LANG).parse(src)
     if tree.root_node.has_error:
         return (False, "command does not parse")
-    walker = _Walker(src, policy_mod.cwd_for(policy), policy)
+    walker = _Walker(src, policy_mod.cwd_for(policy), policy, channel, thread_ts)
     ok, why = walker.walk(tree.root_node)
     if ok and not walker.reasons:
         ok, why = (False, "empty command")

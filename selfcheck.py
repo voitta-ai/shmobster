@@ -176,6 +176,21 @@ assert "selfcheck_marker_123" in out, out
 yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 blocked = tools.run_shell("rm -rf /tmp/x", {})
 assert blocked.startswith("NOT RUN"), blocked
+# A parked command has two readers and the instruction names both (#256): the
+# person who asked wants the outcome, the trusted user who can act wants the
+# command, what it changes and the id. One reply used to serve neither.
+assert "tl;dr:" in blocked and "for the approver:" in blocked, blocked
+assert "Tag the person who asked" in blocked, blocked
+_saved_trusted = config.TRUSTED_USERS
+try:
+    config.TRUSTED_USERS = {"UTRUST1"}
+    _parked = tools.run_shell("rm -rf /tmp/x", {})
+    assert "<@UTRUST1>" in _parked, _parked
+    # ...and with nobody configured it still reads as a sentence
+    config.TRUSTED_USERS = set()
+    assert "the trusted users" in tools.run_shell("rm -rf /tmp/x", {})
+finally:
+    config.TRUSTED_USERS = _saved_trusted
 
 
 # 3) handler tool-loop: model asks to run a command, then answers

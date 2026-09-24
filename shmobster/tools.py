@@ -110,6 +110,14 @@ TOOLS = [RUN_SHELL, DESCRIBE, REPORT_COST, WEB_FETCH]
 _MAX_OUTPUT = 4000
 
 
+def _trusted_tags():
+    """The trusted users, as Slack mentions, for the approver half of a park
+    message (#256). Built here from config rather than imported from
+    admin_tools, which imports this module -- one helper is not worth a cycle."""
+    retval = " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "the trusted users"
+    return retval
+
+
 def run_shell(command, policy, channel=None):
     decision, reason = yolt_gate.classify(command, cwd=policy_mod.cwd_for(policy))
     # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
@@ -156,11 +164,24 @@ def run_shell(command, policy, channel=None):
             + ("Say plainly that the classifier refused this one outright rather than "
                "merely asking, and why. A trusted user can still override it, but do "
                "not present that as routine.\n" if refused else "")
-            + f"Tell the user: a trusted user can approve it with the card's button "
-            f"or by asking you to approve request {req_id} (approve_command), "
-            f"quoting the id exactly. Do not retry the command. End your turn now: "
-            f"once it is approved and runs, you are continued automatically with "
-            f"its output and can finish the task from there."
+            # Two readers, two needs (#256). One reply used to serve neither:
+            # the person who asked got a command line and an id they cannot use,
+            # and the trusted user who CAN act got no more than that -- so
+            # approving meant scrolling the thread to work out what the command
+            # was for. Both are addressed by name, because a request nobody is
+            # tagged on is a request nobody owns.
+            + "Your reply has two readers. Serve both, in this order:\n"
+            "1. `tl;dr:` one line for the person who asked -- what you were "
+            "trying to do and that it is now waiting on an approval. No "
+            "command, no flags, no id: they asked for an outcome.\n"
+            f"2. `for the approver:` what a trusted user needs to say yes "
+            f"without reading the thread back -- the exact command, what it "
+            f"will change, why it parked ({reason}), and the id {req_id} to "
+            f"quote (approve_command), or the card's button. Tag the person who "
+            f"asked and {_trusted_tags()}.\n"
+            "Nobody should need a follow-up question to act. Do not retry the "
+            "command. End your turn now: once it is approved and runs, you are "
+            "continued automatically with its output and can finish from there."
         )
         return retval
     retval = execute(command, policy)

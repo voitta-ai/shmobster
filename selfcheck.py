@@ -2198,7 +2198,7 @@ _grant_asked = {"n": 0}
 _real_grant_check = grant.check
 
 
-def _counting_grant(command, policy):
+def _counting_grant(command, policy, *_a, **_k):
     _grant_asked["n"] += 1
     return _real_grant_check(command, policy)
 
@@ -4328,5 +4328,78 @@ config.LOG_PATH = _lp56
 
 # and it is wired where an operator will see it
 assert "logsetup.warnings()" in open("shmobster/slack_app.py").read()
+
+# 58) a commit grant can be narrowed by a check the channel declared (#238).
+# The three existing predicates all ask HOW BAD IS IT IF THIS COMMIT IS WRONG --
+# branch work, yours, reflog-recoverable. None asks IS IT WRONG. This adds a
+# conjunct that does, and the shape is the point: the gate READS a witness and
+# runs nothing.
+#
+# The invariant everything rests on: the agent cannot fabricate a passing
+# record, because producing one means running the command through yolt, the
+# egress list, the grant layer, the sandbox and possibly a card. The
+# trustworthiness is INHERITED FROM THE GATE CHAIN, not from what the check
+# means.
+_tj58, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+try:
+    def _rec58(channel, cmd, ok=True):
+        trajectory.record(channel, "U1", "9.1", "q",
+                          [trajectory.step("run_shell", {"command": cmd},
+                                           "out" if ok else trajectory.FAILED_PREFIX + "1)\nboom")],
+                          "a")
+
+    # the witness: the check must be the LAST shell command that ran
+    _rec58("C58", "make check")
+    assert trajectory.check_witness(trajectory.thread("C58", "9.1"), "make check")[0]
+    # ...anything after it invalidates -- no write detection needed, which is
+    # what keeps this clear of voitta-yolt's open write-coverage holes (#157,
+    # and curl -K, whose options never appear in argv at all)
+    _rec58("C58", "sed -i s/a/b/ f.py")
+    assert not trajectory.check_witness(trajectory.thread("C58", "9.1"), "make check")[0]
+    # a check that RAN AND FAILED is not a witness
+    _rec58("C58b", "make check", ok=False)
+    _ok, _why = trajectory.check_witness(trajectory.thread("C58b", "9.1"), "make check")
+    assert not _ok and "did not pass" in _why, _why
+    # no run at all
+    _ok, _why = trajectory.check_witness([], "make check")
+    assert not _ok and "no run of" in _why, _why
+finally:
+    trajectory._DIR = _tj58
+
+# The conjunct cannot be traded against the other three. Blast radius and
+# correctness are orthogonal, so a passing check must never buy a commit on the
+# default branch -- the same restriction that makes voitta-yolt#147's
+# recoverability probes safe: a mechanism that can only narrow, never originate.
+class _NoCommit:
+    def commit_allowed(self, d):
+        return (False, "on the default branch main")
+_w58 = grant._Walker(b"", "/tmp", {"check_command": "make check"}, "C58", "9.1")
+_w58.probe = _NoCommit()
+assert _w58.checked("on the default branch main")[0] is False
+
+# A channel with no check_command is EXACTLY as gated as before -- asserted,
+# because a conjunct that changes behaviour where it was not configured would
+# be a widening wearing a tightening's clothes.
+_w58b = grant._Walker(b"", "/tmp", {}, "C58", "9.1")
+assert _w58b.checked("linked worktree on x, solo author") == (True, "linked worktree on x, solo author")
+
+# The command string goes in the grounds. The operator defines what "checked"
+# means and this layer cannot judge the string -- check_command: "true"
+# tightens nothing. Policing the value would be dishonest about which of us
+# knows the project; printing it is not, so a human reading the log sees the
+# conjunct is vacuous.
+_tj58b, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+try:
+    trajectory.record("C58C", "U1", "9.1", "q",
+                      [trajectory.step("run_shell", {"command": "true"}, "")], "a")
+    _ok, _why = grant._Walker(b"", "/tmp", {"check_command": "true"}, "C58C", "9.1") \
+        .checked("linked worktree on x")
+    assert _ok and "check passed since last write: true" in _why, _why
+finally:
+    trajectory._DIR = _tj58b
+
+# no thread to read -> not satisfied, rather than satisfied by default
+assert not grant._Walker(b"", "/tmp", {"check_command": "make check"}, None, None) \
+    .checked("linked worktree on x")[0]
 
 print(f"selfcheck OK -- shmobster {_b}")

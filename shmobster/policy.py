@@ -494,6 +494,20 @@ def check_egress(command, policy):
     return (True, "")
 
 
+def host_of_url(url):
+    """The host inside a URL, or None. Public because the grant layer resolves
+    a git remote's configured URL when the command itself names no host
+    (#253) -- one parser for "which host is this", not two."""
+    m = _URL_HOST.search(url or "")
+    if m:
+        retval = _host_of(m.group(1))
+        return retval
+    # scp-style, which git accepts for ssh remotes: user@host:path
+    m = re.match(r"^[^/\s]*@([^:/\s]+):", url or "")
+    retval = _host_of(m.group(1)) if m else None
+    return retval
+
+
 def host_allowed(host, policy):
     """Is this host in the channel's `allow_domains` (#149)?
 

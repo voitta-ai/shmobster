@@ -45,9 +45,17 @@ import os
 import tree_sitter
 import tree_sitter_bash
 
+import re
+
 from . import gitstate, policy as policy_mod, yolt_gate
 
 _LANG = tree_sitter.Language(tree_sitter_bash.language())
+
+# Does the command itself name a URL? When it does, the ordinary egress check
+# reads it; when it does not, an unattended git subcommand that contacts a
+# remote resolves that remote's configured URL instead (#253).
+_URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+_GIT_NET_SUBS_LOCAL = frozenset(("clone", "fetch", "pull", "push", "ls-remote", "submodule"))
 
 # Filesystem writes the sandbox confines to the tree.
 FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed"))
@@ -65,8 +73,39 @@ FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed")
 # decorative. `curl` and `wget` keep their own rule for the same reason, and
 # `sudo` is refused before this point.
 UNATTENDED_VERBS = frozenset((
-    "git", "gh", "rm", "rmdir", "cp", "mv", "mkdir", "touch", "tee", "ln",
+    "rm", "rmdir", "cp", "mv", "mkdir", "touch", "tee", "ln",
     "chmod", "chown", "sed", "truncate", "install", "patch",
+))
+
+# `git` and `gh` are NOT in the set above, and the reason is the whole safety
+# of this mode. Granting them on the verb would skip the parsing that refuses
+# `git -c alias.x='!curl https://anywhere'`, which git runs through a shell --
+# an uncarded command with no repo and no host in it for either allowlist to
+# see (Codex adversarial review, #253). So unattended changes the VERDICT those
+# two handlers reach, never the parsing they do, and it reaches it only for a
+# subcommand git or gh actually defines: an unknown word is an alias, and an
+# alias is somebody else's command.
+_UNATTENDED_GIT_SUBS = frozenset((
+    "add", "am", "apply", "archive", "bisect", "branch", "cat-file",
+    "cherry-pick", "clean", "commit", "describe", "diff", "fetch",
+    "for-each-ref", "format-patch", "gc", "init", "log", "ls-files",
+    "ls-remote", "ls-tree", "merge", "mv", "notes", "prune", "pull", "push",
+    "rebase", "reflog", "remote", "reset", "restore", "revert", "rev-parse",
+    "rm", "shortlog", "show", "stash", "status", "switch", "tag", "worktree",
+    "blame", "checkout", "clone", "submodule",
+))
+# `config` is absent on purpose: `git config alias.x '!cmd'` writes the alias
+# the paragraph above is about, and `core.fsmonitor` runs a command on the next
+# ordinary read.
+
+# gh's nouns, minus the ones that run code this layer cannot see: `extension`
+# (runs a third-party binary), `alias` (same shape as git's), `codespace` (ssh
+# into a remote machine), and `auth` (changes or prints the credential; `auth
+# status` is already granted on its own terms).
+_UNATTENDED_GH_NOUNS = frozenset((
+    "pr", "issue", "repo", "run", "workflow", "release", "label", "api",
+    "browse", "cache", "gist", "project", "org", "ruleset", "search",
+    "secret", "variable", "status",
 ))
 
 # Reads that stay reads whatever flags they are given (#177). voitta-yolt 2.0.x
@@ -600,6 +639,10 @@ class _Walker:
 
     def _segment(self, node):
         text = _text(node, self.src)
+        # Kept for the handlers that have to ask about reach: an unattended
+        # `git push` is granted on its subcommand and still has to name a host
+        # this channel was given (#253).
+        self._seg_text = text
         for c in node.children:
             if c.type == "file_redirect":
                 refusal, writes = self.redirect_write(c)
@@ -817,6 +860,14 @@ class _Walker:
         )
         if config_override:
             retval = (False, "git -c: a config override can run an arbitrary command")
+        elif self.unattended and sub in _UNATTENDED_GIT_SUBS:
+            # Reached only past the `-c` / `--config-env` refusal above, and
+            # only for a subcommand git defines -- an unknown word here is an
+            # alias, which runs whatever somebody put in a config file.
+            # `push`, `fetch`, `clone` and friends still have to name a host
+            # this channel was given: the scope says which repo, allow_domains
+            # says which internet.
+            retval = self._unattended_git(sub, rest, directory)
         elif sub in GIT_LOCAL:
             retval = (True, f"git {sub}: local")
         # Lowercase only: -B / -C reset an existing branch to HEAD, which is
@@ -862,6 +913,39 @@ class _Walker:
         return retval
 
 
+    def _unattended_git(self, sub, rest, directory):
+        """(ok, reason) for a git subcommand in an unattended channel (#253).
+
+        Reach is the only question left: `github_repos` has already said which
+        repo, the sandbox which tree. A URL in the command is read the way
+        every other fetch is. A command with no URL -- `git push`, `git push
+        origin master` -- is the usual case and names its destination in the
+        repo's config instead, so that is where the host comes from. A remote
+        that cannot be resolved is a refusal, not a pass: unknown is not
+        allowed."""
+        text = getattr(self, "_seg_text", "")
+        if _URL_IN_TEXT.search(text):
+            allowed, why = policy_mod.check_egress(text, self.policy)
+            retval = (True, f"git {sub}: unattended channel") if allowed else (False, why)
+            return retval
+        if sub not in _GIT_NET_SUBS_LOCAL:
+            retval = (True, f"git {sub}: unattended channel")
+            return retval
+        name = next((r for r in rest if r and not r.startswith("-")), "origin")
+        url = self.probe.remote_url(directory, name)
+        if not url:
+            retval = (False, f"git {sub}: remote {name!r} does not resolve to a URL here")
+            return retval
+        host = policy_mod.host_of_url(url)
+        if not host:
+            retval = (False, f"git {sub}: remote {name!r} has no host this layer can read")
+            return retval
+        if not policy_mod.host_allowed(host, self.policy):
+            retval = (False, f"fetch to '{host}' is not in this channel's allow_domains")
+            return retval
+        retval = (True, f"git {sub}: unattended channel, remote {name} on {host}")
+        return retval
+
     def _words(self, args, value_flags=frozenset()):
         """Non-flag words, or None if any argument is not a literal. A verb
         whose subcommand this agent cannot read statically is not one it can
@@ -891,6 +975,14 @@ class _Walker:
             return retval
         if len(words) >= 2 and words[0] in GH_READ_NOUNS and words[1] in GH_READ_ACTIONS:
             retval = (True, f"gh {words[0]} {words[1]}: read-only")
+        elif self.unattended and words and words[0] in _UNATTENDED_GH_NOUNS:
+            texts = [_unquote(_text(a, self.src)) if _static(a) else None for a in args]
+            if any(t and t.split("=", 1)[0] == "--hostname" for t in texts):
+                # A different GitHub host is a different set of repos, and
+                # `github_repos` describes one host's namespace (#253).
+                retval = (False, "gh --hostname: another host is outside this channel's scope")
+            else:
+                retval = (True, f"gh {words[0]}: unattended channel")
         elif len(words) >= 2 and words[0] == "auth" and words[1] == _GH_AUTH_READ:
             # Which account is logged in is a read; every other `gh auth`
             # subcommand changes the credential (#236). `--show-token` prints

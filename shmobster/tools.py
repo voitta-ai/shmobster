@@ -110,6 +110,18 @@ TOOLS = [RUN_SHELL, DESCRIBE, REPORT_COST, WEB_FETCH]
 _MAX_OUTPUT = 4000
 
 
+def _asker_tag(user_id):
+    """The person whose turn this is, as a mention (#256).
+
+    Rendered here rather than left to the model: `run_shell` is called on a
+    root message whose author id appears nowhere in the model's context -- the
+    thread transcript excludes the current message -- so "tag the person who
+    asked" was an instruction the model could only guess at (Codex adversarial
+    review)."""
+    retval = f"<@{user_id}>" if user_id else "the person who asked"
+    return retval
+
+
 def _trusted_tags():
     """The trusted users, as Slack mentions, for the approver half of a park
     message (#256). Built here from config rather than imported from
@@ -118,7 +130,7 @@ def _trusted_tags():
     return retval
 
 
-def run_shell(command, policy, channel=None):
+def run_shell(command, policy, channel=None, user_id=None):
     decision, reason = yolt_gate.classify(command, cwd=policy_mod.cwd_for(policy))
     # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
     # box, and a fetch to a host this channel was not given is a mutation of
@@ -177,8 +189,8 @@ def run_shell(command, policy, channel=None):
             f"2. `for the approver:` what a trusted user needs to say yes "
             f"without reading the thread back -- the exact command, what it "
             f"will change, why it parked ({reason}), and the id {req_id} to "
-            f"quote (approve_command), or the card's button. Tag the person who "
-            f"asked and {_trusted_tags()}.\n"
+            f"quote (approve_command), or the card's button. Tag both, by id: "
+            f"{_asker_tag(user_id)} and {_trusted_tags()}.\n"
             "Nobody should need a follow-up question to act. Do not retry the "
             "command. End your turn now: once it is approved and runs, you are "
             "continued automatically with its output and can finish from there."
@@ -354,9 +366,9 @@ def capabilities(policy, channel=None):
     return retval
 
 
-def dispatch(name, args, policy, channel=None, thread_ts=None):
+def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
     if name == "run_shell":
-        retval = run_shell(args.get("command", ""), policy, channel)
+        retval = run_shell(args.get("command", ""), policy, channel, user_id)
     elif name == "web_fetch":
         retval = web.tool(args.get("url", ""), policy)
     elif name == "report_cost":

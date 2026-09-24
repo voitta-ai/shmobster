@@ -180,7 +180,16 @@ assert blocked.startswith("NOT RUN"), blocked
 # person who asked wants the outcome, the trusted user who can act wants the
 # command, what it changes and the id. One reply used to serve neither.
 assert "tl;dr:" in blocked and "for the approver:" in blocked, blocked
-assert "Tag the person who asked" in blocked, blocked
+assert "Tag both, by id" in blocked, blocked
+# The asker's id is rendered here, not left to the model: on a root message it
+# appears nowhere in the model's context, so "tag the person who asked" was an
+# instruction it could only guess at.
+assert "<@UASKER>" in tools.run_shell("rm -rf /tmp/x", {}, "C_TAGS", "UASKER")
+assert "the person who asked" in tools.run_shell("rm -rf /tmp/x", {}, "C_TAGS", None)
+# ...and it reaches run_shell from the turn, through dispatch
+assert "<@UASKER>" in tools.dispatch(
+    "run_shell", {"command": "rm -rf /tmp/x"}, {}, "C_TAGS", "1.0", "UASKER")
+approvals.claim_unsurfaced("C_TAGS")  # a fixture channel, not this test's subject
 _saved_trusted = config.TRUSTED_USERS
 try:
     config.TRUSTED_USERS = {"UTRUST1"}
@@ -791,7 +800,7 @@ policy.resolve = lambda ch: _pols.get(ch, {})
 _seen_pol = []
 
 
-def _rec_tools(name, args, pol, channel=None, thread_ts=None):
+def _rec_tools(name, args, pol, channel=None, thread_ts=None, user_id=None):
     _seen_pol.append(pol)
     return "ok"
 
@@ -1018,7 +1027,7 @@ if True:
         _leaked.append(json.dumps(messages))
         return _FakeMsg(content="done")
 
-    tools.dispatch = lambda name, args, pol, channel=None, thread_ts=None: _akia
+    tools.dispatch = lambda name, args, pol, channel=None, thread_ts=None, user_id=None: _akia
     llm.complete = lambda messages, tools=None: (
         _FakeMsg(tool_calls=[_FakeCall("t", "run_shell", '{"command":"env"}')])
         if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")

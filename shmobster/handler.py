@@ -265,7 +265,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                     {"channel": channel, "policy": policy, "thread_ts": thread_ts},
                 )
             else:
-                result = tools.dispatch(name, args, policy, channel, thread_ts)
+                result = tools.dispatch(name, args, policy, channel, thread_ts, user_id)
             # Redact at collection (#72): every downstream copy -- this context,
             # the vendor's logs, the Slack message -- inherits the scrub, and a
             # credential never reaches the model to be repeated later.

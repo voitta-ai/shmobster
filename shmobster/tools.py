@@ -130,7 +130,14 @@ def run_shell(command, policy, channel=None):
         # card, vouched for by the layer that never asked why it was refused.
         # The better-informed gate wins; the human still gets the last word,
         # through a card that says what it is.
-        refused = decision == "deny"
+        # ...except in an unattended channel (#253), which does not keep the
+        # deny short-circuit either. 2.0.x's deny predicates are about the
+        # state of the repository the channel works in -- a commit that would
+        # sweep in someone else's work, and the like -- which is exactly the
+        # "you might make a mess of your own workspace" case this mode exists
+        # to stop asking about. The grant layer still has to vouch for the
+        # verb, and repo scope, egress and the sandbox are unchanged.
+        refused = decision == "deny" and not policy.get("unattended")
         granted, why = (False, reason) if refused else grant.check(command, policy)
         if granted:
             logging.info(
@@ -319,11 +326,24 @@ def capabilities(policy, channel=None):
     lines.append("- writable beyond the tree: " + _listed(policy.get("allow_write"), "nothing"))
     lines.append("- kept off-limits inside it: " + _listed(policy.get("exclude"), "nothing"))
     lines.append("- skills loadable here: " + _listed(skills.names(channel), "none"))
-    lines.append(
-        "- runs with no approval card: read-only commands; writes inside the tree "
-        f"({_listed(sorted(grant.FS_VERBS), 'none')}); a commit on a worktree branch "
-        "you authored. Everything else parks for a trusted user to approve by id."
-    )
+    if policy.get("unattended"):
+        # Say it here rather than leaving it to be discovered: a channel where
+        # nothing parks looks identical to a channel nobody has asked anything
+        # hard yet (#253).
+        lines.append(
+            "- runs with no approval card: THIS CHANNEL IS UNATTENDED. Every git, "
+            "gh and file command runs, including destructive ones -- `rm -rf`, "
+            "`git push --force`, `gh pr merge` -- as long as it stays inside the "
+            "repos and the directory above. What still parks: anything reaching a "
+            "host outside the fetchable list, an interpreter (sh, bash, python3, "
+            "node), and anything naming a repo this channel does not have."
+        )
+    else:
+        lines.append(
+            "- runs with no approval card: read-only commands; writes inside the tree "
+            f"({_listed(sorted(grant.FS_VERBS), 'none')}); a commit on a worktree branch "
+            "you authored. Everything else parks for a trusted user to approve by id."
+        )
     lines.append(
         "- always enforced: commands run under a sandbox confined to this tree, "
         "this deployment's own config is unreachable, and every reply is scrubbed "

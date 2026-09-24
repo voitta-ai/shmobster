@@ -122,6 +122,21 @@ class GitProbe:
         retval = (out.strip() or None) if out else None
         return retval
 
+    def remote_url(self, directory, name="origin"):
+        """The URL a named remote points at, or None (#253).
+
+        `git push` names no host at all in the usual case, so a textual egress
+        check has nothing to read -- and in an unattended channel that would
+        card the one command such a channel exists to run. The configured URL
+        is where the bytes actually go, so it is what the host check should
+        read. None when the remote does not exist or git cannot be asked, which
+        the caller must treat as a refusal rather than as permission."""
+        if directory is None:
+            retval = None
+            return retval
+        retval = self._config(directory, f"remote.{name}.url")
+        return retval
+
     def solo_author(self, directory):
         """(ok, reason): every commit on this branch beyond the default branch
         was authored and committed by the configured user."""

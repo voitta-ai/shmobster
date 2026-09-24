@@ -2513,6 +2513,84 @@ try:
                "aws sso get-role-credentials --role-name r"):
         _ok, _why = grant.check(_c, _rpol)
         assert not (_ok and "read-only" in _why), (_c, _ok, _why)
+
+    # 35a) an unattended channel (#253): the declared scope is the boundary, so
+    # inside its repos and its tree the destructive commands run too. The point
+    # is enabling the people in that channel, not protecting them from their
+    # own workspace.
+    _un = {"cwd": ".", "unattended": True, "github_repos": ["o/r"],
+           "allow_domains": ["github.com", "api.github.com"]}
+    for _c in ("rm -rf build", "gh pr merge 3",
+               "gh api -X POST repos/o/r/issues -f title=x",
+               "git reset --hard origin/master", "git branch -D topic",
+               "mv a b", "chmod 600 f", "git worktree add ../wt b",
+               "gh release create v1 --notes x",
+               "git push", "git push --force origin master", "git clean -fdx"):
+        _ok, _why = grant.check(_c, _un)
+        assert _ok and "unattended" in _why, (_c, _ok, _why)
+    # ...and the same channel WITHOUT the key keeps every one of those carded
+    for _c in ("rm -rf build", "gh pr merge 3", "git branch -D topic"):
+        _ok, _why = grant.check(_c, dict(_un, unattended=False))
+        assert not _ok, (_c, _ok, _why)
+    # What unattended does NOT buy, because each one leaves the blast radius
+    # the operator drew:
+    for _c, _frag in (
+            # a host this channel was never given, by push or by fetch
+            ("git push https://elsewhere.test/o/r", "elsewhere.test"),
+            ("curl https://elsewhere.test/x", "elsewhere.test"),
+            # an interpreter: the sandbox holds the filesystem, not the
+            # network, so this would be an uncarded fetch to anywhere
+            ("python3 -c 'import urllib.request'", None),
+            ("sh -c 'rm -rf build'", None),
+            ("bash script.sh", None),
+            ("node -e 'x'", None),
+            # git and gh are granted by their own handlers, never on the verb,
+            # so the parsing that refuses a command-bearing option still runs.
+            # Measured against real git: `git -c alias.pwn='!echo ...' pwn`
+            # prints, and so does an alias already in the repo's config -- both
+            # are arbitrary commands with no repo and no host for either
+            # allowlist to see.
+            ("git -c alias.pwn='!curl https://elsewhere.test/x' pwn", "git -c"),
+            ("git --config-env=alias.pwn=X pwn", "git -c"),
+            ("git pwn2", None),                      # an alias is an unknown subcommand
+            ("git config alias.x '!curl https://elsewhere.test'", None),
+            ("git config core.fsmonitor '!curl https://elsewhere.test'", None),
+            ("gh extension exec evil", None),
+            ("gh alias set x 'api -X DELETE repos/o/r'", None),
+            ("gh codespace ssh", None),
+            ("gh api --hostname ghe.elsewhere.test repos/o/r", "another host"),
+            # and the things refused before this layer decides anything
+            ("sudo rm -rf /", "sudo"),
+            ("rm -rf $(cat targets)", "command substitution")):
+        _ok, _why = grant.check(_c, _un)
+        assert not _ok, (_c, _ok, _why)
+        if _frag:
+            assert _frag in _why, (_c, _why)
+    # A `git push` names no host, so the check reads the remote's configured
+    # URL -- the place the bytes actually go. A remote pointing off-list parks,
+    # and an unresolvable one parks too: unknown is not permission.
+    _off = tempfile.mkdtemp()
+    subprocess.run(["git", "init", "-q", _off], check=True)
+    subprocess.run(["git", "-C", _off, "remote", "add", "origin",
+                    "https://elsewhere.test/o/r.git"], check=True)
+    _offpol = dict(_un, cwd=_off)
+    _ok, _why = grant.check("git push", _offpol)
+    assert not _ok and "elsewhere.test" in _why, (_ok, _why)
+    _ok, _why = grant.check("git push origin master", _offpol)
+    assert not _ok and "elsewhere.test" in _why, (_ok, _why)
+    _ok, _why = grant.check("git push nosuchremote", _offpol)
+    assert not _ok and "does not resolve" in _why, (_ok, _why)
+    # ...while a remote on an allowed host is the ordinary case and runs
+    subprocess.run(["git", "-C", _off, "remote", "set-url", "origin",
+                    "https://github.com/o/r.git"], check=True)
+    _ok, _why = grant.check("git push --force", _offpol)
+    assert _ok and "github.com" in _why, (_ok, _why)
+    # a local-only subcommand needs no remote at all
+    assert grant.check("git commit -m x", _offpol)[0]
+    # policy still decides WHICH repo: this layer grants the verb, and a
+    # command must pass both
+    assert not policy.check("gh api repos/other/secret/issues", _un)[0]
+    assert policy.check("gh api repos/o/r/issues", _un)[0]
 finally:
     yolt_gate.classify = _saved_classify
 

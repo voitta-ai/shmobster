@@ -65,7 +65,7 @@ _RESUME_TEMPLATE = (
 
 
 def resume(req_id, approved, command, result, thread_context=None, channel=None,
-           thread_ts=None, user_id=None, slack_client=None):
+           thread_ts=None, user_id=None, slack_client=None, requester=None):
     """Continue a turn that ended waiting on a parked command (#169).
 
     A button click used to run the command, rewrite the card with its output,
@@ -92,7 +92,7 @@ def resume(req_id, approved, command, result, thread_context=None, channel=None,
         return None
     try:
         retval = _resume_turn(req_id, approved, command, result, thread_context,
-                              channel, thread_ts, user_id, slack_client)
+                              channel, thread_ts, user_id, slack_client, requester)
     finally:
         if channel is not None:
             approvals.end_resume(channel, thread_ts)
@@ -100,7 +100,7 @@ def resume(req_id, approved, command, result, thread_context=None, channel=None,
 
 
 def _resume_turn(req_id, approved, command, result, thread_context, channel,
-                 thread_ts, user_id, slack_client):
+                 thread_ts, user_id, slack_client, requester=None):
     # Scrubbed here as well as upstream: a command line carries credentials
     # routinely, and this text becomes a turn, a trajectory record and whatever
     # the model quotes back (#72, and the same rule approvals follows).
@@ -119,8 +119,12 @@ def _resume_turn(req_id, approved, command, result, thread_context, channel,
         user=user_id or "someone", verdict="approved" if approved else "denied",
         req_id=req_id, command=redact.scrub(command), body=body,
     )
+    # The turn is answered to whoever ASKED, not to whoever approved (#262):
+    # the approver is named in the text above, and a task a designer started
+    # must not come back written for an operator because an operator clicked.
     retval = handle(text, thread_context=thread_context, channel=channel,
-                    thread_ts=thread_ts, user_id=user_id, slack_client=slack_client)
+                    thread_ts=thread_ts, user_id=requester or user_id,
+                    slack_client=slack_client)
     return retval
 
 
@@ -169,6 +173,27 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             f"<@{config.BOT_USER_ID}> is addressed to YOU -- that's you, not "
             "another agent, so never wait on yourself."
         )
+    # Who is asking, and therefore which half of the voice rule applies (#262).
+    # The model could not tell before: the same words went to the operator who
+    # set the deployment up and to a designer who does not use git, and one of
+    # them was always being served badly.
+    if user_id:
+        if user_id in config.TRUSTED_USERS:
+            _ident.append(
+                f"This turn was asked by <@{user_id}>, a trusted operator of "
+                "this deployment: they own the setup and can approve parked "
+                "commands. Give them the technical answer -- commands, errors, "
+                "ids, file and line."
+            )
+        else:
+            _ident.append(
+                f"This turn was asked by <@{user_id}>, who is NOT an operator "
+                "of this deployment. They are here for their own expertise and "
+                "are not assumed to know git, branches, CI or cloud consoles. "
+                "Answer in plain language: what happened, what it means for "
+                "their work, what happens next. No command lines, no request "
+                "ids they cannot act on, no jargon they did not use first."
+            )
     if _ident:
         system = " ".join(_ident) + "\n\n" + system
     if channel:

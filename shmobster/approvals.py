@@ -106,7 +106,7 @@ def from_this_boot(key):
     return retval
 
 
-def add(command, channel, reason, refused=False):
+def add(command, channel, reason, refused=False, requester=None):
     key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before
     # the delete: scrub() is fail-closed, and a raise after the insert would
@@ -128,6 +128,11 @@ def add(command, channel, reason, refused=False):
             # refusal card for an ordinary park, which would cry wolf on every
             # queue. run_shell is the only caller; a second one must pass it.
             "refused": refused,
+            # WHOSE task this is, as opposed to who approves it (#262). The
+            # resumed turn is the answer to the original question, so it must
+            # be written for the person who asked -- a designer's task approved
+            # by an operator still reaches the designer, in the same thread.
+            "requester": requester,
         }
         # Overflow never evicts a held request (#103). acquire() leaves it in
         # the queue until the approve path pops it, so an oldest-first eviction

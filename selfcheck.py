@@ -748,6 +748,28 @@ assert approvals.pop(_card_value, "C_BOOT") is None, "the old card must resolve 
 assert approvals.acquire(_card_value, "C_BOOT") is None, "including on the click path"
 assert approvals.status(_card_value, "C_BOOT")[0] == "absent", "so the click is told it is stale"
 
+# ...and the two kinds of "absent" are distinguishable, because they need
+# different things said (#258). A card from a dead boot is unrecoverable and
+# asking again is the whole fix; a same-boot id that is gone was already acted
+# on. Four identical "not pending here" lines is what not saying so looks like.
+assert not approvals.from_this_boot(_card_value), "boot 1's id is not this boot's"
+assert approvals.from_this_boot(_after), "and this boot's is"
+assert approvals.from_this_boot(f"  {_after}  "), "canonicalised first"
+# The card a stale click leaves behind keeps the command and loses the buttons:
+# #94 is about not destroying the command, not about keeping a button nothing
+# can act on.
+_stale_msg = {"blocks": slack_blocks.approval(_card_value,
+                                              {"command": "echo from_previous_boot",
+                                               "reason": "mutating"})}
+_exp = slack_blocks.expired(_card_value, _stale_msg, True)
+assert not any(b["type"] == "actions" for b in _exp), "the buttons are gone"
+assert "from_previous_boot" in json.dumps(_exp), "the command is not"
+assert "predates a restart" in json.dumps(_exp), _exp
+assert "already acted on" in json.dumps(
+    slack_blocks.expired(_after, _stale_msg, False)), "the same-boot wording differs"
+assert slack_blocks.expired(_card_value, None, True), "no blocks handed back is not a crash"
+assert "block_id" not in json.dumps(_exp), "echoed block ids are dropped"
+
 # ...and the typed path, which is the one that survives when the buttons are
 # not available: a bare number read off the stale card must not be completed
 # into this boot's request. Both surfaces have to fail, or the human still

@@ -95,6 +95,17 @@ def canonical(key):
     return retval
 
 
+def from_this_boot(key):
+    """Whether this id was minted by the process reading it (#258).
+
+    Every id carries the boot's nonce, so a card that outlived a restart is
+    distinguishable from a typo -- and those deserve different answers. The
+    caller must still ask the queue: a same-boot id can be absent because it
+    already ran."""
+    retval = canonical(key).startswith(f"{_NONCE}-")
+    return retval
+
+
 def add(command, channel, reason, refused=False):
     key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before

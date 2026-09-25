@@ -1610,6 +1610,14 @@ _out = learning.flag({"name": "Launchd Race!", "why": "bootstrap races bootout"}
 _key = _out.split("[", 1)[1].split("]", 1)[0]
 assert proposals.peek(_key, "C9")["name"] == "launchd-race", _out
 assert approvals.pop(_key, "C9") is None, "a proposal id must not be an approval id"
+# Both queues answer the stale-click path, because slack_app._resolve serves
+# both: an API only one of them has is an AttributeError raised AFTER the click
+# was acknowledged, which looks like nothing happening (#258, Codex review).
+for _q in (approvals, proposals):
+    assert hasattr(_q, "from_this_boot"), _q.__name__
+    assert not _q.from_this_boot("aaaaaaaaaaaaaaaa-1"), _q.__name__
+assert proposals.from_this_boot(_key), "this boot's proposal id is its own"
+assert not approvals.from_this_boot(_key), "and is not the approvals queue's"
 assert "already flagged" in learning.flag({"name": "again", "why": "z"}, _l_ctx), "one flag per thread"
 _cards = proposals.claim_unsurfaced("C9")
 assert [k for k, _ in _cards] == [_key] and proposals.claim_unsurfaced("C9") == []

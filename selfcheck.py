@@ -262,6 +262,30 @@ _pd4 = projectdocs.prompt_block(_pd_pol)
 assert "````" in _pd4, "the fence grows past the one inside"
 
 
+# ...a document that is not valid UTF-8 must not take the channel down: this
+# runs before the model call on every turn, so one bad commit would have made
+# the channel unanswerable until someone changed it (Codex review)
+with open(os.path.join(_pd_repo, "AGENTS.md"), "wb") as _f:
+    _f.write(b"valid start \xff\xfe then garbage\n")
+subprocess.run(["git", "-C", _pd_repo, "add", "-A"], check=True)
+subprocess.run(["git", "-C", _pd_repo, "commit", "-qm", "not utf-8"], check=True)
+_pd5 = projectdocs.prompt_block(_pd_pol)
+assert "valid start" in _pd5, "the readable part survives"
+# ...and an operator-named file is read BEFORE the conventional ones, so big
+# defaults cannot starve the instruction the channel exists to follow
+with open(os.path.join(_pd_repo, "CLAUDE.md"), "w") as _f:
+    _f.write("x" * 6000)
+with open(os.path.join(_pd_repo, "docs", "CLAUDE.md"), "w") as _f:
+    _f.write("y" * 6000)
+with open(os.path.join(_pd_repo, "docs", "BRANCHING-STRATEGY.md"), "w") as _f:
+    _f.write("MERGE TO THE PERSONAL BRANCH\n")
+subprocess.run(["git", "-C", _pd_repo, "add", "-A"], check=True)
+subprocess.run(["git", "-C", _pd_repo, "commit", "-qm", "big defaults"], check=True)
+_pd6 = projectdocs.prompt_block(dict(_pd_pol, project_docs=["docs/BRANCHING-STRATEGY.md"]))
+assert "MERGE TO THE PERSONAL BRANCH" in _pd6, "the named file is not starved"
+assert _pd6.index("BRANCHING-STRATEGY") < _pd6.index("CLAUDE.md"), "and comes first"
+
+
 # 3) handler tool-loop: model asks to run a command, then answers
 class _FakeFn:
     def __init__(self, name, args):

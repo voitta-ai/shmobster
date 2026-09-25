@@ -56,13 +56,19 @@ def _read(directory, path):
         proc = subprocess.run(
             ["git", "-C", directory, "show", f"{_REV}:{path}"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=10, text=True,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
-    retval = proc.stdout
+    # Bytes, decoded here rather than by subprocess: git will hand back
+    # whatever is in the blob, and a document that is not valid UTF-8 would
+    # raise UnicodeDecodeError on EVERY turn -- this runs before the model
+    # call, so one bad commit would take the channel down until someone
+    # changed it (Codex adversarial review, #261). Replacement characters in a
+    # prompt are survivable; a channel that cannot answer is not.
+    retval = proc.stdout.decode("utf-8", "replace")
     return retval
 
 
@@ -80,9 +86,14 @@ def files(policy):
     directory = os.path.expanduser(os.path.expandvars(directory)) if directory else None
     if not directory or not os.path.isdir(directory):
         return []
-    wanted = list(DEFAULT_PATHS) + [p for p in (policy.get("project_docs") or [])
-                                    if p not in DEFAULT_PATHS]
-    retval, total = [], 0
+    # Named files first, conventions second. `project_docs` is an operator
+    # saying "this one matters"; the defaults are a guess that a file with a
+    # conventional name is worth reading. Spending the budget on the guess and
+    # starving the instruction the channel exists to follow is the wrong way
+    # round -- and it is what happened here before review (#261).
+    named = [p for p in (policy.get("project_docs") or [])]
+    wanted = named + [p for p in DEFAULT_PATHS if p not in named]
+    retval, total, omitted = [], 0, []
     for path in wanted:
         body = _read(directory, path)
         if not body or not body.strip():
@@ -90,10 +101,18 @@ def files(policy):
         if len(body) > _MAX_FILE:
             body = body[:_MAX_FILE] + f"\n...[truncated at {_MAX_FILE} characters]"
         if total + len(body) > _MAX_TOTAL:
+            # Keep going rather than stopping: one oversized file must not hide
+            # every smaller one after it. What is dropped is named in the
+            # prompt, so the reader knows the set is incomplete.
             logging.info("projectdocs: %s omitted, budget spent", path)
-            break
+            omitted.append(path)
+            continue
         total += len(body)
         retval.append((path, body))
+    if omitted:
+        retval.append(("(omitted)", "These were not included, the budget was "
+                       "spent: " + ", ".join(omitted) + ". Read them with a "
+                       "command if the answer might be in one."))
     return retval
 
 

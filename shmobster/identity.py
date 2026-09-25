@@ -76,9 +76,14 @@ def dm_turn(event):
     return retval
 
 
-# Slack renders a broadcast in message text as <!here>, <!channel> or
-# <!everyone>, whatever the person typed.
-_BROADCASTS = ("<!here", "<!channel", "<!everyone")
+# Slack's own answer first: a real broadcast arrives as a `broadcast` element
+# inside the message's rich-text blocks, with the range it addressed. The text
+# form is the fallback for events delivered without blocks, and it is anchored
+# -- matching the bare prefix `<!here` would turn `<!here-not-a-broadcast>`, or
+# a pasted snippet containing it, into an unsolicited public reply (Codex
+# adversarial review, #260).
+_BROADCAST_RANGES = frozenset(("here", "channel", "everyone"))
+_BROADCAST_RE = re.compile(r"<!(here|channel|everyone)(\|[^>]*)?>")
 
 
 def broadcast_turn(event):
@@ -110,5 +115,27 @@ def broadcast_turn(event):
     text = ev.get("text") or ""
     if config.BOT_USER_ID and f"<@{config.BOT_USER_ID}>" in text:
         return False  # app_mention has this one
-    retval = any(b in text for b in _BROADCASTS)
+    if _has_broadcast_block(ev.get("blocks")):
+        retval = True
+        return retval
+    retval = bool(_BROADCAST_RE.search(text))
     return retval
+
+
+def _has_broadcast_block(blocks):
+    """True when Slack itself marked a broadcast in the message's blocks.
+
+    Walked rather than pattern-matched: the element sits inside
+    rich_text -> rich_text_section -> broadcast, and a future nesting should
+    read as "found" rather than as "absent"."""
+    stack = list(blocks or [])
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "broadcast" and node.get("range") in _BROADCAST_RANGES:
+            return True
+        for value in node.values():
+            if isinstance(value, list):
+                stack.extend(value)
+    return False

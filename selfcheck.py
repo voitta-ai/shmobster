@@ -3125,6 +3125,23 @@ try:
                                         "subtype": "message_changed", "text": "<!here> edited"})
     assert not identity.broadcast_turn({"channel_type": "im", "user": "UHUMAN",
                                         "text": "<!here> in a DM is dm_turn's business"})
+    # ...a prefix that is not a broadcast token is not one: matching `<!here`
+    # bare would turn a pasted snippet into an unsolicited public reply
+    for _no in ("<!here-not-a-broadcast> hi", "`<!here` in a code span",
+                "<!hereabouts>", "<!her>", "text <!channelish> more"):
+        assert not identity.broadcast_turn(
+            {"channel_type": "channel", "user": "UHUMAN", "text": _no}), _no
+    # ...and Slack's own marking is authoritative, whatever the text looks like
+    assert identity.broadcast_turn({
+        "channel_type": "channel", "user": "UHUMAN", "text": "anyone about?",
+        "blocks": [{"type": "rich_text", "elements": [
+            {"type": "rich_text_section", "elements": [
+                {"type": "broadcast", "range": "here"}]}]}]})
+    assert not identity.broadcast_turn({
+        "channel_type": "channel", "user": "UHUMAN", "text": "anyone about?",
+        "blocks": [{"type": "rich_text", "elements": [
+            {"type": "rich_text_section", "elements": [
+                {"type": "text", "text": "no broadcast here"}]}]}]})
     assert not identity.broadcast_turn({})
     assert not identity.dm_turn(None)
     # a sibling agent's DM is still not ours to answer -- it carries bot_id

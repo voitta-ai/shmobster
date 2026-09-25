@@ -4370,4 +4370,39 @@ finally:
 assert not grant._Walker(b"", "/tmp", {"check_command": "make check"}, None, None) \
     .checked("linked worktree on x")[0]
 
+# THE property that bounds the two holes adversarial review found -- that the
+# witness is not tied to the repo being committed, and that an approved check
+# does not register. Neither can widen a grant, because `checked()` is only
+# reached once the three blast-radius predicates have already said yes. The
+# worst case is a tightening that fails to tighten, which is where the feature
+# started. Asserted across the whole matrix rather than argued.
+_tj58c, trajectory._DIR = trajectory._DIR, tempfile.mkdtemp()
+try:
+    trajectory.record("C58W", "U", "1.1", "q",
+                      [trajectory.step("run_shell", {"command": "make check"}, "ok")], "a")
+
+    class _Yes58:
+        def commit_allowed(self, d):
+            return (True, "linked worktree on feat, solo author")
+
+    class _No58:
+        def commit_allowed(self, d):
+            return (False, "on the default branch main")
+
+    for _probe in (_Yes58(), _No58()):
+        _base = _probe.commit_allowed("/tmp")
+        for _pol in ({}, {"check_command": "make check"}, {"check_command": "never-ran"}):
+            _w = grant._Walker(b"", "/tmp", _pol, "C58W", "1.1")
+            _w.probe = _probe
+            _out = _w.checked(_base[1]) if _base[0] else _base
+            # a conjunct never turns a refusal into a grant
+            assert _out[0] <= _base[0], (_pol, _out, _base)
+    # ...and the unsatisfied case really does refuse, so it is a conjunct and
+    # not decoration
+    _w = grant._Walker(b"", "/tmp", {"check_command": "never-ran"}, "C58W", "1.1")
+    _w.probe = _Yes58()
+    assert not _w.checked("linked worktree on feat, solo author")[0]
+finally:
+    trajectory._DIR = _tj58c
+
 print(f"selfcheck OK -- shmobster {_b}")

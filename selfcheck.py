@@ -3100,6 +3100,32 @@ try:
     # a message with no author at all is not somebody talking
     assert not identity.dm_turn({"channel_type": "im", "text": "?"})
     assert not identity.dm_turn({})
+    # an @here/@channel IS addressed to the agent, because it is addressed to
+    # everyone in the room and the agent is in the room (#260). The live case:
+    # an @here asking why nothing was happening reached every human in the
+    # channel and not the one participant able to answer it.
+    for _bcast in ("<!here>", "<!channel>", "<!everyone>", "<!here|@here>"):
+        assert identity.broadcast_turn(
+            {"channel_type": "channel", "user": "UHUMAN", "text": f"{_bcast} anyone?"}), _bcast
+    assert identity.broadcast_turn({"channel_type": "group", "user": "UHUMAN",
+                                    "text": "<!here> a private channel counts"})
+    # ...an ordinary channel message still does not
+    assert not identity.broadcast_turn({"channel_type": "channel", "user": "UHUMAN",
+                                        "text": "just talking among ourselves"})
+    # ...a broadcast that ALSO mentions the agent is left to app_mention, or one
+    # message runs the turn twice
+    assert not identity.broadcast_turn({"channel_type": "channel", "user": "UHUMAN",
+                                        "text": "<!here> <@UBOT> what is up"})
+    # ...and the same three ways of not talking to ourselves
+    assert not identity.broadcast_turn({"channel_type": "channel", "user": "UBOT",
+                                        "text": "<!here> my own post"})
+    assert not identity.broadcast_turn({"channel_type": "channel", "bot_id": "B1",
+                                        "text": "<!here> another bot"})
+    assert not identity.broadcast_turn({"channel_type": "channel", "user": "UHUMAN",
+                                        "subtype": "message_changed", "text": "<!here> edited"})
+    assert not identity.broadcast_turn({"channel_type": "im", "user": "UHUMAN",
+                                        "text": "<!here> in a DM is dm_turn's business"})
+    assert not identity.broadcast_turn({})
     assert not identity.dm_turn(None)
     # a sibling agent's DM is still not ours to answer -- it carries bot_id
     assert not identity.dm_turn({"channel_type": "im", "user": "UOTHER", "bot_id": "B2"})

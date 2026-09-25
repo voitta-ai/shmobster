@@ -74,3 +74,41 @@ def dm_turn(event):
         return False
     retval = bool(event.get("user"))
     return retval
+
+
+# Slack renders a broadcast in message text as <!here>, <!channel> or
+# <!everyone>, whatever the person typed.
+_BROADCASTS = ("<!here", "<!channel", "<!everyone")
+
+
+def broadcast_turn(event):
+    """True when this channel `message` is an @here/@channel the agent should
+    answer (#260).
+
+    A broadcast is addressed to everyone in the room, and the agent is in the
+    room. Requiring `@Cosima` on top of `@here` is the tax #23 removed for
+    DMs, one surface over: the operator's words were "the @here message should
+    reach Slack", after an @here asking why nothing was happening went to
+    everybody except the participant able to answer it.
+
+    Same three ways of not talking to ourselves as `dm_turn`, for the same
+    reason -- and one more that matters here: the agent's own replies carry a
+    `bot_id`, and an agent that answered its own broadcast would hold both ends
+    of a conversation the whole channel can see.
+
+    A mention alongside the broadcast is left to `app_mention`, which Slack
+    delivers separately; answering here too would run the turn twice."""
+    ev = event or {}
+    if ev.get("channel_type") not in ("channel", "group"):
+        return False
+    if ev.get("bot_id") or ev.get("subtype"):
+        return False
+    if not config.BOT_USER_ID or ev.get("user") == config.BOT_USER_ID:
+        return False
+    if not ev.get("user"):
+        return False
+    text = ev.get("text") or ""
+    if config.BOT_USER_ID and f"<@{config.BOT_USER_ID}>" in text:
+        return False  # app_mention has this one
+    retval = any(b in text for b in _BROADCASTS)
+    return retval

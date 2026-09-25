@@ -331,15 +331,22 @@ def on_mention(event, say, client, logger):
 
 @app.event("message")
 def on_message(event, say, client, logger):
-    """A direct message is a turn; a channel message still needs a mention.
+    """A direct message is a turn, and so is an @here/@channel; every other
+    channel message still needs a mention.
 
     Trust does not change with the door: `trusted_users` is per user, so the
     same person has the same authority in a DM as in a channel, and the channel
     id a DM resolves to (`D...`) takes a policy like any other -- one that is
     absent falls back to `default_policy`, so a deployment wanting DMs narrower
-    than its default says so there. The decision itself is `identity.dm_turn`,
-    where it can be tested without a Slack connection."""
-    if not identity.dm_turn(event):
+    than its default says so there. The decisions are `identity.dm_turn` and
+    `identity.broadcast_turn`, where they can be tested without a Slack
+    connection.
+
+    A broadcast is answered because it is addressed to everyone in the room and
+    the agent is in the room (#260). The case that prompted it: an `@here`
+    asking why nothing was happening reached every human in the channel and not
+    the one participant able to answer."""
+    if not (identity.dm_turn(event) or identity.broadcast_turn(event)):
         return
     if _seen(event.get("ts")):
         return  # a mention inside a DM arrives twice, once per event type

@@ -74,3 +74,68 @@ def dm_turn(event):
         return False
     retval = bool(event.get("user"))
     return retval
+
+
+# Slack's own answer first: a real broadcast arrives as a `broadcast` element
+# inside the message's rich-text blocks, with the range it addressed. The text
+# form is the fallback for events delivered without blocks, and it is anchored
+# -- matching the bare prefix `<!here` would turn `<!here-not-a-broadcast>`, or
+# a pasted snippet containing it, into an unsolicited public reply (Codex
+# adversarial review, #260).
+_BROADCAST_RANGES = frozenset(("here", "channel", "everyone"))
+_BROADCAST_RE = re.compile(r"<!(here|channel|everyone)(\|[^>]*)?>")
+
+
+def broadcast_turn(event):
+    """True when this channel `message` is an @here/@channel the agent should
+    answer (#260).
+
+    A broadcast is addressed to everyone in the room, and the agent is in the
+    room. Requiring `@Cosima` on top of `@here` is the tax #23 removed for
+    DMs, one surface over: the operator's words were "the @here message should
+    reach Slack", after an @here asking why nothing was happening went to
+    everybody except the participant able to answer it.
+
+    Same three ways of not talking to ourselves as `dm_turn`, for the same
+    reason -- and one more that matters here: the agent's own replies carry a
+    `bot_id`, and an agent that answered its own broadcast would hold both ends
+    of a conversation the whole channel can see.
+
+    A mention alongside the broadcast is left to `app_mention`, which Slack
+    delivers separately; answering here too would run the turn twice."""
+    ev = event or {}
+    if ev.get("channel_type") not in ("channel", "group"):
+        return False
+    if ev.get("bot_id") or ev.get("subtype"):
+        return False
+    if not config.BOT_USER_ID or ev.get("user") == config.BOT_USER_ID:
+        return False
+    if not ev.get("user"):
+        return False
+    text = ev.get("text") or ""
+    if config.BOT_USER_ID and f"<@{config.BOT_USER_ID}>" in text:
+        return False  # app_mention has this one
+    if _has_broadcast_block(ev.get("blocks")):
+        retval = True
+        return retval
+    retval = bool(_BROADCAST_RE.search(text))
+    return retval
+
+
+def _has_broadcast_block(blocks):
+    """True when Slack itself marked a broadcast in the message's blocks.
+
+    Walked rather than pattern-matched: the element sits inside
+    rich_text -> rich_text_section -> broadcast, and a future nesting should
+    read as "found" rather than as "absent"."""
+    stack = list(blocks or [])
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") == "broadcast" and node.get("range") in _BROADCAST_RANGES:
+            return True
+        for value in node.values():
+            if isinstance(value, list):
+                stack.extend(value)
+    return False

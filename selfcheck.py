@@ -354,6 +354,20 @@ try:
     _aud_seen.clear()
     handler.handle("cron job")
     assert "This turn was asked by" not in _aud_seen["system"], "no user, no claim"
+    # ...and the approval path answers the person who ASKED, not the operator
+    # who clicked (Codex review). A designer's task approved by an operator
+    # comes back in the same thread: technical voice there would be a reply
+    # written for somebody who is not reading it.
+    _aud_seen.clear()
+    _req_id = approvals.add("rm -rf build", "C_AUD", "rm: mutating", requester="UDESIGNER")
+    assert approvals.peek(_req_id, "C_AUD")["requester"] == "UDESIGNER"
+    handler.resume(_req_id, True, "rm -rf build", "(exit 0, no output)",
+                   channel="C_AUD", thread_ts="1.0", user_id="UOPERATOR",
+                   requester=approvals.peek(_req_id, "C_AUD")["requester"])
+    _sys = _aud_seen["system"]
+    assert "NOT an operator" in _sys, "the asker decides the voice"
+    assert "<@UDESIGNER>" in _sys and "<@UOPERATOR>, a trusted" not in _sys, _sys[:400]
+    approvals.pop(_req_id, "C_AUD")
 finally:
     llm.complete, config.TRUSTED_USERS = _aud_saved_llm, _aud_saved_trusted
 

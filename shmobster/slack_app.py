@@ -241,6 +241,7 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             # runs inside that user's own turn, so the resumed turn carries the
             # same identity a typed approval would.
             user_id=user_id, slack_client=client,
+            requester=req.get("requester"),
         )
         if reply is None:
             return  # something else in this thread is still waiting on a human

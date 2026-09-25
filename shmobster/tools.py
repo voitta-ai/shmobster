@@ -166,7 +166,7 @@ def run_shell(command, policy, channel=None, user_id=None):
             )
             retval = execute(command, policy)
             return retval
-        req_id = approvals.add(command, channel, reason, refused=refused)
+        req_id = approvals.add(command, channel, reason, refused=refused, requester=user_id)
         # The whole id, nonce and all (#109). It is what a human types back, and
         # a shortened one would mean a different request after the next restart
         # while reading identically on the card they typed it from.

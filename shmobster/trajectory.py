@@ -71,6 +71,20 @@ def check_witness(records, check_command):
     reason -- a name that promises more than the mechanism delivers is the
     defect this repo has spent a week removing from verdict strings.
 
+    **Two bounds an adversarial review found, both real, both on the same side
+    of the line.** The witness is not bound to the repository being committed:
+    a check run in one tree, followed by a `cd` and a commit in another, is
+    accepted. And a check that needed an approval card does not register, so it
+    witnesses nothing. Neither can widen a grant -- `checked()` is reached only
+    once the three blast-radius predicates have already said yes, so the worst
+    case is a tightening that does not tighten, and the second case simply
+    costs a card. Both are bounded further by #116, which confines a channel to
+    its own tree, so "another tree" means another worktree of the same project
+    rather than an arbitrary repository. Binding the witness to a resolved
+    directory needs a field the trajectory does not record yet; it is worth
+    doing when a channel actually runs two projects, and is dead weight before
+    that.
+
     Staleness is handled by requiring the check to be the LAST shell command
     that ran, rather than by detecting which steps wrote. Write detection would
     inherit the open holes in that surface -- voitta-yolt#157's protected-write

@@ -168,6 +168,13 @@ assert _pass.strip() == "planted-parent-secret-9f3a", _pass
 
 # 1) spine loads bundled SOUL.md
 assert "engineering agent" in spine.load_system_prompt()
+# The voice rule and what a card is FOR (#262). Both are persona-level, because
+# they apply to every reply rather than to one code path: the operator gets the
+# command and the id, everyone else gets what it means for their work, and a
+# card is for blast radius rather than for tidiness.
+_soul = spine.load_system_prompt()
+for _needle in ("Two audiences", "blast radius", "not assumed to know git"):
+    assert _needle in _soul, _needle
 
 # 2) tools.run_shell honors the YOLT verdict (yolt stubbed -> no subprocess)
 yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
@@ -326,6 +333,30 @@ llm.complete = _fake_complete
 reply = handler.handle("run echo")
 assert reply.startswith(":robot_face: [agent: shmobster]"), reply
 assert "ran it: hi_from_tool" in reply, reply
+
+
+# 2c) the prompt says WHICH audience this turn is for (#262). Before this the
+# same words went to the operator who set the deployment up and to a designer
+# who does not use git, and one of them was always served badly.
+_aud_saved_llm, _aud_saved_trusted = llm.complete, config.TRUSTED_USERS
+_aud_seen = {}
+try:
+    config.TRUSTED_USERS = {"UOPERATOR"}
+    llm.complete = lambda messages, tools=None: (
+        _aud_seen.setdefault("system", messages[0]["content"]), _FakeMsg(content="ok"))[1]
+    handler.handle("what happened", user_id="UOPERATOR")
+    assert "<@UOPERATOR>, a trusted operator" in _aud_seen["system"], _aud_seen["system"][:400]
+    _aud_seen.clear()
+    handler.handle("what happened", user_id="UDESIGNER")
+    _sys = _aud_seen["system"]
+    assert "NOT an operator" in _sys and "plain language" in _sys, _sys[:400]
+    # ...and a turn with no user at all says neither rather than guessing
+    _aud_seen.clear()
+    handler.handle("cron job")
+    assert "This turn was asked by" not in _aud_seen["system"], "no user, no claim"
+finally:
+    llm.complete, config.TRUSTED_USERS = _aud_saved_llm, _aud_saved_trusted
+
 
 # 4) thread context (Iter 11) flows into the system prompt
 captured = {}

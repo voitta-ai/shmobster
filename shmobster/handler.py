@@ -6,7 +6,7 @@ Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, cost, learning, llm, memory, policy as policy_mod, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, cost, learning, llm, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -190,6 +190,15 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     _mem = memory.prompt_block(channel)
     if _mem:
         system += "\n\n" + _mem
+    # The channel repo's own instructions (#259). Unlike memory, these ARE
+    # instructions -- a branching strategy is a working agreement, not
+    # background -- and unlike memory they live inside the channel's writable
+    # tree, which is why projectdocs reads them from the last commit rather
+    # than from the working copy. Per turn, so a merged change takes effect
+    # without a restart.
+    _proj = projectdocs.prompt_block(policy)
+    if _proj:
+        system += "\n\n" + _proj
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
     # A plain string when there's nothing attached -- multimodal content lists

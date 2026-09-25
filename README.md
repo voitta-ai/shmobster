@@ -658,6 +658,20 @@ machine's channel layout is versioned separately from the token/key config:
     here, only names -- and a name in this list is as deliberate a grant as an
     `env` entry, so do not list a credential a channel should not hold.
     Policy-file only: `set_policy` over chat cannot add one.
+  - `project_docs` -- extra files from the channel's own repo to read as the
+    project's instructions (#259), on top of `CLAUDE.md`, `AGENTS.md`,
+    `docs/CLAUDE.md` and `docs/AGENTS.md`, which are read when they exist. This
+    is how a repo tells the agent its working agreements -- which branch
+    deploys where, what must not be edited -- so a collaborator does not have to
+    know them. `["docs/BRANCHING-STRATEGY.md"]` is the case that prompted it:
+    the file that mattered had a name no convention would have guessed.
+
+    Read from the last **commit**, not the working copy. The file lives inside
+    the tree the channel can write, and the grant layer runs an in-tree write
+    with no card, so reading the working copy would let one `cat > CLAUDE.md`
+    become the next turn's instructions. A commit still takes effect, and that
+    is the deliberate line: it has an author and a diff.
+
   - `unattended` -- `true` makes this channel's own scope the boundary instead
     of each command's shape (#253). `git`, `gh` and the file verbs then run
     with no approval card, destructive ones included: `rm -rf`, `git push

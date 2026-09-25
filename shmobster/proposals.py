@@ -28,6 +28,17 @@ _LOCK = threading.Lock()
 canonical = approvals.canonical
 
 
+def from_this_boot(key):
+    """Whether this id was minted by the process reading it (#258).
+
+    The same contract as `approvals.from_this_boot`, and required by the same
+    caller: `slack_app._resolve` serves both queues, so an API only one of them
+    has is an AttributeError on the other's card -- raised after the click was
+    acknowledged, which looks like nothing happening at all."""
+    retval = canonical(key).startswith(f"{_NONCE}-")
+    return retval
+
+
 def add(name, why, channel, thread_ts, user_id, scope="channel", scope_reason="",
         amends=None):
     key = f"{_NONCE}-{next(_ids)}"

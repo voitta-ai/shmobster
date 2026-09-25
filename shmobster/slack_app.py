@@ -136,13 +136,37 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
         # nothing must not destroy the only copy of the parked command (#94).
         if queue.status(req_id, channel)[0] == "held":
             return
+        # Say WHICH kind of gone, because the two need different things from
+        # the reader (#258). An id from an earlier boot means the process
+        # restarted under the card: the request is unrecoverable, nobody did
+        # anything wrong, and asking again is the whole fix. An id from THIS
+        # boot that is absent was already acted on, or is not this channel's.
+        stale_boot = not queue.from_this_boot(req_id)
+        if stale_boot:
+            note = (f":information_source: [{req_id}] is from before a restart, so that "
+                    "request no longer exists -- ids are per-boot on purpose, so an old "
+                    "card can never resolve to a newer request. Nothing is lost but the "
+                    "card: ask again, and if it still needs approval you get a fresh one.")
+        else:
+            note = (f":information_source: [{req_id}] is not pending here -- it was already "
+                    "acted on, or it belongs to another channel.")
         try:
-            client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=f":information_source: [{req_id}] is not pending here -- nothing to act on.",
-            )
+            client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=note)
         except Exception:
             logging.exception("could not report a stale approval click")
+        # ...and retire the card, so a fifth press cannot produce a fifth
+        # identical line. #94's rule is that a click resolving nothing must not
+        # destroy the only copy of the parked command -- and this does not: the
+        # command text stays, only the buttons go. Nobody can act on an absent
+        # request through them, which is what made the repeat press useless.
+        try:
+            client.chat_update(
+                channel=channel, ts=message_ts,
+                text=redact.scrub(f"Expired [{req_id}]"),
+                blocks=slack_blocks.expired(req_id, body.get("message"), stale_boot),
+            )
+        except Exception:
+            logging.exception("could not retire the stale card for %s", req_id)
         return
     try:
         # A reaction as well as the rewrite (#206). The claimed-card update

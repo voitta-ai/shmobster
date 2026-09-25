@@ -89,6 +89,34 @@ def claimed(action_id, req_id, user_id, req):
     return retval
 
 
+def expired(req_id, message, stale_boot):
+    """The card a request leaves behind once nothing can act on it (#258).
+
+    Buttons that resolve to nothing are worse than no buttons: the reader
+    presses again, gets the same line, and concludes the agent is broken --
+    which is exactly what four identical "not pending here" replies looked
+    like from the outside.
+
+    #94's rule holds, and is the reason for the `message` argument: a click
+    that resolves nothing must not destroy the only copy of the parked
+    command, so the command is lifted out of the card being replaced rather
+    than dropped. Only the actions block goes."""
+    kept = []
+    for block in (message or {}).get("blocks") or []:
+        if block.get("type") != "actions":
+            # block_id is dropped: Slack rejects an echoed id in a rewritten
+            # message, and the text is the part worth keeping.
+            kept.append({k: v for k, v in block.items() if k != "block_id"})
+    why = ("this card predates a restart, so its request is gone -- ask again"
+           if stale_boot else "already acted on")
+    kept.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": f":lock: *Expired* [{req_id}] -- {why}."}],
+    })
+    retval = kept
+    return retval
+
+
 def proposal(key, prop, tags):
     """The "worth a skill?" card (#129): the agent's flag, tagging the trusted
     users who may act on it, with Open PR / Decline. Same shape as the

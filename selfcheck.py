@@ -4854,4 +4854,81 @@ assert "approvals.pending_in(channel, thread_ts)" in _app59
 assert "waiting on" in _app59 and "no need to re-mention me" in _app59
 assert "already resuming this thread" in _app59, "the other silence stays silent"
 
+# 60) two of #264's four grant gaps, both measured in a live unattended channel
+# that parked 8 cards in 8 minutes on read-only work.
+#
+# `git merge-base` has no writing form -- --is-ancestor, --fork-point,
+# --octopus, --independent and -a only change what it answers -- and its
+# absence cost a card, taking every other segment of the command with it.
+_saved60, yolt_gate.classify = yolt_gate.classify, (
+    lambda cmd, cwd=None: ("unsafe", "stub: only the grant layer may grant this"))
+_pol60 = {"cwd": "/tmp", "github_repos": ["*"]}
+try:
+    for _c in ("git merge-base --is-ancestor A B", "git merge-base A B",
+               "git merge-base --fork-point origin/main", "git merge-base -a A B",
+               "git log --oneline -5 && git merge-base --is-ancestor A B && git status"):
+        _ok, _why = grant.check(_c, _pol60)
+        assert _ok, (_c, _why)
+finally:
+    yolt_gate.classify = _saved60
+
+# The card says why the GRANT LAYER refused, not why the classifier declined to
+# call the whole command safe. Those differ on a compound command -- the
+# classifier reports the verb it stopped at -- and the difference misled: a
+# card reading `git log: no rule`, for a command whose `git log` is granted
+# outright, led the agent to invent a rule for its approver that this codebase
+# does not have.
+#
+# The stub has to answer differently for the whole command and for the failing
+# segment, or the two values coincide and the check proves nothing. A first
+# pass at this test returned one string for everything and "passed" while
+# measuring nothing.
+_cmd60 = "git log --oneline && frobnicate"
+_saved60b = yolt_gate.classify
+yolt_gate.classify = lambda cmd, cwd=None: (
+    ("unsafe", "git log: no rule") if cmd.strip() == _cmd60
+    else ("unsafe", "frobnicate: no rule"))
+try:
+    _out60 = tools.run_shell(_cmd60, _pol60, "C_264")
+    _rid60 = _out60.split("[", 1)[1].split("]", 1)[0]
+    _parked = approvals.peek(_rid60, "C_264")
+    assert _parked["reason"] == "frobnicate: no rule", _parked["reason"]
+    assert "git log" not in _parked["reason"], "the granted segment must not be blamed"
+    approvals.pop(_rid60, "C_264")
+finally:
+    yolt_gate.classify = _saved60b
+
+# The card now carries the grant layer's reason, which quotes more of the
+# command than the classifier's did -- a flag, a path, a positional. Adversarial
+# review asked whether that leaks. It does not: the queue holds the string
+# unscrubbed exactly as it always has for `command`, and every way OUT scrubs.
+# Asserted with a real detector shape rather than a pass-through, because a
+# pass-through stub would make this pass while measuring nothing.
+_real_scrub60, redact.scrub = redact.scrub, (
+    lambda t: re.sub(r"AKIA[0-9A-Z]{16}", "[REDACTED:aws-access-key-id]", t or ""))
+try:
+    _sek = "AKIA" + "ABCDEFGHIJKLMNOP"
+    _lk = approvals.add("echo x", "C_LEAK", "grant refused near " + _sek, thread_ts="1.1")
+    _req = approvals.peek(_lk, "C_LEAK")
+    assert _sek in _req["reason"], "the queue is in-memory and unscrubbed, as for command"
+    assert _sek not in json.dumps(slack_blocks.approval(_lk, _req)), "the CARD must scrub"
+    assert "[REDACTED:aws-access-key-id]" in json.dumps(slack_blocks.approval(_lk, _req))
+    approvals.pop(_lk, "C_LEAK")
+finally:
+    redact.scrub = _real_scrub60
+
+# ...and a classifier REFUSAL still reports the classifier's own grounds, which
+# is the one case where the two are meant to be the same string (#172).
+_saved60c = yolt_gate.classify
+yolt_gate.classify = lambda cmd, cwd=None: ("deny", "rm: tracked file with uncommitted changes")
+try:
+    _out60 = tools.run_shell("rm -rf x", {"cwd": "/tmp"}, "C_264b")
+    _rid60 = _out60.split("[", 1)[1].split("]", 1)[0]
+    _p = approvals.peek(_rid60, "C_264b")
+    assert _p["reason"] == "rm: tracked file with uncommitted changes", _p["reason"]
+    assert _p["refused"] is True
+    approvals.pop(_rid60, "C_264b")
+finally:
+    yolt_gate.classify = _saved60c
+
 print(f"selfcheck OK -- shmobster {_b}")

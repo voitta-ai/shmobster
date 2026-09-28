@@ -167,7 +167,19 @@ def run_shell(command, policy, channel=None, user_id=None, thread_ts=None):
             )
             retval = execute(command, policy)
             return retval
-        req_id = approvals.add(command, channel, reason, refused=refused, requester=user_id,
+        # The card says why the GRANT LAYER refused, not why YOLT declined to
+        # call the whole command safe (#264). Those differ, and the difference
+        # misleads: for `git log && git merge-base ...` the classifier reports
+        # about the verb it stopped at, so a card read `git log: no rule` for a
+        # command whose `git log` the grant layer grants outright. The agent
+        # explaining that card to its approver invented a rule to fit it --
+        # "git reads have no standing rule in the main checkout, only
+        # worktrees" -- which is not true of this codebase.
+        #
+        # `why` is the right value in both branches: on a classifier refusal it
+        # IS `reason`, set three lines up, and otherwise it is the grant
+        # layer's own account of the segment it would not vouch for.
+        req_id = approvals.add(command, channel, why, refused=refused, requester=user_id,
                                thread_ts=thread_ts)
         # The whole id, nonce and all (#109). It is what a human types back, and
         # a shortened one would mean a different request after the next restart

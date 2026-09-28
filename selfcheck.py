@@ -359,15 +359,22 @@ try:
     # comes back in the same thread: technical voice there would be a reply
     # written for somebody who is not reading it.
     _aud_seen.clear()
-    _req_id = approvals.add("rm -rf build", "C_AUD", "rm: mutating", requester="UDESIGNER")
+    _req_id = approvals.add("rm -rf build", "C_AUD", "rm: mutating",
+                            requester="UDESIGNER", thread_ts="1.0")
     assert approvals.peek(_req_id, "C_AUD")["requester"] == "UDESIGNER"
+    _requester = approvals.peek(_req_id, "C_AUD")["requester"]
+    # Consumed before the resume, the way run_approved does it (finish, then
+    # execute, then continue the turn). Leaving it parked used to be invisible
+    # here because the card carried no thread; since #266 an unresolved request
+    # correctly holds its thread, so the setup has to match the real order.
+    approvals.acquire(_req_id, "C_AUD")
+    approvals.finish(_req_id)
     handler.resume(_req_id, True, "rm -rf build", "(exit 0, no output)",
                    channel="C_AUD", thread_ts="1.0", user_id="UOPERATOR",
-                   requester=approvals.peek(_req_id, "C_AUD")["requester"])
+                   requester=_requester)
     _sys = _aud_seen["system"]
     assert "NOT an operator" in _sys, "the asker decides the voice"
     assert "<@UDESIGNER>" in _sys and "<@UOPERATOR>, a trusted" not in _sys, _sys[:400]
-    approvals.pop(_req_id, "C_AUD")
 finally:
     llm.complete, config.TRUSTED_USERS = _aud_saved_llm, _aud_saved_trusted
 

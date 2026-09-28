@@ -185,7 +185,8 @@ def begin_resume(channel, thread_ts):
     with _LOCK:
         if (channel, thread_ts) in _RESUMING:
             retval = False
-        elif any(req.get("channel") == channel and req.get("thread_ts") == thread_ts
+        elif any(req.get("channel") == channel
+                 and req.get("thread_ts") in (thread_ts, None)
                  for req in _PENDING.values()):
             retval = False
         else:
@@ -210,8 +211,16 @@ def pending_in(channel, thread_ts):
     held, which means it is out of _PENDING entirely (#105) and correctly not
     counted here: the click that is resolving it is the one asking."""
     with _LOCK:
+        # A card with no thread counts against EVERY thread in the channel
+        # (#266 review). It cannot happen from the Slack ingest -- `thread_ts`
+        # is `event["thread_ts"] or event["ts"]`, and every message has a ts --
+        # but a future ingest (#25's email, say) that forgot to pass one would
+        # otherwise park a card invisible to this count, and the turn would
+        # resume while it waited. Blocking every thread is over-strict and
+        # visible; being invisible is neither.
         retval = sum(1 for req in _PENDING.values()
-                     if req.get("channel") == channel and req.get("thread_ts") == thread_ts)
+                     if req.get("channel") == channel
+                     and req.get("thread_ts") in (thread_ts, None))
     return retval
 
 

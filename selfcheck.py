@@ -4816,6 +4816,28 @@ assert approvals._PENDING[_d59]["thread_ts"] == "7.7"
 for _k in approvals.ids(_ch59):
     approvals.pop(_k, _ch59)
 
+# A card with NO thread counts against every thread in its channel. It cannot
+# arise from the Slack ingest -- thread_ts is `event["thread_ts"] or
+# event["ts"]` and every message has a ts -- but a future ingest (#25's email)
+# that forgot to pass one would park a card invisible to the count, and the
+# turn would resume while it waited. Blocking every thread is over-strict and
+# visible; invisible is neither. Raised by adversarial review.
+_e59 = approvals.add("echo e", _ch59, "mutating", thread_ts="1.1")
+_n59 = approvals.add("echo n", _ch59, "mutating")          # no thread
+assert approvals.pending_in(_ch59, "1.1") == 2
+assert approvals.pending_in(_ch59, "2.2") == 1, "it blocks the other thread too"
+approvals.acquire(_e59, _ch59)
+approvals.finish(_e59)
+assert not approvals.begin_resume(_ch59, "1.1"), "held by the unattributed card"
+approvals.acquire(_n59, _ch59)
+approvals.finish(_n59)
+assert approvals.begin_resume(_ch59, "1.1")
+approvals.end_resume(_ch59, "1.1")
+# ...and it does not leak across channels
+assert approvals.pending_in("C_266_OTHER", "1.1") == 0
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
 # The ingest says how many remain instead of logging it. The two silences used
 # to look alike -- "still parked" and "already resuming" -- and only the first
 # is worth breaking: the thread showed a command running and then nothing,

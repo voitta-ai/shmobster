@@ -4898,6 +4898,25 @@ try:
 finally:
     yolt_gate.classify = _saved60b
 
+# The card now carries the grant layer's reason, which quotes more of the
+# command than the classifier's did -- a flag, a path, a positional. Adversarial
+# review asked whether that leaks. It does not: the queue holds the string
+# unscrubbed exactly as it always has for `command`, and every way OUT scrubs.
+# Asserted with a real detector shape rather than a pass-through, because a
+# pass-through stub would make this pass while measuring nothing.
+_real_scrub60, redact.scrub = redact.scrub, (
+    lambda t: re.sub(r"AKIA[0-9A-Z]{16}", "[REDACTED:aws-access-key-id]", t or ""))
+try:
+    _sek = "AKIA" + "ABCDEFGHIJKLMNOP"
+    _lk = approvals.add("echo x", "C_LEAK", "grant refused near " + _sek, thread_ts="1.1")
+    _req = approvals.peek(_lk, "C_LEAK")
+    assert _sek in _req["reason"], "the queue is in-memory and unscrubbed, as for command"
+    assert _sek not in json.dumps(slack_blocks.approval(_lk, _req)), "the CARD must scrub"
+    assert "[REDACTED:aws-access-key-id]" in json.dumps(slack_blocks.approval(_lk, _req))
+    approvals.pop(_lk, "C_LEAK")
+finally:
+    redact.scrub = _real_scrub60
+
 # ...and a classifier REFUSAL still reports the classifier's own grounds, which
 # is the one case where the two are meant to be the same string (#172).
 _saved60c = yolt_gate.classify

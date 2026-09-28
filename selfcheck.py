@@ -4536,6 +4536,39 @@ try:
     _w = grant._Walker(b"", "/tmp", {"check_command": "never-ran"}, "C58W", "1.1")
     _w.probe = _Yes58()
     assert not _w.checked("linked worktree on feat, solo author")[0]
+
+    # unattended (#253) does NOT bypass the check. The two land in the same
+    # function and it is a reasonable thing to expect of a mode named
+    # "unattended", so it is asserted rather than left to reading: that mode
+    # relaxes the deny short-circuit, which is a blast-radius judgment about
+    # the channel's own workspace. Whether the code passes its own check is a
+    # different question and nobody said to stop asking it.
+    for _pol in ({"check_command": "never-ran"},
+                 {"check_command": "never-ran", "unattended": True}):
+        _w = grant._Walker(b"", "/tmp", _pol, "C58W", "1.1")
+        _w.probe = _Yes58()
+        assert not _w.checked("linked worktree on feat, solo author")[0], _pol
+    for _pol in ({"check_command": "make check"},
+                 {"check_command": "make check", "unattended": True}):
+        _w = grant._Walker(b"", "/tmp", _pol, "C58W", "1.1")
+        _w.probe = _Yes58()
+        assert _w.checked("linked worktree on feat, solo author")[0], _pol
+    # ...and unattended mode (#253) does not bypass it. The two landed in
+    # parallel and meet here: unattended relaxes the DENY short-circuit, which
+    # is a blast-radius judgement, and this conjunct is a correctness one. The
+    # orthogonality the whole design rests on would be a claim rather than a
+    # property if the newer mode quietly turned it off.
+    for _un in (False, True):
+        _w = grant._Walker(b"", "/tmp",
+                           {"check_command": "never-ran", "unattended": _un},
+                           "C58W", "1.1")
+        _w.probe = _Yes58()
+        assert not _w.checked("linked worktree on feat")[0], _un
+        _w = grant._Walker(b"", "/tmp",
+                           {"check_command": "make check", "unattended": _un},
+                           "C58W", "1.1")
+        _w.probe = _Yes58()
+        assert _w.checked("linked worktree on feat")[0], _un
 finally:
     trajectory._DIR = _tj58c
 

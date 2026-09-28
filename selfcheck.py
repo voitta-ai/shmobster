@@ -359,15 +359,22 @@ try:
     # comes back in the same thread: technical voice there would be a reply
     # written for somebody who is not reading it.
     _aud_seen.clear()
-    _req_id = approvals.add("rm -rf build", "C_AUD", "rm: mutating", requester="UDESIGNER")
+    _req_id = approvals.add("rm -rf build", "C_AUD", "rm: mutating",
+                            requester="UDESIGNER", thread_ts="1.0")
     assert approvals.peek(_req_id, "C_AUD")["requester"] == "UDESIGNER"
+    _requester = approvals.peek(_req_id, "C_AUD")["requester"]
+    # Consumed before the resume, the way run_approved does it (finish, then
+    # execute, then continue the turn). Leaving it parked used to be invisible
+    # here because the card carried no thread; since #266 an unresolved request
+    # correctly holds its thread, so the setup has to match the real order.
+    approvals.acquire(_req_id, "C_AUD")
+    approvals.finish(_req_id)
     handler.resume(_req_id, True, "rm -rf build", "(exit 0, no output)",
                    channel="C_AUD", thread_ts="1.0", user_id="UOPERATOR",
-                   requester=approvals.peek(_req_id, "C_AUD")["requester"])
+                   requester=_requester)
     _sys = _aud_seen["system"]
     assert "NOT an operator" in _sys, "the asker decides the voice"
     assert "<@UDESIGNER>" in _sys and "<@UOPERATOR>, a trusted" not in _sys, _sys[:400]
-    approvals.pop(_req_id, "C_AUD")
 finally:
     llm.complete, config.TRUSTED_USERS = _aud_saved_llm, _aud_saved_trusted
 
@@ -4773,5 +4780,78 @@ try:
         assert _w.checked("linked worktree on feat")[0], _un
 finally:
     trajectory._DIR = _tj58c
+
+# 59) a card parked after the surfacing pass was not counted, so the thread
+# resumed while it was still waiting (#266). The thread is recorded at PARK
+# time now, not when the ingest renders the card.
+#
+# Two wrong diagnoses preceded this one, and both came from reading a function
+# instead of running the path: `add()` looks like it never records the thread,
+# and `claim_unsurfaced()` is where it was actually written. Through the full
+# path the guard always worked; the hole was only the window between the two.
+_ch59 = "C_266"
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
+# recorded at park time, before any ingest touches it
+_a59 = approvals.add("echo a", _ch59, "mutating", thread_ts="1.1")
+assert approvals._PENDING[_a59]["thread_ts"] == "1.1"
+assert approvals.pending_in(_ch59, "1.1") == 1, "counted before it is surfaced"
+
+# THE RACE: surface the first, then park a second. Before the fix pending_in
+# answered 1 with two parked, and begin_resume let the turn continue.
+approvals.claim_unsurfaced(_ch59, "1.1")
+_b59 = approvals.add("echo b", _ch59, "mutating", thread_ts="1.1")
+assert approvals.pending_in(_ch59, "1.1") == 2, "the unsurfaced card must count"
+approvals.acquire(_a59, _ch59)
+approvals.finish(_a59)
+assert not approvals.begin_resume(_ch59, "1.1"), "must not resume while B waits"
+approvals.acquire(_b59, _ch59)
+approvals.finish(_b59)
+assert approvals.begin_resume(_ch59, "1.1"), "resumes on the last resolution"
+approvals.end_resume(_ch59, "1.1")
+
+# claim_unsurfaced no longer overwrites: a card surfaced into a thread other
+# than the one it was parked in would silently move which thread waits on it
+_c59 = approvals.add("echo c", _ch59, "mutating", thread_ts="1.1")
+approvals.claim_unsurfaced(_ch59, "9.9")
+assert approvals._PENDING[_c59]["thread_ts"] == "1.1", "the parked thread wins"
+# ...and it still fills in for a caller that passed none
+_d59 = approvals.add("echo d", _ch59, "mutating")
+approvals.claim_unsurfaced(_ch59, "7.7")
+assert approvals._PENDING[_d59]["thread_ts"] == "7.7"
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
+# A card with NO thread counts against every thread in its channel. It cannot
+# arise from the Slack ingest -- thread_ts is `event["thread_ts"] or
+# event["ts"]` and every message has a ts -- but a future ingest (#25's email)
+# that forgot to pass one would park a card invisible to the count, and the
+# turn would resume while it waited. Blocking every thread is over-strict and
+# visible; invisible is neither. Raised by adversarial review.
+_e59 = approvals.add("echo e", _ch59, "mutating", thread_ts="1.1")
+_n59 = approvals.add("echo n", _ch59, "mutating")          # no thread
+assert approvals.pending_in(_ch59, "1.1") == 2
+assert approvals.pending_in(_ch59, "2.2") == 1, "it blocks the other thread too"
+approvals.acquire(_e59, _ch59)
+approvals.finish(_e59)
+assert not approvals.begin_resume(_ch59, "1.1"), "held by the unattributed card"
+approvals.acquire(_n59, _ch59)
+approvals.finish(_n59)
+assert approvals.begin_resume(_ch59, "1.1")
+approvals.end_resume(_ch59, "1.1")
+# ...and it does not leak across channels
+assert approvals.pending_in("C_266_OTHER", "1.1") == 0
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
+# The ingest says how many remain instead of logging it. The two silences used
+# to look alike -- "still parked" and "already resuming" -- and only the first
+# is worth breaking: the thread showed a command running and then nothing,
+# which reads as a task that died.
+_app59 = open("shmobster/slack_app.py").read()
+assert "approvals.pending_in(channel, thread_ts)" in _app59
+assert "waiting on" in _app59 and "no need to re-mention me" in _app59
+assert "already resuming this thread" in _app59, "the other silence stays silent"
 
 print(f"selfcheck OK -- shmobster {_b}")

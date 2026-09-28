@@ -78,6 +78,12 @@ _BUDGET_MARKERS = (
 # Anthropic states when access returns: "You will regain access on 2026-09-01".
 _REGAIN_DATE = re.compile(r"regain access on (\d{4})-(\d{2})-(\d{2})")
 
+# A stated regain date further out than this is clamped to it. The date comes
+# from an error body, and a far-future one (a proxy's, or a typo'd year) would
+# otherwise take the rung out until someone hand-edits the state file. The same
+# cap voitta-ai/agents' port of this module carries.
+_MAX_PARK_SEC = 31 * 24 * 3600
+
 
 def _parked():
     """Vendor -> expiry, with anything already expired dropped. Pruning on read
@@ -111,7 +117,9 @@ def _live_waterfall():
 def _park_until(message):
     """When the vendor says it will be back, honour that; otherwise use the
     configured window. A date we cannot parse falls back to the window rather
-    than being trusted -- a mis-parse could park a vendor for a year."""
+    than being trusted -- a mis-parse could park a vendor for a year. A date
+    past `_MAX_PARK_SEC` is clamped to it, for the same reason."""
+    now = time.time()
     match = _REGAIN_DATE.search(message or "")
     if match:
         try:
@@ -119,8 +127,14 @@ def _park_until(message):
                 int(match.group(1)), int(match.group(2)), int(match.group(3)),
                 tzinfo=datetime.timezone.utc,
             ).timestamp()
-            if when > time.time():
-                retval = (when, f"until {match.group(0).split('on ')[1]}")
+            date = match.group(0).split("on ")[1]
+            if when > now + _MAX_PARK_SEC:
+                days = _MAX_PARK_SEC // 86400
+                retval = (now + _MAX_PARK_SEC,
+                          f"for {days} days (the vendor said until {date}, past the {days}-day cap)")
+                return retval
+            if when > now:
+                retval = (when, f"until {date}")
                 return retval
         except ValueError:
             logging.warning("waterfall: unparseable regain date; using the default window")
@@ -198,10 +212,16 @@ def _answering_vendor(resp):
 
 
 def is_budget_error(exc):
-    """A 4xx that names a spend problem. Status alone is not enough: 400 is also
-    'your request was malformed', and 402 is unambiguous but rare."""
+    """A 402, or a 400/403 that names a spend problem. A 402 needs no marker:
+    it has no other reading, and OpenRouter's most common one -- "This request
+    requires more credits, or fewer max_tokens ... can only afford N" -- names
+    none, so it was re-dialled every turn. A 400 still needs one, because it is
+    also 'your request was malformed'."""
     status = getattr(exc, "status_code", None)
-    if status not in (400, 402, 403):
+    if status == 402:
+        retval = True
+        return retval
+    if status not in (400, 403):
         retval = False
         return retval
     text = str(getattr(exc, "message", "") or str(exc)).lower()
@@ -261,6 +281,12 @@ def _on_failure(kwargs):
         logging.warning("waterfall: %s timed out; failing over", _deployment_of(kwargs) or "unknown rung")
         return
     if not is_budget_error(exc):
+        # Named too. When a fallback covers the failure nothing raises and
+        # litellm logs nothing at WARNING, so a rung that was rate-limited,
+        # erroring or holding a bad key left no trace at all. Type and status
+        # only: the message can carry the failed request (#72).
+        logging.warning("waterfall: %s failed (%s %s)", _deployment_of(kwargs) or "unknown rung",
+                        type(exc).__name__, getattr(exc, "status_code", None) or "no status")
         return
     park(exc, _deployment_of(kwargs))
 

@@ -31,6 +31,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 
 from . import config
 
@@ -48,7 +49,7 @@ def _classify_raw(command, flags=(_NO_USER_ALLOW,), cwd=None):
     directory is whatever this agent process happens to be in, so the predicate
     reads one repository and answers about another: a false deny citing a branch
     the channel never named, or no deny at all from a non-git directory. The
-    flag exists from 2.0.1 and `preflight` refuses to run without it.
+    flag exists from 2.0.1, and `preflight` refuses the boot without it (#229).
 
     Errors are signalled out of band. On a rejected invocation the classifier
     exits non-zero and writes the reason to stderr, leaving stdout empty -- so a
@@ -103,10 +104,16 @@ def classify(command, cwd=None):
 # non-zero, which `_classify_raw` now reports with its stderr.
 _PROBE = "rm -rf /tmp/shmobster-preflight-probe"
 _PROBE_CWD = "/"
+_PROBE_ATTEMPTS = 3
+_PROBE_RETRY_SECONDS = 1.0
 
 
 def preflight():
-    """Warnings for a YOLT this agent cannot run on.
+    """Reasons this agent must not serve on the YOLT it found (#229).
+
+    The caller refuses the boot on any of them. This returns strings rather
+    than raising so it stays testable offline, which is the same reason
+    logsetup is its own module.
 
     Three failure modes, all silent, all ending in "every command parks":
 
@@ -122,7 +129,16 @@ def preflight():
     channel's, and a `deny` layer asked about the wrong repository does not
     error or warn, it simply never denies (#182)."""
     retval = []
-    data, err = _classify_raw(_PROBE, cwd=_PROBE_CWD)
+    # Retried before it is believed (#229). Since this refuses the boot rather
+    # than logging, a momentary failure -- a slow fork, a machine still waking
+    # -- would become a launchd crash loop, which is how #230's 251 MB log
+    # happened. Three attempts, and only a persistent failure counts.
+    for _attempt in range(_PROBE_ATTEMPTS):
+        data, err = _classify_raw(_PROBE, cwd=_PROBE_CWD)
+        if not err:
+            break
+        if _attempt + 1 < _PROBE_ATTEMPTS:
+            time.sleep(_PROBE_RETRY_SECONDS)
     if err:
         retval.append(err)
         return retval

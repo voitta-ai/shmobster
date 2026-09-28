@@ -478,8 +478,36 @@ def main():
     # What auto-runs is YOLT's rules, not the operator's terminal permissions
     # (#148). Say so at boot, and say it loudly if this host's YOLT is too old
     # to be asked.
-    for warning in yolt_gate.preflight():
-        logging.warning("yolt preflight: %s", warning)
+    # Refuses, rather than warning and serving (#229). The docstring in
+    # yolt_gate and docs/release-notes/v0.9.0.md both said it already did --
+    # "Startup enforces this rather than trusting a pin" -- and it did not, so
+    # an operator upgrading the live box would have believed the agent would
+    # stop them. It will now.
+    #
+    # Enforced rather than logged because stopping REMOVES the risk here, which
+    # is the distinction #231 and #230 turned on. A classifier below the floor
+    # answers `safe` for commands this design assumes it would not, and `safe`
+    # short-circuits to execution before the grant layer is consulted (#222).
+    # A stopped agent runs none of them. Contrast a literal credential in the
+    # config, where stopping leaves the token exactly where it was and removes
+    # only the operator's chance to read the warning.
+    #
+    # No opt-out. An escape hatch for "run anyway with a classifier we know is
+    # wrong" is the kind that gets set once during an upgrade and never unset.
+    # A deployment that genuinely needs the old pairing should run the older
+    # shmobster that was tested against it.
+    _yolt_warnings = yolt_gate.preflight()
+    for warning in _yolt_warnings:
+        logging.error("yolt preflight: %s", warning)
+    if _yolt_warnings:
+        raise SystemExit(
+            "refusing to start: the classifier this agent gates on is not the one "
+            "it needs (see the errors above). Upgrade voitta-yolt to >= 2.0.1, or "
+            "run the shmobster release that was tested against the classifier you "
+            "have. Verify with:\n"
+            "  python3 <yolt>/hooks/grammar_classifier.py --no-user-allow --cwd / "
+            "'rm -rf /tmp/probe'   # expect \"decision\": \"unsafe\""
+        )
     # Credentials at rest in the config file (#231). Warn by default and fail
     # under SHMOBSTER_REQUIRE_ENV_SECRETS=1 -- the shape #204 gave the
     # sensitive-term gate. Refusing to start outright would brick a box on

@@ -106,7 +106,7 @@ def from_this_boot(key):
     return retval
 
 
-def add(command, channel, reason, refused=False, requester=None):
+def add(command, channel, reason, refused=False, requester=None, thread_ts=None):
     key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before
     # the delete: scrub() is fail-closed, and a raise after the insert would
@@ -128,6 +128,18 @@ def add(command, channel, reason, refused=False, requester=None):
             # refusal card for an ordinary park, which would cry wolf on every
             # queue. run_shell is the only caller; a second one must pass it.
             "refused": refused,
+            # The thread this belongs to, recorded at PARK time (#266).
+            # It used to be written only when the ingest surfaced the card,
+            # on the argument that the queue is ingest-agnostic and the tool
+            # loop had no thread. The loop has had one since #238, and the
+            # deferral had a cost: a request parked AFTER a surfacing pass was
+            # invisible to pending_in(), so begin_resume() let the turn
+            # continue while that card was still waiting. Measured -- two
+            # parked, one surfaced, pending_in answered 1.
+            #
+            # claim_unsurfaced() still writes it, for a caller that does not
+            # pass one; the two must agree and it no longer overwrites.
+            "thread_ts": thread_ts,
             # WHOSE task this is, as opposed to who approves it (#262). The
             # resumed turn is the answer to the original question, so it must
             # be written for the person who asked -- a designer's task approved
@@ -218,11 +230,17 @@ def claim_unsurfaced(channel, thread_ts=None):
         for key, req in list(_PENDING.items()):
             if req.get("channel") == channel and not req.get("surfaced"):
                 req["surfaced"] = True
-                # Where it was surfaced, so pending_in() can answer "is this
-                # thread still waiting on anything?" (#169). Recorded here
-                # rather than at add() because the queue is ingest-agnostic:
-                # add() is called from the tool loop, which has no thread.
-                req["thread_ts"] = thread_ts
+                # Where it was surfaced. Since #266 add() records this at
+                # park time, so this is the fallback for a caller that did not
+                # pass one -- and it must not overwrite, because a card
+                # surfaced into a thread other than the one it was parked in
+                # would silently move which thread waits on it.
+                if req.get("thread_ts") is None:
+                    req["thread_ts"] = thread_ts
+                elif thread_ts is not None and req["thread_ts"] != thread_ts:
+                    logging.warning(
+                        "approvals: [%s] was parked in thread %s and surfaced in %s; "
+                        "keeping the parked one", key, req["thread_ts"], thread_ts)
                 out.append((key, req))
     retval = out
     return retval

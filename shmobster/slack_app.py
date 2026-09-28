@@ -244,7 +244,31 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             requester=req.get("requester"),
         )
         if reply is None:
-            return  # something else in this thread is still waiting on a human
+            # Two different silences used to look alike here, and only one of
+            # them is worth breaking (#266). The log line said "still parked,
+            # or already resuming" -- to a file, which is the one reader that
+            # does not need to know, while the thread showed a command running
+            # and then nothing, which reads as a task that died.
+            waiting = approvals.pending_in(channel, thread_ts)
+            if waiting:
+                # Read after the fact, so it can be off by one if a click lands
+                # in between. It is a sentence telling a human roughly how many
+                # cards to clear, not a control decision -- begin_resume makes
+                # that one, under a lock.
+                _plural = "s" if waiting > 1 else ""
+                try:
+                    client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=(f":hourglass: [{req_id}] is resolved, and this task is "
+                              f"waiting on {waiting} more request{_plural} in this "
+                              f"thread. It continues on its own once the last one is "
+                              f"approved or denied -- no need to re-mention me."),
+                    )
+                except Exception:
+                    logging.exception("could not report the remaining parked count")
+            # else: another worker is already resuming this thread; it will
+            # post the continuation, and a second note would be noise.
+            return
         client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=reply)
         # The resumed turn can park the next step, so its cards need posting
         # too -- otherwise the task stops one command later, for the same

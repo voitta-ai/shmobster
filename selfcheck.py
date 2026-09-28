@@ -4774,4 +4774,55 @@ try:
 finally:
     trajectory._DIR = _tj58c
 
+# 59) a card parked after the surfacing pass was not counted, so the thread
+# resumed while it was still waiting (#266). The thread is recorded at PARK
+# time now, not when the ingest renders the card.
+#
+# Two wrong diagnoses preceded this one, and both came from reading a function
+# instead of running the path: `add()` looks like it never records the thread,
+# and `claim_unsurfaced()` is where it was actually written. Through the full
+# path the guard always worked; the hole was only the window between the two.
+_ch59 = "C_266"
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
+# recorded at park time, before any ingest touches it
+_a59 = approvals.add("echo a", _ch59, "mutating", thread_ts="1.1")
+assert approvals._PENDING[_a59]["thread_ts"] == "1.1"
+assert approvals.pending_in(_ch59, "1.1") == 1, "counted before it is surfaced"
+
+# THE RACE: surface the first, then park a second. Before the fix pending_in
+# answered 1 with two parked, and begin_resume let the turn continue.
+approvals.claim_unsurfaced(_ch59, "1.1")
+_b59 = approvals.add("echo b", _ch59, "mutating", thread_ts="1.1")
+assert approvals.pending_in(_ch59, "1.1") == 2, "the unsurfaced card must count"
+approvals.acquire(_a59, _ch59)
+approvals.finish(_a59)
+assert not approvals.begin_resume(_ch59, "1.1"), "must not resume while B waits"
+approvals.acquire(_b59, _ch59)
+approvals.finish(_b59)
+assert approvals.begin_resume(_ch59, "1.1"), "resumes on the last resolution"
+approvals.end_resume(_ch59, "1.1")
+
+# claim_unsurfaced no longer overwrites: a card surfaced into a thread other
+# than the one it was parked in would silently move which thread waits on it
+_c59 = approvals.add("echo c", _ch59, "mutating", thread_ts="1.1")
+approvals.claim_unsurfaced(_ch59, "9.9")
+assert approvals._PENDING[_c59]["thread_ts"] == "1.1", "the parked thread wins"
+# ...and it still fills in for a caller that passed none
+_d59 = approvals.add("echo d", _ch59, "mutating")
+approvals.claim_unsurfaced(_ch59, "7.7")
+assert approvals._PENDING[_d59]["thread_ts"] == "7.7"
+for _k in approvals.ids(_ch59):
+    approvals.pop(_k, _ch59)
+
+# The ingest says how many remain instead of logging it. The two silences used
+# to look alike -- "still parked" and "already resuming" -- and only the first
+# is worth breaking: the thread showed a command running and then nothing,
+# which reads as a task that died.
+_app59 = open("shmobster/slack_app.py").read()
+assert "approvals.pending_in(channel, thread_ts)" in _app59
+assert "waiting on" in _app59 and "no need to re-mention me" in _app59
+assert "already resuming this thread" in _app59, "the other silence stays silent"
+
 print(f"selfcheck OK -- shmobster {_b}")

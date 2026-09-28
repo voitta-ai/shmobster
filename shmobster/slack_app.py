@@ -500,13 +500,22 @@ def main():
     for warning in _yolt_warnings:
         logging.error("yolt preflight: %s", warning)
     if _yolt_warnings:
+        # The remedy differs by case, so the message does too. "Upgrade
+        # voitta-yolt" is the wrong advice for a deployment that never named
+        # one, and an error pointing at the wrong fix is its own defect (#208).
+        if not config.YOLT_CLASSIFIER:
+            _fix = ("No classifier is configured. Set `exec.yolt_classifier` to "
+                    "voitta-yolt's grammar_classifier.py -- this agent's gate chain "
+                    "starts there, and the grant layer alone was never meant to be "
+                    "the whole of it.")
+        else:
+            _fix = ("Upgrade voitta-yolt to >= 2.0.1, or run the shmobster release "
+                    "that was tested against the classifier you have. Verify with:\n"
+                    "  python3 <yolt>/hooks/grammar_classifier.py --no-user-allow "
+                    "--cwd / 'rm -rf /tmp/probe'   # expect \"decision\": \"unsafe\"")
         raise SystemExit(
             "refusing to start: the classifier this agent gates on is not the one "
-            "it needs (see the errors above). Upgrade voitta-yolt to >= 2.0.1, or "
-            "run the shmobster release that was tested against the classifier you "
-            "have. Verify with:\n"
-            "  python3 <yolt>/hooks/grammar_classifier.py --no-user-allow --cwd / "
-            "'rm -rf /tmp/probe'   # expect \"decision\": \"unsafe\""
+            "it needs (see the errors above). " + _fix
         )
     # Credentials at rest in the config file (#231). Warn by default and fail
     # under SHMOBSTER_REQUIRE_ENV_SECRETS=1 -- the shape #204 gave the

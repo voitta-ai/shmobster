@@ -4948,6 +4948,19 @@ assert 'logging.error("yolt preflight' in _app_src59, "and say so at error level
 # no opt-out: an escape hatch for "run anyway with a classifier we know is
 # wrong" is the kind that is set once during an upgrade and never unset
 assert "SHMOBSTER_ALLOW_OLD_YOLT" not in _app_src59
+# the remedy differs by case and so does the message: "upgrade voitta-yolt" is
+# the wrong advice for a deployment that never named one, and an error pointing
+# at the wrong fix is its own defect (#208, filed about exactly that shape)
+assert "No classifier is configured" in _app_src59
+assert "exec.yolt_classifier" in _app_src59
+assert "Upgrade voitta-yolt to >= 2.0.1" in _app_src59
+
+# The refusal retries under launchd rather than exiting once, so it depends on
+# the plist's anti-crash-loop guard being present -- the sample sets it, and
+# its comment cites a 1.8 GB log from an unthrottled respawn. Asserted here
+# because this PR is what makes a boot refusal reachable in normal operation.
+_plist59 = open("deploy/ai.shmobster.plist.sample").read()
+assert "ThrottleInterval" in _plist59, "a refused boot would respawn unthrottled"
 
 # the two sentences that were false are corrected where they were read
 assert "refuses the boot without it (#229)" in open("shmobster/yolt_gate.py").read()

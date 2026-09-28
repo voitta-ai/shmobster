@@ -4930,5 +4930,68 @@ try:
     approvals.pop(_rid60, "C_264b")
 finally:
     yolt_gate.classify = _saved60c
+# 59) the preflight refuses the boot instead of warning and serving (#229).
+# Its own docstring said it already did -- "preflight refuses to run without
+# it" -- and so did docs/release-notes/v0.9.0.md, in the sentence an operator
+# upgrading the live box would read: "Startup enforces this rather than
+# trusting a pin." Neither was true. slack_app logged the warnings and served.
+#
+# Enforced rather than logged because stopping REMOVES the risk here, which is
+# the distinction #230 and #231 turned on: a classifier below the floor answers
+# `safe` for commands this design assumes it would not, and `safe`
+# short-circuits to execution before the grant layer is consulted (#222). A
+# stopped agent runs none of them. A stopped agent does not unwrite a token.
+_app_src59 = open("shmobster/slack_app.py").read()
+assert "yolt_gate.preflight()" in _app_src59
+assert "refusing to start" in _app_src59, "the boot must refuse, not warn"
+assert 'logging.error("yolt preflight' in _app_src59, "and say so at error level"
+# no opt-out: an escape hatch for "run anyway with a classifier we know is
+# wrong" is the kind that is set once during an upgrade and never unset
+assert "SHMOBSTER_ALLOW_OLD_YOLT" not in _app_src59
+# the remedy differs by case and so does the message: "upgrade voitta-yolt" is
+# the wrong advice for a deployment that never named one, and an error pointing
+# at the wrong fix is its own defect (#208, filed about exactly that shape)
+assert "No classifier is configured" in _app_src59
+assert "exec.yolt_classifier" in _app_src59
+assert "Upgrade voitta-yolt to >= 2.0.1" in _app_src59
+
+# The refusal retries under launchd rather than exiting once, so it depends on
+# the plist's anti-crash-loop guard being present -- the sample sets it, and
+# its comment cites a 1.8 GB log from an unthrottled respawn. Asserted here
+# because this PR is what makes a boot refusal reachable in normal operation.
+_plist59 = open("deploy/ai.shmobster.plist.sample").read()
+assert "ThrottleInterval" in _plist59, "a refused boot would respawn unthrottled"
+
+# the two sentences that were false are corrected where they were read
+assert "refuses the boot without it (#229)" in open("shmobster/yolt_gate.py").read()
+_v9 = open("docs/release-notes/v0.9.0.md").read()
+assert "Correction, 2026-09-28 (#229)" in _v9, "the release note must correct itself in place"
+assert "do not rely on the agent to stop you" in _v9.replace("\n> ", " ").replace("\n", " ")
+
+# A TRANSIENT probe failure must not refuse the boot, or the refusal becomes a
+# launchd crash loop -- which is exactly how #230's 251 MB log happened. Three
+# attempts, and only a persistent failure counts.
+_saved59 = yolt_gate._classify_raw
+_rs59, yolt_gate._PROBE_RETRY_SECONDS = yolt_gate._PROBE_RETRY_SECONDS, 0
+try:
+    _calls = {"n": 0}
+
+    def _flaky(command, flags=(yolt_gate._NO_USER_ALLOW,), cwd=None):
+        _calls["n"] += 1
+        if _calls["n"] < 3:
+            return (None, "yolt error: [Errno 35] Resource temporarily unavailable")
+        return ({"decision": "unsafe", "allow_patterns": 0}, None)
+
+    yolt_gate._classify_raw = _flaky
+    assert yolt_gate.preflight() == [], "a transient failure must not refuse the boot"
+    assert _calls["n"] == 3, _calls
+
+    # ...and a persistent one is still reported, rather than retried into silence
+    yolt_gate._classify_raw = lambda *a, **k: (None, "yolt error: gone")
+    _out59 = yolt_gate.preflight()
+    assert len(_out59) == 1 and "gone" in _out59[0], _out59
+finally:
+    yolt_gate._classify_raw = _saved59
+    yolt_gate._PROBE_RETRY_SECONDS = _rs59
 
 print(f"selfcheck OK -- shmobster {_b}")

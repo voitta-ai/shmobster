@@ -313,7 +313,13 @@ def _git_branch_refusal(rest):
 # set, because `git branch -D x` deletes.
 GIT_READ = frozenset((
     "status", "log", "show", "diff", "rev-parse", "ls-files", "blame",
-    "describe", "shortlog", "cat-file", "ls-tree", "for-each-ref",
+    "describe", "shortlog", "cat-file", "ls-tree",
+    # Ancestry questions, all of them read-only whatever follows (#264).
+    # `merge-base` has no writing form: --is-ancestor, --fork-point, --octopus,
+    # --independent and -a only change what it answers. Its absence cost a card
+    # for `git merge-base --is-ancestor A B`, and took every other segment of
+    # the command with it.
+    "merge-base", "for-each-ref",
 ))
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways

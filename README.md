@@ -1337,6 +1337,11 @@ operator's actual codex login is far worse than one dead rung. Instead:
 Either way the fix is `codex login` -- or just using the codex CLI for anything,
 which rotates the file as a side effect.
 
+A hung or unreachable endpoint is raised as a timeout or a 500, which LiteLLM
+cools the same way. Not as `APIConnectionError`: LiteLLM never cools an error
+carrying that name, so a hung codex would be dialled twice on every turn, each
+attempt waiting out the full rung timeout before the chain moved on.
+
 Why read the token rather than drive the binary (`codex exec`, or the
 `codex app-server` protocol OpenClaw's codex extension speaks): both of those
 keep the token out of our hands, but both hand us an *agent* -- codex brings its
@@ -1360,9 +1365,9 @@ primary's exception never propagates, so an `except` only ever sees the case
 where the *whole chain* is dead -- which is the one case parking cannot help.
 The callback sees each deployment's failure regardless.
 
-On a 4xx whose message names a spend problem, the vendor is dropped from the
-chain and the Router is rebuilt without it, so it is never dialled again until
-its window expires:
+On a 402, or a 400/403 whose message names a spend problem, the vendor is
+dropped from the chain and the Router is rebuilt without it, so it is never
+dialled again until its window expires:
 
     waterfall: openrouter is out of budget; parked for 3600s
     waterfall: rebuilding, chain is now anthropic -> gemini -> requesty
@@ -1372,13 +1377,17 @@ its window expires:
   `kwargs["model"]`: litellm strips the provider prefix there, so two vendors
   reached through different routers both report `openai/gpt-4o` and the wrong
   one gets parked. An ambiguous match parks nothing.
-- **Status alone is not enough.** A 400 is also "your request was malformed", and
-  parking a vendor for an hour over one bad prompt would be worse than the
-  problem. The message has to name money too.
+- **Status alone is not enough, except for 402.** A 400 is also "your request
+  was malformed", and parking a vendor for an hour over one bad prompt would be
+  worse than the problem. The message has to name money too. A 402 has no other
+  reading, and OpenRouter's most common one -- *"This request requires more
+  credits, or fewer max_tokens ... can only afford N"* -- names no marker, so a
+  402 parks on its status.
 - **A stated recovery date wins.** Anthropic says `You will regain access on
   YYYY-MM-DD`; that date is used instead of the window. A date that fails to
   parse falls back to the window rather than being trusted -- a mis-parse could
-  park a vendor for a year.
+  park a vendor for a year -- and a date more than 31 days out is clamped to 31
+  days for the same reason.
 - **The window is `budget_park_sec`** (default 3600). `0` disables parking.
 - **It survives restarts.** Expiries live in `shmobster-state.json`; the watchdog
   restarts this process routinely, and an in-memory park would be re-learned
@@ -1395,6 +1404,14 @@ Rate limits are the other half and LiteLLM does handle those: `allowed_fails=0`
 now cools a deployment on the *first* 429 rather than after a threshold (#51).
 A Slack agent's traffic is bursty and low-volume, so by the time a threshold is
 reached the burst is over and every failure in it was a wasted round-trip.
+
+Every other failure a fallback covers is logged by name, type and status only:
+
+    waterfall: openrouter/openai/gpt-4o failed (RateLimitError 429)
+
+Nothing raises when the chain still answers, and LiteLLM itself logs nothing at
+WARNING, so without that line a rung that is throttled or holding a bad key
+leaves no trace.
 
 ## Reading a URL (#62)
 

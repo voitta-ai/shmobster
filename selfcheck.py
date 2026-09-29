@@ -4994,4 +4994,41 @@ finally:
     yolt_gate._classify_raw = _saved59
     yolt_gate._PROBE_RETRY_SECONDS = _rs59
 
+# 61) four places the waterfall dialled a dead rung, or failed over silently
+# (#274, follow-up to #80).
+#
+# A 402 parks on its status alone. OpenRouter's most common one -- "can only
+# afford N" -- names no marker, and litellm does not cool 402 either, so that
+# rung was re-dialled every turn. A 400 still needs a marker: it is also "your
+# request was malformed".
+class _BudgetExc(Exception):
+    def __init__(self, status, message=""):
+        self.status_code, self.message = status, message
+
+
+assert llm.is_budget_error(_BudgetExc(402, "can only afford 3 tokens"))
+assert llm.is_budget_error(_BudgetExc(402, ""))
+assert not llm.is_budget_error(_BudgetExc(400, "malformed"))
+assert not llm.is_budget_error(_BudgetExc(403, "nope"))
+assert llm.is_budget_error(_BudgetExc(400, "insufficient credits"))
+assert not llm.is_budget_error(_BudgetExc(500, "insufficient credits")), "5xx is not budget"
+
+# A stated regain date is clamped. It comes out of an error body, so a
+# far-future or typo'd year would otherwise hold the rung until someone
+# hand-edits the state file.
+_when, _why = llm._park_until("You will regain access on 2999-01-01")
+assert _when - time.time() <= llm._MAX_PARK_SEC + 5, _why
+assert "cap" in _why, _why
+_when, _why = llm._park_until("You will regain access on 2026-10-05")
+assert "until 2026-10-05" in _why, _why
+
+# codex must not raise APIConnectionError for a dead rung: litellm's
+# cooldown_handlers carries ignored_strings = ["APIConnectionError"] and
+# returns False when the exception text contains it, so num_retries=1 dialled
+# a hung rung twice a turn at the full timeout each time. 408 and 500 are both
+# cooled by that same function.
+_codex_src = open("shmobster/codex_llm.py").read()
+assert "raise litellm.APIConnectionError" not in _codex_src, "the Router will not cool it"
+assert "litellm.Timeout" in _codex_src and "litellm.InternalServerError" in _codex_src
+
 print(f"selfcheck OK -- shmobster {_b}")

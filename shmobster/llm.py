@@ -160,14 +160,28 @@ def _vendor_for(deployment, exc=None):
     """Which configured vendor this failure belongs to.
 
     Exact match on the deployment string first. Only if that is unavailable do we
-    fall back to provider+suffix matching, and a suffix that matches more than
-    one vendor identifies none of them -- parking the wrong vendor would take a
-    working rung out of the chain, which is worse than not parking at all."""
+    fall back to provider+suffix matching. Either way a string that matches more
+    than one vendor identifies none of them -- parking the wrong vendor would
+    take a working rung out of the chain, which is worse than not parking at
+    all, and that holds for an exact match as much as for a suffix (#289)."""
     if deployment:
-        for vendor in config.WATERFALL:
-            if vendor.get("model") == deployment:
-                retval = vendor.get("name")
-                return retval
+        # Same ambiguity rule as the suffix branch below (#289). Two rungs may
+        # legitimately share a `model` and differ only in api_key or api_base --
+        # the same model on two accounts, for rate limits that throttle
+        # independently, is a normal reason to add a fallback. Returning the
+        # first match then parks whichever rung happens to be listed first,
+        # every time, and the one taken out of the chain is the one that works.
+        matches = [v.get("name") for v in config.WATERFALL
+                   if v.get("model") == deployment]
+        if len(matches) == 1:
+            retval = matches[0]
+            return retval
+        if len(matches) > 1:
+            logging.warning(
+                "waterfall: deployment %r matches %d configured vendors; not "
+                "parking any -- give them distinct models", deployment, len(matches))
+            retval = None
+            return retval
     model = str(getattr(exc, "model", "") or "")
     provider = str(getattr(exc, "llm_provider", "") or "")
     if model:

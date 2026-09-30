@@ -539,6 +539,8 @@ def main():
                 "and the tree %s", _ch,
                 _pol.get("github_repos") or "(UNRESTRICTED -- every repo the token reaches)",
                 policy_mod.cwd_for(_pol))
+    for warning in config.waterfall_warnings():
+        logging.warning("config: %s", warning)
     _secret_warnings = config.secret_warnings()
     for warning in _secret_warnings:
         logging.warning("config: %s", warning)

@@ -89,6 +89,35 @@ def _literal_secrets(raw, path=""):
     return retval
 
 
+def waterfall_warnings():
+    """Startup warnings about a waterfall the failure path cannot reason about.
+
+    Two rungs are allowed to share a `model` -- the same model on two accounts,
+    for rate limits that throttle independently, is a normal reason to add a
+    fallback. What is not workable is *identifying* which of them failed:
+    `llm._vendor_for` has only the model string to go on, so a shared one is
+    ambiguous and nothing gets parked (#289). That is the safe answer, but it
+    is silently degraded behaviour -- the dead rung is re-dialled every turn --
+    and until something fails there is nothing to see. Say it at boot instead.
+
+    Names models, never keys: two rungs differing only in `api_key` is exactly
+    the shape this is about, and the key is the part that must not be logged."""
+    retval = []
+    seen = {}
+    for vendor in WATERFALL:
+        model = vendor.get("model", "")
+        if model:
+            seen.setdefault(model, []).append(vendor.get("name") or "(unnamed)")
+    dupes = {m: names for m, names in seen.items() if len(names) > 1}
+    for model, names in sorted(dupes.items()):
+        retval.append(
+            f"waterfall rungs {', '.join(names)} all use model {model!r}, so a "
+            "failure cannot be attributed to one of them and none will be parked "
+            "-- give them distinct models"
+        )
+    return retval
+
+
 def secret_warnings():
     """Startup warnings about credentials at rest in the config file.
 

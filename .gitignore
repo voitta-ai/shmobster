@@ -7,8 +7,8 @@ __pycache__/
 *~
 graphify-out/
 logs/
-shmobster-config.json
-shmobster-policies.json
+shmobster-config.json*
+shmobster-policies.json*
 deploy/ai.shmobster.plist
 shmobster-state.json
 trajectories/

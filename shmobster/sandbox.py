@@ -137,6 +137,52 @@ def _ancestors(path, stop):
     return retval
 
 
+def _git_root(path):
+    """The nearest directory at or above `path` holding a `.git`, or None."""
+    cur = os.path.realpath(path)
+    retval = None
+    while True:
+        if os.path.exists(os.path.join(cur, ".git")):
+            retval = cur
+            break
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return retval
+
+
+def self_roots():
+    """What this agent runs from, as realpaths: its own checkout, its venv, its
+    state, log and trajectory files, and the voitta-yolt checkout it asks for a
+    verdict. No channel may write any of them, whatever its tree covers.
+
+    A channel's tree is the operator's choice, and a wide one -- a parent of
+    several repos -- can contain the deployment itself. The grant layer vouches
+    for an in-tree write on the verb, so without this a `sed -i` on the
+    classifier is granted as an in-tree write and changes the verdict on the
+    very next command (it is spawned per call), and a `tee` into this package
+    or its venv runs unconfined at the next restart. SELF_FILES and the spine
+    cover single files; this covers the code that reads them."""
+    from . import state, trajectory  # deferred: both are leaves, kept off import order
+    pkg = os.path.dirname(os.path.realpath(__file__))
+    out = [_git_root(pkg) or pkg]
+    if sys.prefix != sys.base_prefix:
+        out.append(os.path.realpath(sys.prefix))
+    out.append(os.path.realpath(state._PATH))
+    out.append(os.path.realpath(trajectory._DIR))
+    if config.LOG_PATH:
+        out.append(os.path.dirname(_real(config.LOG_PATH)))
+    if config.YOLT_CLASSIFIER:
+        classifier = _real(config.YOLT_CLASSIFIER)
+        # Its checkout when it has one; otherwise only its own directory, never
+        # a parent guessed from the layout -- a stub in $TMPDIR would take the
+        # whole temp dir with it.
+        out.append(_git_root(os.path.dirname(classifier)) or os.path.dirname(classifier))
+    retval = list(dict.fromkeys(out))
+    return retval
+
+
 def roots(pol):
     """(write_paths, read_paths, deny_roots) for a channel policy, all
     realpaths. read_paths excludes what is already in write_paths."""
@@ -219,6 +265,23 @@ def profile(pol):
             "(deny file-write* "
             + " ".join(f"(literal {_quote(p)})" for p in _spine)
             + ")"
+        )
+    # The deployment's own code, venv, runtime files and classifier: read left
+    # alone, writes denied (see self_roots). A channel whose tree IS the live
+    # checkout keeps git working -- `git worktree add` and a commit in a
+    # worktree write the main `.git/` -- so that gitdir is carved back, but
+    # only where the channel could already write it; an allow here must not
+    # widen anyone. The hooks/config deny below still wins inside it.
+    _self = self_roots()
+    lines.append(
+        "(deny file-write* " + " ".join(f"(subpath {_quote(p)})" for p in _self) + ")"
+    )
+    _gitdirs = [os.path.join(p, ".git") for p in _self
+                if os.path.isdir(os.path.join(p, ".git"))
+                and any(_under(os.path.join(p, ".git"), w) for w in writes)]
+    if _gitdirs:
+        lines.append(
+            "(allow file-write* " + " ".join(f"(subpath {_quote(p)})" for p in _gitdirs) + ")"
         )
     # git's own directory is not data, it is code git will run (#184). The
     # grant layer vouches for an in-tree write on the verb alone, and `.git/`

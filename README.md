@@ -1243,6 +1243,65 @@ on a tool-schema request to `meta/llama-3.3-70b-instruct`); re-probed on
 a second, so it is in the example config now. The waterfall itself does not
 yet pass a timeout -- #125.
 
+#### An org-hosted OpenAI-compatible gateway
+
+A gateway such as Requesty is an OpenAI-compatible endpoint, so a rung is an
+ordinary `api_base` vendor. Three details are not guessable, and one probe lies.
+
+**The base URL may not be the vendor's public host.** An organisation can route
+through its own deployment. A key that is valid there answers `403
+{"origin":"router","message":"Invalid authorization token"}` against the
+vendor's public host -- indistinguishable from a revoked key. Probing the wrong
+host therefore reads as a dead credential and sends you off to rotate a key that
+was fine. Get the base URL from whoever issued the key; it is deployment
+specific and does not belong in this repo.
+
+**The model string doubles the provider.** litellm needs the `openai/` prefix
+*and* the full gateway model id after it:
+
+    {
+      "name": "gateway",
+      "model": "openai/anthropic/claude-sonnet-5",
+      "api_key": "${GATEWAY_API_KEY}",
+      "api_base": "${GATEWAY_BASE_URL}"
+    }
+
+Without `openai/`, litellm resolves `anthropic/...` to Anthropic directly and
+ignores `api_base` -- so a wrong-looking auth error is really a routing error.
+
+**Check whether extra headers are actually required.** A gateway's runbook for a
+different client may mandate a header (Codex CLI is told to send `X-Title`).
+Measured against `/v1/chat/completions`, litellm needs no such header here. A
+waterfall entry has no header field, so confirm before assuming one is needed:
+the fields are `name`, `model`, `api_key`, `api_base`, `timeout_sec`.
+
+##### Do not use `/v1/models` as a credential check
+
+It answers differently on every gateway, and on both configured here it invites
+the wrong conclusion:
+
+| `GET /v1/models` | no key | bad key | good key |
+|---|---|---|---|
+| gateway (Requesty-style) | **200** | 403 | 200 |
+| NVIDIA NIM | **200** | **200** | 200 |
+
+On NVIDIA a 200 means nothing at all; on the gateway it means something only if
+a key was actually sent. `POST /v1/chat/completions` is the only call that
+answers on both. Its replies on a Requesty-style gateway:
+
+| request | reply | means |
+|---|---|---|
+| bad key | 403 `Invalid authorization token` | key is dead |
+| good key, unknown model | 400 `Invalid model ID` | **key is good** |
+| good key, disallowed model | 403 `Provider blocked by policy` | model not enabled for that user |
+
+That 400 is the cheapest positive proof a key is live: send `{}` as the body and
+read the error. The general rule, which cost a wrong call here: an endpoint that
+returns a catalogue is usually not the endpoint that checks your credential.
+
+`anthropic/claude-sonnet-5` through such a gateway passes the tool-call gate
+above -- it returns a `run_shell` tool call, not prose.
+
 #### Finding free, tool-capable models
 
 **OpenRouter** -- free ids end in `:free`; the catalogue lists capabilities:

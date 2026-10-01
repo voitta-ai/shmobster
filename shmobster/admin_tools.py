@@ -8,7 +8,7 @@ the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
 policy still bounds its scope when it runs. reload_skills re-reads the skills
 catalog (#74) -- gated too, since it changes which instructions I will follow."""
-from . import approvals, config, learning, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
+from . import approvals, config, learning, mcp, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
 
 TOOLS = [
     {
@@ -423,8 +423,15 @@ def run_approved(request_id, req, ctx):
     consume it (finish before execute -- the same pop-then-run rule as
     always), run it under the channel policy, report."""
     approvals.finish(request_id)
-    policy = policy_mod.resolve(ctx.get("channel"))
-    out = tools.execute(req["command"], policy)
+    payload = req.get("payload")
+    if payload and payload.get("kind") == "mcp":
+        # A non-shell approval (#299): route on the payload kind rather than
+        # running the display string as a command. mcp.run_payload re-reads the
+        # server's credentials from the live policy; they never lived in req.
+        out = mcp.run_payload(payload, ctx.get("channel"))
+    else:
+        policy = policy_mod.resolve(ctx.get("channel"))
+        out = tools.execute(req["command"], policy)
     retval = f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"
     return retval
 

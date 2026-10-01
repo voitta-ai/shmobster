@@ -106,7 +106,7 @@ def from_this_boot(key):
     return retval
 
 
-def add(command, channel, reason, refused=False, requester=None, thread_ts=None):
+def add(command, channel, reason, refused=False, requester=None, thread_ts=None, payload=None):
     key = f"{_NONCE}-{next(_ids)}"
     # Logged before the queue is touched, for the same reason pop logs before
     # the delete: scrub() is fail-closed, and a raise after the insert would
@@ -145,6 +145,13 @@ def add(command, channel, reason, refused=False, requester=None, thread_ts=None)
             # be written for the person who asked -- a designer's task approved
             # by an operator still reaches the designer, in the same thread.
             "requester": requester,
+            # A structured call for a non-shell approval (#299). run_shell parks
+            # a command string and run_approved executes it with tools.execute;
+            # an MCP mutate parks this instead -- {"kind": "mcp", server, tool,
+            # arguments, url, timeout} -- and run_approved routes on the kind.
+            # Credentials are NOT here: only the server name, so headers are
+            # re-read from the live policy at execution.
+            "payload": payload,
         }
         # Overflow never evicts a held request (#103). acquire() leaves it in
         # the queue until the approve path pops it, so an oldest-first eviction

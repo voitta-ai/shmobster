@@ -79,6 +79,11 @@ def known_values():
     for policy in list(config.CHANNEL_POLICIES.values()) + [config.DEFAULT_POLICY]:
         for value in (policy.get("env") or {}).values():
             values.append(value)
+        # MCP servers carry their credentials in per-server request headers
+        # (#299), a second place a secret lives besides `env` -- scrub those too.
+        for server in (policy.get("mcp") or {}).values():
+            for value in (server.get("headers") or {}).values():
+                values.append(value)
     retval = sorted(
         {v for v in values if isinstance(v, str) and len(v) >= _MIN_VALUE_LEN},
         key=len,

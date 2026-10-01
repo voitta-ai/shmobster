@@ -1275,6 +1275,36 @@ Measured against `/v1/chat/completions`, litellm needs no such header here. A
 waterfall entry has no header field, so confirm before assuming one is needed:
 the fields are `name`, `model`, `api_key`, `api_base`, `timeout_sec`.
 
+##### A gateway may drop images silently, per route
+
+Vision is not a property of the gateway, it is a property of the route behind
+it, and one of them fails by **discarding the image and answering anyway**.
+
+Measured on `/v1/chat/completions` with a 16x16 solid-colour PNG as an
+`image_url` part, asking for the colour in one word, three colours per model:
+
+| route | correct | behaviour |
+|---|---|---|
+| `anthropic/claude-haiku-4-5` | 3/3 | sees the image |
+| `vertex/gemini-2.5-flash` | 3/3 | sees the image |
+| `openai/gpt-4.1-mini` | **0/3** | image dropped; confidently names a colour anyway |
+
+The dropped case answered `Blue` for red, `Yellow` for blue and `Red` for
+yellow -- no error, no warning, no refusal, and nothing in the response says an
+image was removed. One wrong answer would not have shown this; **send at least
+three distinct images and check the answers track the inputs**, because a model
+guessing from the text alone is right often enough to look like a flaky model
+rather than a dropped attachment.
+
+So before relying on a rung for anything with an image in it, run that control
+against the exact route. Do not generalise from the vendor's advertised vision
+support, and do not generalise from one route to another on the same gateway:
+`vertex/gemini-2.5-flash` passed while `openai/gpt-4.1-mini` did not, so this is
+not "Claude only".
+
+(The Anthropic-messages path of the same gateway shows the same split, where the
+dropped case instead asks the user to upload the image.)
+
 ##### Do not use `/v1/models` as a credential check
 
 It answers differently on every gateway, and on both configured here it invites

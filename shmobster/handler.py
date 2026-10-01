@@ -6,7 +6,7 @@ Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, cost, learning, llm, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, cost, learning, llm, mcp, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -146,6 +146,11 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     skill_menu = skills.prompt_block(channel)
     if skill_menu:
         tool_schemas += skills.TOOLS
+    # The channel's allow-listed MCP tools (#299), rebuilt per turn like skills:
+    # a policy edit or a server coming up takes effect next turn, no restart.
+    # tool_schemas() also populates mcp's per-turn resolution map that dispatch
+    # reads, so this must run before the tool loop.
+    tool_schemas += mcp.tool_schemas(channel, policy)
     system = _system_prompt()
     if skill_menu:
         system += "\n\n" + skill_menu
@@ -290,6 +295,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 result = learning.dispatch(name, args, ctx)
             elif name in skills.NAMES:
                 result = skills.dispatch(name, args, channel)
+            elif name in mcp.names(channel, policy):
+                # A read tool runs here; a mutate tool parks and returns the
+                # pending message, resumed later like any approved command (#299).
+                result = mcp.dispatch(name, args, policy, channel, thread_ts, user_id)
             elif name in slack_tools.NAMES:
                 # The turn's channel and policy, so a slack tool is scoped to
                 # where the turn is happening rather than to any channel the

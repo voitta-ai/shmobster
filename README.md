@@ -695,9 +695,47 @@ machine's channel layout is versioned separately from the token/key config:
     with their repos and tree, because a channel that never parks anything
     looks exactly like a quiet one.
 
-Because `env` may hold secrets, treat `shmobster-policies.json` like the main
-config: gitignored, `chmod 600`. For back-compat, inline `channel_policies` /
-`default_policy` in the main config are still honored when no
+  - `mcp` -- MCP servers this channel may use, and which of each server's tools,
+    turning any MCP server into gated tools the agent can call (#299). The
+    default, like every capability, is none. Shape:
+
+        "mcp": {
+          "voitta-rag": {
+            "url": "http://localhost:58000/mcp/mcp",
+            "headers": {"X-User-Name": "${RAG_USER}"},
+            "timeout": 30,
+            "tools": {
+              "search": {
+                "mode": "read",
+                "defaults": {"include_folders": ["email", "contracts"]}
+              }
+            }
+          }
+        }
+
+    Three rules, each matching how shell commands already work. An **unlisted
+    tool is never exposed** -- the `tools` map is the menu, not a filter over the
+    server's full set, so a server that also offers `delete_memory` does not put
+    it in front of the model unless the policy names it. Each listed tool is
+    **`read` or `mutate`**: a `read` runs with no card, a `mutate` parks for a
+    trusted approval and runs only once approved, through the same queue and
+    resume as a shell command (#48, #169). And **credentials are injected per
+    server** through `headers`, whose values are `${VAR}` references expanded at
+    load like `env` (#73); they never enter a prompt, a card or a log, and a
+    parked `mutate` stores only the server name, so the headers are re-read from
+    the policy at execution rather than sitting in the queue.
+
+    `defaults` are arguments the policy forces on every call -- voitta-rag's
+    `include_folders` must be sent on every search or it searches every indexed
+    folder -- so they override whatever the model passes and are dropped from the
+    schema the model sees. The tool names the model calls are `mcp_<server>_<tool>`.
+    The server's host belongs on this channel's `allow_domains` too; the client
+    only ever connects to the URLs the policy names, so naming the server is the
+    grant.
+
+Because `env` and `mcp` headers may hold secrets, treat `shmobster-policies.json`
+like the main config: gitignored, `chmod 600`. For back-compat, inline
+`channel_policies` / `default_policy` in the main config are still honored when no
 `shmobster-policies.json` exists.
 
 **The agent's own standing prompt is not writable from a channel either**

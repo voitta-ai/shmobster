@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, cost as cost_mod, gitcfg, grant, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
+from . import approvals, config, cost as cost_mod, gitcfg, grant, mcp, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -373,6 +373,8 @@ def capabilities(policy, channel=None):
     lines.append("- writable beyond the tree: " + _listed(policy.get("allow_write"), "nothing"))
     lines.append("- kept off-limits inside it: " + _listed(policy.get("exclude"), "nothing"))
     lines.append("- skills loadable here: " + _listed(skills.names(channel), "none"))
+    lines.append("- MCP tools here (read runs; mutate parks for approval): "
+                 + _listed(mcp.configured_tools(policy), "none"))
     if policy.get("unattended"):
         # Say it here rather than leaving it to be discovered: a channel where
         # nothing parks looks identical to a channel nobody has asked anything

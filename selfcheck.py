@@ -5031,4 +5031,72 @@ _codex_src = open("shmobster/codex_llm.py").read()
 assert "raise litellm.APIConnectionError" not in _codex_src, "the Router will not cool it"
 assert "litellm.Timeout" in _codex_src and "litellm.InternalServerError" in _codex_src
 
+# 62) per-channel MCP tools (#299): read runs, mutate parks, unlisted is hidden,
+# policy defaults are forced and dropped from the schema, and no network happens
+# except through the allow-list. mcp_client is stubbed so the section is offline.
+from shmobster import mcp as _mcp, mcp_client as _mcpc, approvals as _appr
+_mcp._RESOLVED.clear()
+_mcp_calls = []
+_mcpc_list_saved, _mcpc_call_saved = _mcpc.list_tools, _mcpc.call_tool
+def _fake_list(url, headers=None, timeout=None):
+    return [
+        {"name": "search", "description": "search docs",
+         "inputSchema": {"type": "object",
+                         "properties": {"query": {"type": "string"},
+                                        "include_folders": {"type": "array"}},
+                         "required": ["query"]}},
+        {"name": "wipe", "description": "danger", "inputSchema": {"type": "object", "properties": {}}},
+    ]
+def _fake_call(url, tool, arguments, headers=None, timeout=None):
+    _mcp_calls.append((tool, dict(arguments), dict(headers or {})))
+    return f"called {tool} with {arguments}"
+_mcpc.list_tools, _mcpc.call_tool = _fake_list, _fake_call
+_mcp_pol = {"mcp": {"rag": {
+    "url": "http://localhost:1/mcp/mcp",
+    "headers": {"X-Token": "SEKRET-abcdefghijklmnop"},
+    "tools": {
+        "search": {"mode": "read", "defaults": {"include_folders": ["a", "b"]}},
+        "wipe": {"mode": "mutate"},
+    },
+}}}
+# Register it so run_approved's re-read of the policy (policy.resolve) finds it,
+# exactly as the live deployment's policy file would.
+config.CHANNEL_POLICIES["CMCP"] = _mcp_pol
+_specs = _mcp.tool_schemas("CMCP", _mcp_pol)
+_names = {s["function"]["name"] for s in _specs}
+# unlisted tools on the server are never exposed; both listed ones are
+assert _names == {"mcp_rag_search", "mcp_rag_wipe"}, _names
+# a default-injected arg is dropped from the schema the model sees
+_sp = [s for s in _specs if s["function"]["name"] == "mcp_rag_search"][0]
+assert "include_folders" not in _sp["function"]["parameters"]["properties"], "default must be hidden"
+assert "query" in _sp["function"]["parameters"]["properties"]
+# a read tool runs, with the policy default forced in whatever the model passed
+_r = _mcp.dispatch("mcp_rag_search", {"query": "x", "include_folders": ["ignored"]},
+                   _mcp_pol, "CMCP", "t", "U")
+assert _mcp_calls and _mcp_calls[-1][0] == "search", _mcp_calls
+assert _mcp_calls[-1][1]["include_folders"] == ["a", "b"], "policy default must win"
+# a mutate tool parks and does NOT call the server
+_before = len(_mcp_calls)
+_m = _mcp.dispatch("mcp_rag_wipe", {}, _mcp_pol, "CMCP", "t", "U")
+assert _m.startswith("NOT RUN -- pending approval"), _m
+assert len(_mcp_calls) == _before, "a mutate tool must not run before approval"
+# the parked request carries an mcp payload and NOT the credential
+_mid = _m.split("[", 1)[1].split("]", 1)[0]
+_req = _appr.peek(_mid, "CMCP")
+assert _req["payload"]["kind"] == "mcp" and _req["payload"]["tool"] == "wipe", _req["payload"]
+assert "SEKRET-abcdefghijklmnop" not in json.dumps(_req), "the credential must not be in the queued request"
+# approving it runs the server call, with headers re-read from policy
+_appr.acquire(_mid, "CMCP")
+_out = admin_tools.run_approved(_mid, _req, {"channel": "CMCP", "user_id": "U"})
+assert _mcp_calls[-1][0] == "wipe", _mcp_calls
+assert _mcp_calls[-1][2].get("X-Token") == "SEKRET-abcdefghijklmnop", "headers re-read from policy at exec"
+# a channel with no mcp block sees nothing
+assert _mcp.tool_schemas("CNONE", {}) == [] and _mcp.names("CNONE", {}) == set()
+# the header credential is a known redaction value
+assert "SEKRET-abcdefghijklmnop" in redact.known_values(), "mcp header creds must be scrubbed"
+assert redact.scrub("tok=SEKRET-abcdefghijklmnop").find("SEKRET") == -1
+_mcpc.list_tools, _mcpc.call_tool = _mcpc_list_saved, _mcpc_call_saved
+_mcp._RESOLVED.clear()
+config.CHANNEL_POLICIES.pop("CMCP", None)
+
 print(f"selfcheck OK -- shmobster {_b}")

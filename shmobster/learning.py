@@ -248,6 +248,106 @@ def flag(args, ctx):
     return retval
 
 
+# The post-answer check (#232). flag_skill is called DURING composition, so the
+# judgment about a turn's conclusion is asked for before the conclusion exists;
+# two prompt rewrites (#211) did not move it. This is the hook #232 asked for: on
+# a candidate turn, after the answer is filed, one bounded model call judges the
+# finished turn and either parks the proposal or records why not.
+_CHECK_READS = frozenset(("run_shell", "web_fetch"))
+_CHECK_RAN = frozenset(("ran", "ok"))
+
+_CHECK_SYSTEM = (
+    "You judge whether one finished agent turn is worth saving as a reusable "
+    "skill, for a trusted user to decide. Judge the CONCLUSION the turn reached, "
+    "not how many tools it used.\n\n" + _BAR + "\n\n"
+    "Reply with ONE line and nothing else:\n"
+    "FLAG: <kebab-case-name> | <one line: what was non-obvious and what the "
+    "skill saves next time>\n"
+    "or\n"
+    "NO: <one short clause: why this turn does not meet the bar>"
+)
+
+
+def _candidate(trace):
+    """A turn worth the extra call: one where a read tool actually returned
+    content the answer could rest on (#232). The step count is deliberately not
+    the test -- the turns #211/#232 missed were among the cheapest in their
+    threads -- so a single content-returning `run_shell`/`web_fetch` qualifies,
+    and a turn that only talked does not."""
+    retval = any(s.get("tool") in _CHECK_READS
+                 and s.get("disposition") in _CHECK_RAN
+                 and (s.get("result") or "").strip()
+                 for s in (trace or []))
+    return retval
+
+
+def _parse_verdict(text):
+    """(name, why) to flag, or (None, reason) not to. A reply that fits neither
+    shape is treated as 'no', with the raw line as the reason, so a confused
+    model never produces a card."""
+    first = (text or "").strip().splitlines()
+    line = first[0] if first else ""
+    if line[:5].upper() == "FLAG:":
+        name, _, why = line[5:].strip().partition("|")
+        name = name.strip()
+        if name:
+            retval = (name, why.strip() or "flagged by the post-answer check")
+            return retval
+    if line[:3].upper() == "NO:":
+        retval = (None, line[3:].strip() or "no reason given")
+        return retval
+    retval = (None, f"unparsed verdict: {line[:160]}")
+    return retval
+
+
+def check(answer, trace, channel, thread_ts, user_id):
+    """Post-answer skill check (#232). Returns a short string for the trajectory's
+    flag_considered field -- 'flagged (...)' or 'considered: <reason>' -- or None
+    when the check did not run. Never raises and never blocks the reply: it runs
+    after the answer is composed.
+
+    On FLAG it parks the proposal through flag(), exactly as the in-composition
+    tool would, so the ingest surfaces the same card. On NO it only records the
+    reason. The caller decides whether to run it at all (the per-channel switch);
+    this still self-guards on enabled(), a live thread, and not-already-flagged."""
+    if not (enabled() and channel and thread_ts):
+        retval = None
+        return retval
+    if thread_state(thread_ts):
+        retval = None  # already flagged or declined; flag() would refuse anyway
+        return retval
+    if not _candidate(trace):
+        retval = None
+        return retval
+    steps_desc = "; ".join(
+        f"{s.get('tool')}[{s.get('disposition')}]" for s in (trace or [])
+    ) or "(no tool calls)"
+    user = (
+        f"The turn's steps: {steps_desc}\n\n"
+        f"The turn's final answer:\n{(answer or '').strip()[:4000]}"
+    )
+    try:
+        msg = llm.complete([
+            {"role": "system", "content": _CHECK_SYSTEM},
+            {"role": "user", "content": user},
+        ])
+        verdict = msg.content or ""
+    except Exception as exc:
+        logging.warning("learning: post-answer check failed, not flagging: %s", exc)
+        retval = "considered: check call failed"
+        return retval
+    name, why = _parse_verdict(verdict)
+    if name is None:
+        logging.info("learning: post-answer check declined in %s (%s)", channel, why)
+        retval = f"considered: {why}"
+        return retval
+    out = flag({"name": name, "why": why},
+               {"channel": channel, "thread_ts": thread_ts, "user_id": user_id})
+    logging.info("learning: post-answer check flagged %s in %s", name, channel)
+    retval = f"flagged ({out})"
+    return retval
+
+
 _DRAFT_SYSTEM = """You write one SKILL.md in the skillz format from the record of a
 Slack agent turn. Output ONLY the file text, no code fence, no commentary.
 

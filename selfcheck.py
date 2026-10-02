@@ -5099,4 +5099,43 @@ _mcpc.list_tools, _mcpc.call_tool = _mcpc_list_saved, _mcpc_call_saved
 _mcp._RESOLVED.clear()
 config.CHANNEL_POLICIES.pop("CMCP", None)
 
+# 63) the post-answer skill check (#232): the hook flag_skill never was. On a
+# candidate turn it makes one bounded model call and either parks a proposal or
+# records why not; non-candidate turns and already-flagged threads skip it. The
+# model call is stubbed so the section is offline.
+from shmobster import learning as _learn, proposals as _props
+_learn_repo_saved, config.LEARNING_REPO = config.LEARNING_REPO, "method-and-apparatus/skillz-private"
+assert _learn.enabled(), "learning must be enabled for the check"
+_learn_complete_saved = _learn.llm.complete
+class _CheckMsg:
+    def __init__(self, c): self.content = c
+# a non-candidate turn (no content-returning read) never calls the model
+_learn.llm.complete = lambda m: (_ for _ in ()).throw(AssertionError("must not call on a non-candidate"))
+assert _learn.check("a", [{"tool": "describe_capabilities", "disposition": "ok", "result": "x"}],
+                    "CCHK0", "tchk0", "U") is None, "non-candidate must not run the check"
+# a candidate the model declines records the reason, parks nothing
+_learn.llm.complete = lambda m: _CheckMsg("NO: routine documentation lookup")
+_r = _learn.check("a", [{"tool": "web_fetch", "disposition": "ok", "result": "data"}],
+                  "CCHK1", "tchk1", "U")
+assert _r == "considered: routine documentation lookup", _r
+assert _props.ids("CCHK1") == [], "a declined check must park nothing"
+# a candidate the model flags parks a proposal and marks the thread
+_learn.llm.complete = lambda m: _CheckMsg("FLAG: some-reusable-trap | saves the next person the dig")
+_r = _learn.check("a", [{"tool": "run_shell", "disposition": "ran", "result": "out"}],
+                  "CCHK2", "tchk2", "U")
+assert _r.startswith("flagged ("), _r
+assert len(_props.ids("CCHK2")) == 1, "a flagged check must park exactly one proposal"
+assert _learn.thread_state("tchk2") == "flagged", "the thread is marked so it cannot double-flag"
+# ...and a second check on that thread does nothing
+assert _learn.check("a", [{"tool": "run_shell", "disposition": "ran", "result": "out"}],
+                    "CCHK2", "tchk2", "U") is None, "already-flagged thread must skip"
+# a verdict in neither shape is treated as 'no', never a card
+_learn.llm.complete = lambda m: _CheckMsg("I think maybe")
+_r = _learn.check("a", [{"tool": "web_fetch", "disposition": "ok", "result": "d"}],
+                  "CCHK3", "tchk3", "U")
+assert _r.startswith("considered: unparsed verdict"), _r
+assert _props.ids("CCHK3") == [], "an unparsed verdict must not park a card"
+_learn.llm.complete = _learn_complete_saved
+config.LEARNING_REPO = _learn_repo_saved
+
 print(f"selfcheck OK -- shmobster {_b}")

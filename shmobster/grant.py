@@ -72,9 +72,18 @@ FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed")
 # socket is an uncarded fetch to anywhere, which would make `allow_domains`
 # decorative. `curl` and `wget` keep their own rule for the same reason, and
 # `sudo` is refused before this point.
+#
+# `apply_patch` is the agent's own editor -- an Update/Add/Delete-File patch read
+# from a heredoc -- and it only ever writes files, the same blast radius as
+# `patch` and `tee` beside it, confined to the tree by the sandbox. It was the
+# one verb a redesign turn in an unattended channel could not use without a card
+# per edit, so the agent fell back to `python3 -c`/heredocs that park for a worse
+# reason. It stays OUT of FS_VERBS (attended channels) on purpose: a patch can
+# delete a file and FS_VERBS deliberately excludes `rm`; unattended already runs
+# `rm`, so there the distinction stopped mattering.
 UNATTENDED_VERBS = frozenset((
     "rm", "rmdir", "cp", "mv", "mkdir", "touch", "tee", "ln",
-    "chmod", "chown", "sed", "truncate", "install", "patch",
+    "chmod", "chown", "sed", "truncate", "install", "patch", "apply_patch",
 ))
 
 # `git` and `gh` are NOT in the set above, and the reason is the whole safety

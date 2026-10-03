@@ -28,3 +28,15 @@ every part is a read. So reach for the verbs it already knows are reads.
 This is not about dodging oversight: a genuinely mutating or out-of-scope
 command still parks, and should. It is about not spending a human's attention on
 a read you could have phrased as a read.
+
+## Editing files without a needless card
+
+Same rule for writes: the grant layer vouches by verb. An in-tree edit through
+a file verb -- `cat > file <<'EOF'`, `tee`, `sed -i` -- runs with no card in any
+channel. Reach for those.
+
+`apply_patch` is the exception to know: it parks in an ordinary channel (a patch
+can delete a file, which the uncarded write set deliberately excludes), and runs
+uncarded only in an unattended channel. So in an attended channel, make a
+multi-line edit with a `cat >` heredoc or `sed`, not `apply_patch` -- and never
+reach for `python3 -c`/`node -e` to write a file, which parks for a worse reason.

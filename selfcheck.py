@@ -2718,10 +2718,20 @@ try:
                "git push", "git push --force origin master", "git clean -fdx"):
         _ok, _why = grant.check(_c, _un)
         assert _ok and "unattended" in _why, (_c, _ok, _why)
+    # apply_patch is the agent's own editor; in an unattended channel it runs
+    # like patch/tee beside it (confined to the tree), heredoc and all.
+    _patch_cmd = ("apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: a.txt\n"
+                  "@@\n-old\n+new\n*** End Patch\nPATCH")
+    _ok, _why = grant.check(_patch_cmd, _un)
+    assert _ok and "apply_patch" in _why, ("unattended apply_patch", _ok, _why)
     # ...and the same channel WITHOUT the key keeps every one of those carded
     for _c in ("rm -rf build", "gh pr merge 3", "git branch -D topic"):
         _ok, _why = grant.check(_c, dict(_un, unattended=False))
         assert not _ok, (_c, _ok, _why)
+    # apply_patch is NOT an FS_VERB: an attended channel still cards it, because a
+    # patch can delete a file and FS_VERBS excludes rm for that reason.
+    _ok, _why = grant.check(_patch_cmd, dict(_un, unattended=False))
+    assert not _ok, ("attended apply_patch must park", _ok, _why)
     # What unattended does NOT buy, because each one leaves the blast radius
     # the operator drew:
     for _c, _frag in (

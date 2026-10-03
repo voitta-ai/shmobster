@@ -5099,4 +5099,36 @@ _mcpc.list_tools, _mcpc.call_tool = _mcpc_list_saved, _mcpc_call_saved
 _mcp._RESOLVED.clear()
 config.CHANNEL_POLICIES.pop("CMCP", None)
 
+# 64) the watchdog's third signal (processing wedge, found live 2026-10-03): a
+# dead or stuck message processor is a wedge even while the socket stays stable
+# and ponging, which is exactly what the #66 pair cannot see.
+from shmobster import watchdog as _wd
+_T = 120
+# the socket pair stays an AND: one bad signal is not enough
+assert _wd._assess(130, 130, 0, 0, _T)[0] is True, "both socket signals bad -> wedge"
+assert _wd._assess(130, 0, 0, 0, _T)[0] is False, "only unstable -> not a wedge"
+assert _wd._assess(0, 130, 0, 0, _T)[0] is False, "only deaf -> not a wedge"
+# the processing signal stands alone (OR), and is the 2026-10-03 shape: socket
+# perfectly healthy, consumer dead
+assert _wd._assess(0, 0, 130, 0, _T)[0] is True, "dead processor alone -> wedge"
+assert _wd._assess(0, 0, 0, 130, _T)[0] is True, "stuck queue alone -> wedge"
+assert "processor" in _wd._assess(0, 0, 200, 0, _T)[1]
+assert "queue" in _wd._assess(0, 0, 0, 200, _T)[1]
+assert _wd._assess(0, 0, 0, 0, _T)[0] is False, "all healthy -> no wedge"
+# _probe_processing reads the client's consumer side; missing attrs are _MISSING
+# (skip the signal) not a crash
+class _WdProc:
+    def __init__(self, a): self._a = a
+    def is_alive(self): return self._a
+class _WdQ:
+    def __init__(self, n): self._n = n
+    def qsize(self): return self._n
+class _WdClient:
+    def __init__(self, alive, n):
+        self.message_processor = _WdProc(alive); self.message_queue = _WdQ(n)
+assert _wd._probe_processing(_WdClient(True, 0)) == (True, 0)
+assert _wd._probe_processing(_WdClient(False, 5)) == (False, 5)
+_pa, _qs = _wd._probe_processing(object())  # no attrs
+assert _pa is _wd._MISSING and _qs is _wd._MISSING, "missing attrs -> skip, not crash"
+
 print(f"selfcheck OK -- shmobster {_b}")

@@ -9,7 +9,7 @@ import os
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -400,6 +400,11 @@ def _resolve_label(client):
 
 def main():
     logsetup.setup()
+    # Diagnosis and the out-of-process heartbeat (#66 follow-up), before anything
+    # that can hang: faulthandler so `kill -USR1` dumps every thread's stack on
+    # the next freeze, and the heartbeat thread the external health-check reads.
+    diag.install_faulthandler()
+    diag.start_heartbeat()
     if not config.AGENT_LABEL:
         config.AGENT_LABEL = _resolve_label(app.client)
     try:

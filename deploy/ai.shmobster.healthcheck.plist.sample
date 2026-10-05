@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Out-of-process liveness check (#66 follow-up). Runs deploy/health-check.sh
+     every 60s; it restarts the agent when the heartbeat file goes stale. This is
+     the layer that catches a whole-interpreter freeze the in-process watchdog
+     cannot, because the watchdog freezes with it. Copy to
+     ~/Library/LaunchAgents/, edit the paths, and `launchctl bootstrap`. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.shmobster.healthcheck</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/path/to/shmobster/deploy/health-check.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardErrorPath</key>
+  <string>/path/to/shmobster/logs/healthcheck.err.log</string>
+  <key>StandardOutPath</key>
+  <string>/path/to/shmobster/logs/healthcheck.out.log</string>
+</dict>
+</plist>

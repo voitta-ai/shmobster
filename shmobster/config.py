@@ -437,3 +437,10 @@ if 0 < WATCHDOG_TIMEOUT_SEC < 90:
         f"config watchdog_timeout_sec ({WATCHDOG_TIMEOUT_SEC}) is too low and would "
         "restart on hiccups the SDK recovers from; use 0 to disable or at least 90"
     )
+
+# Liveness heartbeat (#66 follow-up): a thread stamps this file every few
+# seconds, and the external health-check (deploy/health-check.sh) restarts the
+# service when it goes stale -- catching a whole-interpreter freeze the
+# in-process watchdog, being a Python thread itself, cannot. Empty uses a temp
+# default; the check must read the same path.
+HEARTBEAT_PATH = _agent.get("heartbeat_path", "")

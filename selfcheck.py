@@ -5029,8 +5029,13 @@ assert not llm.is_budget_error(_BudgetExc(500, "insufficient credits")), "5xx is
 _when, _why = llm._park_until("You will regain access on 2999-01-01")
 assert _when - time.time() <= llm._MAX_PARK_SEC + 5, _why
 assert "cap" in _why, _why
-_when, _why = llm._park_until("You will regain access on 2026-10-05")
-assert "until 2026-10-05" in _why, _why
+# A date within the cap is honoured as-is. Computed relative to today so the
+# test does not go stale: a hard-coded date breaks the day it becomes "today"
+# (a date at UTC midnight is already in the past by then, so _park_until falls
+# back to the window and the "until <date>" branch never runs) -- seen 2026-10-05.
+_soon = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=5)).strftime("%Y-%m-%d")
+_when, _why = llm._park_until(f"You will regain access on {_soon}")
+assert f"until {_soon}" in _why, _why
 
 # codex must not raise APIConnectionError for a dead rung: litellm's
 # cooldown_handlers carries ignored_strings = ["APIConnectionError"] and
@@ -5140,5 +5145,28 @@ assert _wd._probe_processing(_WdClient(True, 0)) == (True, 0)
 assert _wd._probe_processing(_WdClient(False, 5)) == (False, 5)
 _pa, _qs = _wd._probe_processing(object())  # no attrs
 assert _pa is _wd._MISSING and _qs is _wd._MISSING, "missing attrs -> skip, not crash"
+
+
+# 64b) diagnosis + heartbeat (#66 follow-up): faulthandler arms without raising,
+# and the heartbeat thread stamps a file the external health-check reads. The
+# heartbeat's whole point is that it stops when the interpreter freezes, so it is
+# just a timer thread -- tested by seeing it write a fresh stamp.
+from shmobster import diag as _diag
+_diag.install_faulthandler()  # must not raise
+_hb = _diag.heartbeat_path()
+assert isinstance(_hb, str) and _hb, "heartbeat path resolves"
+_diag.start_heartbeat(interval=1)
+_stamp = ""
+_t0 = time.time()
+while not _stamp and time.time() - _t0 < 5:
+    try:
+        _stamp = open(_hb).read().strip()
+    except OSError:
+        _stamp = ""
+    if not _stamp:
+        time.sleep(0.2)
+assert _stamp, "heartbeat file is written with a stamp"
+assert time.time() - float(_stamp) < 6, "heartbeat is fresh"
+
 
 print(f"selfcheck OK -- shmobster {_b}")

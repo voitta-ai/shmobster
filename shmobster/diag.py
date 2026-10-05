@@ -36,8 +36,15 @@ def install_faulthandler():
     Idempotent enough: a second call just re-registers the same handler."""
     try:
         faulthandler.enable()
-        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
-        logging.info("diag: faulthandler armed -- `kill -USR1 <pid>` dumps all thread stacks")
+        # chain=False: dump the stacks and CONTINUE. SIGUSR1's default action is
+        # to terminate the process, so chain=True made the documented
+        # `kill -USR1 <pid>` diagnosis ALSO kill the agent -- the opposite of the
+        # point, which is to observe a wedged-but-running process without
+        # disrupting it. (faulthandler.enable() still chains fatal signals; that
+        # is about crashes, not this.)
+        faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
+        logging.info("diag: faulthandler armed -- `kill -USR1 <pid>` dumps all thread "
+                     "stacks to stderr without stopping the agent")
     except Exception:
         # Never let diagnostics stop the agent from serving.
         logging.exception("diag: could not arm faulthandler")

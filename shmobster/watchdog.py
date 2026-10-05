@@ -61,6 +61,9 @@ _DEFAULT_POLL_SEC = 5
 # teardown (ping_interval 10 * 4), so ordinary SDK-healed hiccups do not count
 # as a wedge.
 _STABLE_SEC = 60
+# How often the watchdog logs what it sees, for diagnosing a wedge it does not
+# catch (#66 follow-up). Info-level and infrequent, so it does not bloat the log.
+_REPORT_SEC = 120
 
 _MISSING = object()
 
@@ -108,14 +111,26 @@ def _assess(unstable_for, deaf_for, proc_dead_for, queue_stuck_for, timeout_sec)
     """Pure verdict: (should_exit, reason) from the four elapsed measures. Kept
     separate from _loop so it can be tested without threads or sleeps.
 
-    The socket pair is an AND (#66: either alone can be fooled). The processing
-    signal is independent -- a dead or stuck consumer is a wedge whatever the
-    socket is doing -- so it is OR'd in."""
-    socket_wedged = unstable_for >= timeout_sec and deaf_for >= timeout_sec
+    Every signal is OR'd: EITHER socket signal unhealthy is a wedge, and so is
+    the processing one. #66 is explicit that the two socket signals catch
+    DIFFERENT shapes -- churn makes the session never stabilise, a half-open but
+    stable connection stops ponging -- and that a healthy agent shows BOTH fresh,
+    so requiring both to be *healthy* (OR to fire) is right. A v0.31.0 refactor
+    turned this into an AND by mistake (fire only if BOTH are stale), which let
+    the stable-but-deaf wedge through -- the process alive, the session stable,
+    the receive stuck in ssl.recv, no pong, and no exit. Seen live 2026-10-05.
+    This restores #66's original OR."""
+    socket_wedged = unstable_for >= timeout_sec or deaf_for >= timeout_sec
     processing_wedged = proc_dead_for >= timeout_sec or queue_stuck_for >= timeout_sec
     if socket_wedged:
-        retval = (True, f"no stable session for {int(unstable_for)}s and no ping/pong "
-                        f"for {int(deaf_for)}s")
+        if unstable_for >= timeout_sec and deaf_for >= timeout_sec:
+            why = (f"no stable session for {int(unstable_for)}s and no ping/pong "
+                   f"for {int(deaf_for)}s")
+        elif deaf_for >= timeout_sec:
+            why = f"no ping/pong for {int(deaf_for)}s (session stable but deaf)"
+        else:
+            why = f"no stable session for {int(unstable_for)}s"
+        retval = (True, why)
         return retval
     if processing_wedged:
         if proc_dead_for >= timeout_sec:
@@ -141,6 +156,7 @@ def _loop(client, timeout_sec, poll_sec):
     session_since = None  # when the current session_id was first seen
     current_sid = None
     last_pong = None
+    last_report_at = now - _REPORT_SEC  # emit the first status promptly
     _warned_processing = False
 
     while True:
@@ -197,6 +213,20 @@ def _loop(client, timeout_sec, poll_sec):
             deaf_for = now - pong_ok_at
             proc_dead_for = now - proc_ok_at
             queue_stuck_for = now - queue_ok_at
+            # Periodic record of what the watchdog SEES, so a wedge that it does
+            # not catch (2026-10-05: a half-open receive stuck in ssl.recv, the
+            # process alive and the agent deaf, with no watchdog exit) can be read
+            # from the log afterwards instead of guessed at: was pong fresh (the
+            # watchdog was blind) or stale (it should have fired)?
+            if now - last_report_at >= _REPORT_SEC:
+                last_report_at = now
+                _sid_short = (str(current_sid)[:8] if current_sid else "none")
+                logging.info(
+                    "watchdog: session=%s stable_for=%ds pong_age=%ds proc_dead=%ds "
+                    "queue_stuck=%ds connected=%s",
+                    _sid_short, int(unstable_for), int(deaf_for), int(proc_dead_for),
+                    int(queue_stuck_for), client.is_connected(),
+                )
             should_exit, reason = _assess(
                 unstable_for, deaf_for, proc_dead_for, queue_stuck_for, timeout_sec)
             if not should_exit:

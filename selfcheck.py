@@ -5119,10 +5119,12 @@ config.CHANNEL_POLICIES.pop("CMCP", None)
 # and ponging, which is exactly what the #66 pair cannot see.
 from shmobster import watchdog as _wd
 _T = 120
-# the socket pair stays an AND: one bad signal is not enough
+# The two socket signals are OR'd (#66's original): either alone is a wedge, and
+# a v0.31.0 refactor's AND let the stable-but-deaf shape through (seen 2026-10-05).
 assert _wd._assess(130, 130, 0, 0, _T)[0] is True, "both socket signals bad -> wedge"
-assert _wd._assess(130, 0, 0, 0, _T)[0] is False, "only unstable -> not a wedge"
-assert _wd._assess(0, 130, 0, 0, _T)[0] is False, "only deaf -> not a wedge"
+assert _wd._assess(130, 0, 0, 0, _T)[0] is True, "unstable alone -> wedge"
+assert _wd._assess(0, 130, 0, 0, _T)[0] is True, "deaf alone (stable session) -> wedge"
+assert "deaf" in _wd._assess(0, 130, 0, 0, _T)[1], "names the stable-but-deaf shape"
 # the processing signal stands alone (OR), and is the 2026-10-03 shape: socket
 # perfectly healthy, consumer dead
 assert _wd._assess(0, 0, 130, 0, _T)[0] is True, "dead processor alone -> wedge"

@@ -111,14 +111,26 @@ def _assess(unstable_for, deaf_for, proc_dead_for, queue_stuck_for, timeout_sec)
     """Pure verdict: (should_exit, reason) from the four elapsed measures. Kept
     separate from _loop so it can be tested without threads or sleeps.
 
-    The socket pair is an AND (#66: either alone can be fooled). The processing
-    signal is independent -- a dead or stuck consumer is a wedge whatever the
-    socket is doing -- so it is OR'd in."""
-    socket_wedged = unstable_for >= timeout_sec and deaf_for >= timeout_sec
+    Every signal is OR'd: EITHER socket signal unhealthy is a wedge, and so is
+    the processing one. #66 is explicit that the two socket signals catch
+    DIFFERENT shapes -- churn makes the session never stabilise, a half-open but
+    stable connection stops ponging -- and that a healthy agent shows BOTH fresh,
+    so requiring both to be *healthy* (OR to fire) is right. A v0.31.0 refactor
+    turned this into an AND by mistake (fire only if BOTH are stale), which let
+    the stable-but-deaf wedge through -- the process alive, the session stable,
+    the receive stuck in ssl.recv, no pong, and no exit. Seen live 2026-10-05.
+    This restores #66's original OR."""
+    socket_wedged = unstable_for >= timeout_sec or deaf_for >= timeout_sec
     processing_wedged = proc_dead_for >= timeout_sec or queue_stuck_for >= timeout_sec
     if socket_wedged:
-        retval = (True, f"no stable session for {int(unstable_for)}s and no ping/pong "
-                        f"for {int(deaf_for)}s")
+        if unstable_for >= timeout_sec and deaf_for >= timeout_sec:
+            why = (f"no stable session for {int(unstable_for)}s and no ping/pong "
+                   f"for {int(deaf_for)}s")
+        elif deaf_for >= timeout_sec:
+            why = f"no ping/pong for {int(deaf_for)}s (session stable but deaf)"
+        else:
+            why = f"no stable session for {int(unstable_for)}s"
+        retval = (True, why)
         return retval
     if processing_wedged:
         if proc_dead_for >= timeout_sec:

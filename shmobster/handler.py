@@ -155,6 +155,9 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     system = _system_prompt()
     if skill_menu:
         system += "\n\n" + skill_menu
+    _standing = skills.standing_block(channel)
+    if _standing:
+        system += "\n\n" + _standing
     # The bar for flagging, in view while the answer is composed (#211). It was
     # only ever in the tool description, which the model reads once it is
     # already deciding to call something -- so a turn whose *conclusion* was the

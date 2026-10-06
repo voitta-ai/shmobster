@@ -3,6 +3,7 @@
 text in -> the model may call run_shell (gated by YOLT) any number of times ->
 labeled reply out. Knows nothing about Slack, so any ingest reuses it.
 Per-channel policy (Iter 2) and multi-user (Iter 4) layer on top."""
+import datetime
 import json
 import logging
 
@@ -166,6 +167,12 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         f"You are running shmobster {build()} -- report exactly that when asked "
         "which version or build you are."
     ]
+    # Per turn, not at startup: the process runs for days, and a date fixed at
+    # boot goes stale at the first midnight. Without it the model guesses, and
+    # a guess called a date a week ahead "in the past". Host-local time is the
+    # deployment's timezone.
+    _now = datetime.datetime.now().astimezone()
+    _ident.append(f"Today is {_now:%A, %Y-%m-%d} ({_now:%Z}).")
     if config.AGENT_LABEL:
         _ident.append(
             f"Your name is {config.AGENT_LABEL}. Introduce and refer to yourself "

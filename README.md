@@ -615,6 +615,12 @@ machine's channel layout is versioned separately from the token/key config:
     resolve like `allow_read`; an entry under the channel's writable roots is
     ignored with a warning (a granted write must not become standing
     instructions).
+  - `always_skills` -- names of skills (from `skills` or the global paths)
+    whose full text goes into this channel's system prompt on every turn,
+    instead of waiting for the model to call `load_skill`. For a procedure
+    that must always shape the answer, such as a channel's reply format. Each
+    one costs its length on every turn; an unknown name is skipped with a
+    warning.
   - `env` -- extra environment variables injected only for this channel's
     commands, e.g. a per-project `VERCEL_TOKEN` or `HEROKU_API_KEY`. Write them
     as `${VAR}` references like everything else (#104), not literals:

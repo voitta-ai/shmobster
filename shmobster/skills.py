@@ -205,6 +205,36 @@ def prompt_block(channel=None):
     return retval
 
 
+def standing_block(channel=None):
+    """The skills the channel policy marks `always_skills`, in full, for the
+    system prompt -- empty string when there are none.
+
+    A menu entry is a label the model may or may not act on: in #demo1 the
+    same question loaded its format skill on some turns and not others, so the
+    format came and went. A skill named here is in the prompt on every turn
+    instead. It is the policy's call, not the skill's: a front-matter flag
+    would let a learned skill (#129) promote itself into every prompt."""
+    pol = policy_mod.resolve(channel) if channel else {}
+    names = [str(n).strip() for n in (pol.get("always_skills") or [])]
+    bodies = []
+    for name in names:
+        if name not in view(channel):
+            logging.warning("skills: %s lists always_skills %r, which no skills path provides", channel, name)
+            continue
+        bodies.append(load(name, channel))
+    if not bodies:
+        retval = ""
+        return retval
+    parts = [
+        "## Standing procedures for this channel",
+        "The operator made these skills apply to every request in this channel. "
+        "They are already loaded below -- follow them wherever they apply, and do "
+        "not call load_skill for them.",
+    ] + bodies
+    retval = "\n\n".join(parts)
+    return retval
+
+
 def load(name, channel=None):
     """Return a skill's body text, or a message naming the near misses."""
     key = str(name or "").strip()

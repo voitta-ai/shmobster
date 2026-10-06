@@ -34,6 +34,18 @@ does:
 - **Version reporting** -- the build string comes from `shmobster.build()`; do
   not hardcode it.
 
+## One Socket Mode consumer per Slack app
+
+Nothing but this process may connect with this deployment's app-level token
+(`slack.app_token`). Slack hands each event to one of an app's open Socket Mode
+connections, so a second consumer silently takes a share of the mentions. On
+2026-10-06 an agents-framework approval-button listener configured with this
+app's `xapp-` token acked and dropped them. The miss looks like the #66 wedge,
+but the watchdog stays green, because this process's own connection is fine.
+When wiring any other tool that needs inbound Slack events or button clicks
+(approvals, cards, listeners), give it its own app; never point it at this one.
+The README's "Create the Slack app" note has the symptom and the check.
+
 ## Secrets
 
 Config values are `${VAR}` references (#73), never literals -- including in a

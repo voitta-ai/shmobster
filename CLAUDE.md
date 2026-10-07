@@ -46,6 +46,22 @@ When wiring any other tool that needs inbound Slack events or button clicks
 (approvals, cards, listeners), give it its own app; never point it at this one.
 The README's "Create the Slack app" note has the symptom and the check.
 
+## Posting into a channel on an operator's behalf
+
+Never post through this agent's own Slack token when the point of the message is
+to make the agent act. Slack does not deliver `app_mention` for a message posted
+by the same app, so the mention never reaches `on_mention` and the turn simply
+never happens -- and the post reads as the agent talking about itself. An
+incoming webhook belonging to this app is the same identity and fails the same
+way. A bot or webhook post also carries no human `user`, so `identity.speaker`
+reads it as another agent and it can never satisfy a `trusted_users` check.
+
+A Slack MCP server or helper script on the deployment host is usually configured
+with this agent's app, so check whose token it holds before using it. Post as
+the person instead (the `slack-xoxc-session-client` skill), or hand them the
+text to paste. The full reasoning and the verification steps are in the
+`slack-agent-cannot-wake-itself` skill.
+
 ## Secrets
 
 Config values are `${VAR}` references (#73), never literals -- including in a

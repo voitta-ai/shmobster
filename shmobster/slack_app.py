@@ -57,6 +57,23 @@ def _thread_context(client, channel, thread_ts, cur_ts):
 
 _SEEN = {}  # message ts -> None; dedup duplicate Slack deliveries / retries
 
+# Slack's cap on all markdown blocks in one message.
+_MARKDOWN_MAX = 12000
+
+
+def _reply_payload(reply):
+    """A model reply as a `markdown` block, with `text` as the notification
+    fallback and the copy identity.agent_name reads from history.
+
+    The model writes standard Markdown; posted as bare `text`, Slack reads it as
+    mrkdwn, so `**CRM:**` showed its asterisks and `[name](url)` stayed literal.
+    A markdown block leaves the rendering to Slack. Past the block's cap the
+    reply goes out as plain text, as before."""
+    retval = {"text": reply}
+    if len(reply) <= _MARKDOWN_MAX:
+        retval["blocks"] = [{"type": "markdown", "text": reply}]
+    return retval
+
 
 def _seen(ts):
     if ts in _SEEN:
@@ -269,7 +286,7 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             # else: another worker is already resuming this thread; it will
             # post the continuation, and a second note would be noise.
             return
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=reply)
+        client.chat_postMessage(channel=channel, thread_ts=thread_ts, **_reply_payload(reply))
         # The resumed turn can park the next step, so its cards need posting
         # too -- otherwise the task stops one command later, for the same
         # reason it used to stop here.
@@ -330,8 +347,13 @@ def _turn(event, say, client, logger):
     text = event.get("text", "")
     if notes:
         text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
+    # A bot's post carries the bot user's id in `user`. Passed on, it reads as
+    # an untrusted human and gets the plain-language audience line, which
+    # changed the reply's shape when a voice listener posted as a bot. A bot is
+    # not an audience: it gets what a webhook post (no user) gets.
+    asker = None if event.get("bot_id") else event.get("user")
     try:
-        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=event.get("user"), slack_client=client, attachments=parts)
+        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, slack_client=client, attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
         # Both paths are scrubbed: a provider exception can carry the request it
         # failed on, api_key and Authorization header included (#72). The log
@@ -339,7 +361,7 @@ def _turn(event, say, client, logger):
         # traceback too.
         logger.exception("handler failed")
         reply = redact.scrub(f":warning: shmobster error: {exc}")
-    say(text=reply, thread_ts=thread_ts)
+    say(thread_ts=thread_ts, **_reply_payload(reply))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
     _post_pending(client, channel, thread_ts)

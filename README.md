@@ -278,8 +278,21 @@ name and, ideally, a dedicated test channel to avoid cross-talk.
    `C...` segment. Put `{ "name": "...", "id": "C..." }` into `slack.channels`.
 7. Run (below) and mention `@<app name>` in that channel.
 
-> One app = one running process. Two processes on the same app fight over Slack's
-> per-app socket connection cap, so use a *separate* app for dev vs. the live bot.
+> One app = one running process, and nothing else may connect with its app-level
+> token. Slack spreads an app's events across *all* of that app's open Socket
+> Mode connections, and each event goes to only one of them. A second consumer
+> -- a dev instance, or another tool reusing the `xapp-` token, such as an
+> approval-button listener -- takes its share of the mentions. If it ignores
+> them, they vanish: no `:eyes:`, nothing in `agent.log`, and a watchdog that
+> stays green, because this process's own connection is healthy. Use a
+> *separate* app for dev vs. the live bot, and give every other tool that needs
+> Socket Mode its own app.
+>
+> Symptom: identical mentions, some answered and some silently not, with the
+> same watchdog `session=` across both. To check, hash-compare (never print) the
+> `xapp-` value of every env var that other tools' configs name against
+> `slack.app_token`, and look for other long-running Socket Mode jobs
+> (`launchctl list`). An incoming webhook cannot be the cause: it only posts.
 
 > The manifest includes `reactions:write` (for the `:eyes:` "on it" ack). Apps
 > created from the manifest get it automatically; an app that predates the scope

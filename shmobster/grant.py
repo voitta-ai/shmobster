@@ -673,6 +673,11 @@ class _Walker:
         before = len(self.reasons)
         saved = self.writes_file
         self.writes_file = self.writes_file or writes
+        if writes:
+            # A redirect writes before a later segment runs, which is the same
+            # hazard the result path marks for `cp`/`mv` (#328 r2):
+            # `printf x > .vercel/project.json && vercel deploy` must park.
+            self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
         if retval[0] and len(self.reasons) > before:
@@ -1193,6 +1198,9 @@ class _Walker:
         if kind == "team":
             if rest or not team_known:
                 return None
+            # The team path read the link too (orgs above), so a write in the
+            # same command must park it like any other vercel grant (#328 r2).
+            self.vercel_seen = True
             return (True, f"vercel {' '.join(key2)}: read-only, team {team}")
         evidence = [p for p in (env.get("VERCEL_PROJECT_ID"), link and link[1]) if p]
         if any(p not in ids for p in evidence):
@@ -1323,17 +1331,16 @@ _VERCEL_TOKEN_VAR = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 
 def _vercel_token_ok(token, policy):
-    """A token this channel was given: a non-empty literal, or one variable
-    the channel's own `env` sets. Absent, empty, or any other expansion parks,
-    because the CLI would then use the global login (#328)."""
+    """A token this channel was given: one variable the channel's own `env`
+    sets. Absent, empty, or any other expansion parks, because the CLI would
+    then use the global login (#328). A literal parks too: it would sit in the
+    command text, which the trajectory records and a Vercel token's shape may
+    not be one the redactor knows (#328 r2)."""
     if token is None:
         return False
     value = _unquote(token.strip())
     m = _VERCEL_TOKEN_VAR.match(value)
-    if m:
-        retval = bool((policy.get("env") or {}).get(m.group(1)))
-        return retval
-    retval = bool(value) and "$" not in value and "`" not in value
+    retval = bool(m) and bool((policy.get("env") or {}).get(m.group(1)))
     return retval
 
 

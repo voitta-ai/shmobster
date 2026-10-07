@@ -757,9 +757,12 @@ machine's channel layout is versioned separately from the token/key config:
     the write could change the link before vercel reads it.
 
     Every granted command except `--version` must carry the channel's token:
-    `--token "$VERCEL_TOKEN"` with `VERCEL_TOKEN` set in this channel's `env`,
-    or a literal. Without one the CLI uses the global login in `HOME`, which is
-    the operator's own account. Any `VERCEL_*` name in `env_passthrough` turns
+    `--token "$VERCEL_TOKEN"` with `VERCEL_TOKEN` set in this channel's `env`.
+    Without one the CLI uses the global login in `HOME`, which is the
+    operator's own account; a literal token parks too, since it would sit in
+    the recorded command text. A write anywhere in the same command -- `cp`,
+    `mv`, or a `>` redirect -- parks the vercel grant, because it runs first
+    and could rewrite the link the check read. Any `VERCEL_*` name in `env_passthrough` turns
     the grant off, because a host value would retarget vercel unseen. A
     `deploy` uploads its directory, so that directory must be inside the
     channel tree.

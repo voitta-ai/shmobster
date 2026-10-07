@@ -734,6 +734,50 @@ machine's channel layout is versioned separately from the token/key config:
     in-composition. Off by default -- a channel opts in -- because it adds a model
     call to the end of every candidate turn.
 
+  - `vercel` -- the Vercel projects this channel may reach, which lets `vercel`
+    commands aimed at them run with no approval card (#327). Without the key
+    every `vercel` command parks. Shape:
+
+        "vercel": {
+          "team": "acme-enterprises",
+          "org_id": "team_...",
+          "projects": {"scrooge-banking": "prj_..."},
+          "writes": true
+        }
+
+    The scope is the Vercel **project**, not the git repo: a repo can deploy to
+    several projects, and a project can deploy with no repo at all. A command
+    is granted only when every target it names is in scope, and something
+    names one: `--scope`/`--team` (read, never skipped), the channel's
+    `VERCEL_ORG_ID`/`VERCEL_PROJECT_ID` in `env`, the tree's
+    `.vercel/project.json`, an exact `<project>-<hash>-<team>.vercel.app` deployment
+    URL, or a project name next to a known team. That link file is in the tree
+    the channel can write, so it is read as evidence of where vercel will go,
+    never as the policy; and a command that also writes anything parks, since
+    the write could change the link before vercel reads it.
+
+    Every granted command except `--version` must carry the channel's token:
+    `--token "$VERCEL_TOKEN"` with `VERCEL_TOKEN` set in this channel's `env`,
+    or a literal. Without one the CLI uses the global login in `HOME`, which is
+    the operator's own account. Any `VERCEL_*` name in `env_passthrough` turns
+    the grant off, because a host value would retarget vercel unseen. A
+    `deploy` uploads its directory, so that directory must be inside the
+    channel tree.
+
+    Granted: `whoami`, `teams ls` and `--version` anywhere; `project ls`,
+    `domains ls` and `alias ls` for the team; `ls`, `inspect`, `logs` and
+    `env ls` for an allowed project. With `"writes": true`, also `deploy`
+    (and a bare `vercel`), `promote`, `rollback` and `env add`/`rm`.
+
+    Always parks, even in a granted channel: `env pull` (writes the project's
+    secrets into the tree), `link` (rewrites the file this check reads),
+    `alias set`/`rm` (moves a domain, which no project ID pins), a custom
+    domain, branch URL or `dpl_` ID (names no project unambiguously), a dynamic `--scope "$X"`, `--cwd`,
+    `--local-config`, `--global-config`, `--name`, any flag not on the known
+    list, and a monorepo `.vercel/repo.json`. The `--token` value is the one
+    argument skipped unread, so `--token "$VERCEL_TOKEN"` works and is never
+    logged. Policy-file only, like `unattended`.
+
   - `mcp` -- MCP servers this channel may use, and which of each server's tools,
     turning any MCP server into gated tools the agent can call (#299). The
     default, like every capability, is none. Shape:

@@ -274,8 +274,20 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 _flag = "used"
             else:
                 _flag = "offered, not used"
+            # The post-answer check (#232): the hook flag_skill never was. Behind
+            # a per-channel switch (`skill_check`), off by default, so it reaches
+            # a channel only when an operator turns it on, and it never re-judges
+            # a turn that already flagged in-composition. It makes one bounded
+            # model call on a candidate turn and may park a proposal the ingest
+            # then surfaces; it runs here, after the answer, by design.
+            _considered = None
+            if flagging and _flag != "used" and policy.get("skill_check"):
+                try:
+                    _considered = learning.check(answer, trace, channel, thread_ts, user_id)
+                except Exception:
+                    logging.exception("post-answer skill check failed")
             trajectory.record(channel, user_id, thread_ts, text, trace, answer,
-                              cost.drain(), flag_skill=_flag)
+                              cost.drain(), flag_skill=_flag, flag_considered=_considered)
         retval = _finalize(answer, steps, capped)
         return retval
 

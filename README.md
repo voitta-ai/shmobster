@@ -720,6 +720,20 @@ machine's channel layout is versioned separately from the token/key config:
     with their repos and tree, because a channel that never parks anything
     looks exactly like a quiet one.
 
+  - `skill_check` -- `true` runs the post-answer skill check (#232) in this
+    channel. `flag_skill` is a tool the model may call *while composing*, so the
+    judgment about a turn's conclusion is asked for before the conclusion exists;
+    two prompt rewrites (#211) did not move it, and the most skill-worthy turns
+    kept going unflagged. With this on, a candidate turn -- one where a
+    `run_shell` or `web_fetch` returned content the answer rests on -- gets one
+    bounded model call *after* the answer is composed: it replies `flag(name,
+    why)` or `no(reason)`. On `flag` it parks the same proposal card as the tool;
+    on `no` the reason is recorded in the trajectory as `flag_considered`, so the
+    check's "no" is distinguishable from its not having run. It needs learning
+    configured (`learning.repo`) and never re-judges a turn that already flagged
+    in-composition. Off by default -- a channel opts in -- because it adds a model
+    call to the end of every candidate turn.
+
   - `mcp` -- MCP servers this channel may use, and which of each server's tools,
     turning any MCP server into gated tools the agent can call (#299). The
     default, like every capability, is none. Shape:

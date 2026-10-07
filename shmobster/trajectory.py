@@ -171,7 +171,8 @@ def _path(channel, when):
     return retval
 
 
-def record(channel, user_id, thread_ts, text, steps, answer, calls=None, flag_skill=None):
+def record(channel, user_id, thread_ts, text, steps, answer, calls=None, flag_skill=None,
+           flag_considered=None):
     """Append one turn. Never raises: a turn that cannot be recorded still
     happened, and the reply is on its way to the channel."""
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -202,6 +203,12 @@ def record(channel, user_id, thread_ts, text, steps, answer, calls=None, flag_sk
         # #211 was filed about, and now it is greppable rather than anecdotal.
         "flag_skill": flag_skill or "not offered",
     }
+    # What the post-answer check (#232) decided, when it ran: "flagged (...)" or
+    # "considered: <reason>". Absent when the check did not run (not a candidate,
+    # already flagged, or the switch off), so a reader can tell the check's "no"
+    # from its not having run at all.
+    if flag_considered:
+        rec["flag_considered"] = flag_considered
     path = _path(channel, now)
     try:
         with _LOCK:

@@ -29,6 +29,7 @@ belongs in shmobster's own config where it is reviewable, not inherited from
 somewhere else."""
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -106,6 +107,33 @@ _PROBE = "rm -rf /tmp/shmobster-preflight-probe"
 _PROBE_CWD = "/"
 _PROBE_ATTEMPTS = 3
 _PROBE_RETRY_SECONDS = 1.0
+
+
+# The voitta-yolt release this shmobster is tested against. The classifier is
+# a sibling CLONE, not a package (README, "Upgrading pulls three checkouts"),
+# so nothing installs a version: it is whatever that clone holds, and a
+# `git pull` there changes every verdict live, between restarts. On 2026-10-07
+# another session pulled it from v2.4.0 to v2.7.0 without knowing the agent
+# read it. Keep the clone detached at this tag; move both together.
+YOLT_PIN = "v2.8.0"
+
+
+def pinned_version():
+    """(tag the classifier clone sits exactly on or None, matches YOLT_PIN)."""
+    retval = (None, False)
+    if not config.YOLT_CLASSIFIER:
+        return retval
+    try:
+        out = subprocess.run(
+            ["git", "-C", os.path.dirname(os.path.abspath(config.YOLT_CLASSIFIER)),
+             "describe", "--tags", "--exact-match", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return retval
+    tag = out.stdout.strip() or None
+    retval = (tag, tag == YOLT_PIN)
+    return retval
 
 
 def preflight():

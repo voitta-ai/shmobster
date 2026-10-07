@@ -209,7 +209,7 @@ def standing_block(channel=None):
     """The skills the channel policy marks `always_skills`, in full, for the
     system prompt -- empty string when there are none.
 
-    A menu entry is a label the model may or may not act on: in #demo1 the
+    A menu entry is a label the model may or may not act on: in one channel the
     same question loaded its format skill on some turns and not others, so the
     format came and went. A skill named here is in the prompt on every turn
     instead. It is the policy's call, not the skill's: a front-matter flag

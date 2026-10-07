@@ -1131,13 +1131,22 @@ class _Walker:
         scope = self.policy.get("vercel")
         if not isinstance(scope, dict) or self.writes_file or self.tracked is None:
             return None
+        # A host variable passed through is one this check never sees, and
+        # VERCEL_ORG_ID / VERCEL_PROJECT_ID / VERCEL_TOKEN all retarget vercel.
+        if any(str(n).upper().startswith("VERCEL_")
+               for n in (self.policy.get("env_passthrough") or [])):
+            return None
         parsed = self._vercel_argv(args)
         if parsed is None:
             return None
-        words, teams, version = parsed
+        words, teams, version, token = parsed
+        if not words and version:
+            return (True, "vercel --version: read-only")
+        # Without a channel token the CLI falls back to the global login in
+        # HOME -- the operator's own account, which no channel was given.
+        if not _vercel_token_ok(token, self.policy):
+            return None
         if not words:
-            if version:
-                return (True, "vercel --version: read-only")
             # A bare `vercel` deploys the current directory.
             words = ["deploy"]
         key2, key1 = tuple(words[:2]), (words[0],)
@@ -1169,6 +1178,10 @@ class _Walker:
                 return None
             directory = _resolve(rest[0], self.tracked)
             rest = []
+        if words[0] == "deploy" and not _within(directory, self.start_dir):
+            # A deploy uploads the directory. Outside the channel tree that is
+            # a way to ship any readable file to a project this channel owns.
+            return None
         env = self.policy.get("env") or {}
         link = _vercel_link(directory)
         if link is False:
@@ -1213,18 +1226,26 @@ class _Walker:
                       f"{what}, in this channel's vercel scope")
 
     def _vercel_argv(self, args):
-        """(words, team values, saw --version) for a vercel argv, or None when
-        any part of it cannot be read. Only the token's value may be dynamic."""
-        words, teams, version = [], [], False
+        """(words, team values, saw --version, token argument text or None)
+        for a vercel argv, or None when any part of it cannot be read. Only the
+        token's value may be dynamic; it is returned for `_vercel_token_ok` and
+        never put in a reason."""
+        words, teams, version, token = [], [], False, None
         pending = None
         for a in args:
             static = _static(a)
+            raw = _text(a, self.src)
             if pending == "token":
+                token = raw
                 pending = None
                 continue
             if not static:
+                name = raw.split("=", 1)[0]
+                if name in _VERCEL_TOKEN_FLAGS and "=" in raw:
+                    token = raw.split("=", 1)[1]
+                    continue
                 return None
-            t = _unquote(_text(a, self.src))
+            t = _unquote(raw)
             if pending == "team":
                 teams.append(t)
                 pending = None
@@ -1235,7 +1256,10 @@ class _Walker:
             if t.startswith("-"):
                 name, eq, value = t.partition("=")
                 if name in _VERCEL_TOKEN_FLAGS:
-                    pending = None if eq else "token"
+                    if eq:
+                        token = value
+                    else:
+                        pending = "token"
                 elif name in _VERCEL_TEAM_FLAGS:
                     if eq:
                         teams.append(value)
@@ -1251,7 +1275,7 @@ class _Walker:
                 words.append(t)
         if pending is not None:
             return None
-        retval = (words, teams, version)
+        retval = (words, teams, version, token)
         return retval
 
     def aws(self, args):
@@ -1294,12 +1318,40 @@ def _vercel_link(directory):
     return retval
 
 
+_VERCEL_HASHED = re.compile(r"^(.+)-[a-z0-9]{9}$")
+_VERCEL_TOKEN_VAR = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+
+def _vercel_token_ok(token, policy):
+    """A token this channel was given: a non-empty literal, or one variable
+    the channel's own `env` sets. Absent, empty, or any other expansion parks,
+    because the CLI would then use the global login (#328)."""
+    if token is None:
+        return False
+    value = _unquote(token.strip())
+    m = _VERCEL_TOKEN_VAR.match(value)
+    if m:
+        retval = bool((policy.get("env") or {}).get(m.group(1)))
+        return retval
+    retval = bool(value) and "$" not in value and "`" not in value
+    return retval
+
+
+def _within(path, root):
+    """True when `path` resolves inside `root`."""
+    if path is None or root is None:
+        return False
+    p, r = os.path.realpath(path), os.path.realpath(root)
+    retval = p == r or p.startswith(r + os.sep)
+    return retval
+
+
 def _vercel_deployment_project(target, names, team):
     """The allowed project a deployment URL belongs to, or None.
 
-    Vercel's generated hostnames are `<project>-<hash>-<team>.vercel.app` and
-    `<project>-git-<branch>-<team>.vercel.app`. A custom domain or a `dpl_` ID
-    names no project in its text, so it is unresolvable and parks."""
+    Only Vercel's generated `<project>-<hash>-<team>.vercel.app` is read. A
+    custom domain, a `dpl_` ID or a branch URL names no project unambiguously
+    in its text, so it is unresolvable and parks."""
     host = target.split("://", 1)[-1].split("/", 1)[0].lower()
     suffix = ".vercel.app"
     if not team or not host.endswith(suffix):
@@ -1309,10 +1361,14 @@ def _vercel_deployment_project(target, names, team):
     if not label.endswith(tail):
         return None
     label = label[:-len(tail)]
-    # Longest name first, so `site` does not claim `site-admin`'s deployments.
-    for name in sorted(names, key=len, reverse=True):
-        if label.startswith(name + "-") and len(label) > len(name) + 1:
-            return name
+    # Exactly `<name>-<9-char hash>`. A prefix match let `site` claim
+    # `site-evil-<hash>`, a different project's deployment. The
+    # `<name>-git-<branch>` form is not accepted: `site-git-x` is equally a
+    # project named `site-git` deploying branch `x`, and nothing in the text
+    # tells them apart.
+    m = _VERCEL_HASHED.match(label)
+    if m and m.group(1) in names:
+        return m.group(1)
     return None
 
 

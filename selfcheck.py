@@ -398,7 +398,7 @@ assert "Your name is shmobster" in captured["sys"], captured["sys"]  # identity 
 gh_pol = {"github_repos": ["voitta-ai/*"]}
 assert policy.check("gh repo view voitta-ai/shmobster", gh_pol)[0], "allowed repo passes"
 assert not policy.check("gh repo view other-org/thing", gh_pol)[0], "disallowed repo blocks"
-aws_pol = {"aws_profile": "doubledoor"}
+aws_pol = {"aws_profile": "acme-prod"}
 assert policy.check("aws s3 ls", aws_pol)[0], "aws without override passes"
 assert not policy.check("aws s3 ls --profile other", aws_pol)[0], "profile override blocks"
 # run_shell surfaces a policy block (yolt says safe, policy says no)

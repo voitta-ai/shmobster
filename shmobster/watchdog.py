@@ -158,11 +158,32 @@ def _loop(client, timeout_sec, poll_sec):
     last_pong = None
     last_report_at = now - _REPORT_SEC  # emit the first status promptly
     _warned_processing = False
+    last_wall = time.time()
+    last_mono = now
 
     while True:
         time.sleep(poll_sec)
         try:
             now = time.monotonic()
+            wall = time.time()
+            # A host sleep pauses the monotonic clock but not the wall clock.
+            # Each macOS Power Nap DarkWake then runs the process for ~45s on a
+            # socket Slack dropped while it slept: no session can stabilise in
+            # that window, and the unstable time added up across two or three
+            # DarkWakes until it passed the limit -- every watchdog exit from
+            # 2026-10-06 19:38 to 2026-10-07 06:38 landed in one, the laptop
+            # asleep throughout. Time across a sleep is not deafness: start the
+            # clocks over, so only a wedge inside one waking stretch can trip.
+            # Measured against the monotonic gap, not poll_sec: a process starved
+            # of CPU (swap thrash) overruns its sleep on both clocks, and that IS
+            # a stall the watchdog must keep counting.
+            slept = (wall - last_wall) - (now - last_mono)
+            last_wall, last_mono = wall, now
+            if slept > poll_sec:
+                logging.info("watchdog: host slept ~%ds; clocks restarted", int(slept))
+                pong_ok_at = stable_ok_at = proc_ok_at = queue_ok_at = now
+                session_since = None
+                current_sid = None
             sid, pong = _probe(client)
 
             if pong is _MISSING or sid is _MISSING:
@@ -222,7 +243,7 @@ def _loop(client, timeout_sec, poll_sec):
                 last_report_at = now
                 _sid_short = (str(current_sid)[:8] if current_sid else "none")
                 logging.info(
-                    "watchdog: session=%s stable_for=%ds pong_age=%ds proc_dead=%ds "
+                    "watchdog: session=%s unstable_for=%ds pong_age=%ds proc_dead=%ds "
                     "queue_stuck=%ds connected=%s",
                     _sid_short, int(unstable_for), int(deaf_for), int(proc_dead_for),
                     int(queue_stuck_for), client.is_connected(),

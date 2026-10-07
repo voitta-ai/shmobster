@@ -17,6 +17,12 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Here, unlike CI, the name half must run: a missing wordlist refuses the push
+# instead of printing "clean (STRUCTURAL ONLY)". That line printed on every
+# push for weeks while channel and client names reached this public repo
+# (2026-10-07). The list lives outside every repo; see check-sensitive-terms.sh.
+export SHMOBSTER_SENSITIVE_TERMS_REQUIRED=1
+
 # The same paths CI scans. requirements.txt is deliberately absent: a sha256
 # hash contains 12-digit runs and matches the account-id shape, so including it
 # would train everyone to ignore this hook's output.
@@ -26,5 +32,29 @@ if ! bash scripts/check-sensitive-terms.sh \
     echo "pre-push: refused. A sensitive term is in the tree above." >&2
     echo "  This repo is public. Fix the line, or re-run with --no-verify if you" >&2
     echo "  have checked it yourself and it is a false positive." >&2
+    exit 1
+fi
+
+# Commit messages leave with the push too, and a tree scan never sees them:
+# three of 2026-10-07's leaks were in messages, which public history keeps.
+# git hands pre-push one line per ref: <local ref> <local sha> <remote ref>
+# <remote sha>. A new branch has an all-zero remote sha; its commits are the
+# ones not already on any remote branch.
+msgs="$(mktemp)"
+trap 'rm -f "$msgs"' EXIT
+zero="0000000000000000000000000000000000000000"
+while read -r _lref lsha _rref rsha; do
+    [ "$lsha" = "$zero" ] && continue   # a delete pushes no commits
+    if [ "$rsha" = "$zero" ]; then
+        git log --format=%B "$lsha" --not --remotes >> "$msgs"
+    else
+        git log --format=%B "$rsha..$lsha" >> "$msgs"
+    fi
+done
+if [ -s "$msgs" ] && ! bash scripts/check-sensitive-terms.sh "$msgs"; then
+    echo "" >&2
+    echo "pre-push: refused. A sensitive term is in a commit message being pushed." >&2
+    echo "  Reword it (git commit --amend, or an interactive rebase you run" >&2
+    echo "  yourself) before it reaches public history." >&2
     exit 1
 fi

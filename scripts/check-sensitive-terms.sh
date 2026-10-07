@@ -120,12 +120,16 @@ wordlist_ran=0
 
 if [ -f "$terms_file" ]; then
   wordlist_ran=1
-  CASE_FLAG="-i"
+  # Case-insensitive and WHOLE-WORD (-w): a short listed name otherwise fires
+  # inside ordinary words and identifiers ("rubella", "isLabelEvent"), and a
+  # gate that cries wolf gets bypassed with --no-verify. A word boundary is any
+  # non-[A-Za-z0-9_] character, so "#name", "name-site" and "name.com" still match.
+  CASE_FLAG="-i -w"
   while IFS= read -r term; do
     case "$term" in
       ""|\#*) continue ;;
     esac
-    # Case-insensitive; the term is treated as an extended regex.
+    # The term is treated as an extended regex.
     check_pattern "private-term" "$term" "$@"
   done < "$terms_file"
   CASE_FLAG=""

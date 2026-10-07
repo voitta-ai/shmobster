@@ -523,6 +523,16 @@ def main():
     # wrong" is the kind that gets set once during an upgrade and never unset.
     # A deployment that genuinely needs the old pairing should run the older
     # shmobster that was tested against it.
+    _yolt_tag, _yolt_pinned = yolt_gate.pinned_version()
+    if _yolt_pinned:
+        logging.info("yolt: %s (pinned)", _yolt_tag)
+    elif config.YOLT_CLASSIFIER:
+        # A warning, not a refusal: a refused boot is a launchd crash loop, and
+        # the clone moving is a review problem, not an outage (#229's lesson).
+        logging.warning(
+            "yolt: the classifier clone is at %s, but this release is tested "
+            "against %s -- `git -C <voitta-yolt> checkout --detach %s`",
+            _yolt_tag or "an untagged commit", yolt_gate.YOLT_PIN, yolt_gate.YOLT_PIN)
     _yolt_warnings = yolt_gate.preflight()
     for warning in _yolt_warnings:
         logging.error("yolt preflight: %s", warning)

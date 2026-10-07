@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt >= 2.0.1            # a clone, not a package: exec classifier + secret_redact
+  - voitta-ai/voitta-yolt, pinned at v2.8.0   # a clone, not a package: exec classifier + secret_redact; boot refuses < 2.0.1
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -852,7 +852,7 @@ and any private catalog) -- so the code that actually runs after a restart is
 whatever those checkouts hold, and a release note that says "needs yolt >=
 X" means their `git pull`, not this repo's. In that order:
 
-    git -C /path/to/voitta-yolt pull
+    git -C /path/to/voitta-yolt fetch --tags && git -C /path/to/voitta-yolt checkout --detach v2.8.0   # yolt_gate.YOLT_PIN
     git -C /path/to/skillz pull            # and each other skills.paths entry
     git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
     git pull && .venv/bin/pip install --require-hashes -r requirements.txt

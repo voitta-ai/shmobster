@@ -424,6 +424,14 @@ AWS_RETURNS_SECRET = frozenset((
 # read, so the common ones are named. An unknown flag still misparses and still
 # parks, which is why this list only ever adds working commands.
 GH_VALUE_FLAGS = frozenset(("-R", "--repo", "--hostname"))
+
+# `npm` subcommands that only read, and read only locally: `ls` walks the
+# node_modules tree, no network, no scripts. `view`/`outdated` are absent on
+# purpose -- they reach whatever registry a `.npmrc` in the channel tree names,
+# with its auth token, and nothing here vets that host against allow_domains.
+# install/ci/run/exec/publish run scripts or change the tree; `npx` is another
+# verb and parks.
+NPM_READS = frozenset(("ls", "list"))
 AWS_VALUE_FLAGS = frozenset((
     "--profile", "--region", "--endpoint-url", "--output", "--query",
     "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--color",
@@ -703,6 +711,8 @@ class _Walker:
             retval = self.gh(args)
         elif verb == "aws":
             retval = self.aws(args)
+        elif verb == "npm":
+            retval = self.npm(args)
         elif verb in EGRESS_READS and not self.writes_file:
             retval = self.fetch(verb, text, args)
         elif verb in READ_VERBS and not self.writes_file:
@@ -1045,6 +1055,14 @@ class _Walker:
             texts = [_unquote(_text(a, self.src)) if _static(a) else None for a in args]
             why = _gh_auth_refusal(texts)
             retval = (False, why) if why else (True, "gh auth status: read-only")
+        return retval
+
+    def npm(self, args):
+        """`npm <cmd>` when NPM_READS names it. None otherwise, which parks."""
+        words = self._words(args)
+        retval = None
+        if words and not self.writes_file and words[0] in NPM_READS:
+            retval = (True, f"npm {words[0]}: read-only")
         return retval
 
     def aws(self, args):

@@ -492,6 +492,12 @@ One JSON config, no `.env`. Copy the example and fill it in:
   `git grep` is absent from the git list -- `git grep -O<cmd>` runs the pager it
   is handed, whether or not anything is a terminal.
 
+  `npm` is admitted for `ls`/`list` only (`grant.NPM_READS`): local, no network,
+  no scripts. `npm view`/`outdated` are left out because they reach whatever
+  registry a `.npmrc` in the channel tree names, a host nothing vets against
+  `allow_domains`; install/ci/run/exec/publish and all of `npx` park. `vercel`
+  parks entirely until it is a per-channel, project-scoped grant.
+
   Two more classes are excluded although they never mutate. AWS operations that
   write a local file (`s3api get-object` and kin) are excluded because the CLI
   spells that destination as a bare trailing positional, with no option name to

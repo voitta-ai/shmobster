@@ -40,6 +40,7 @@ source order, starting from the channel cwd; a `cd` that cannot be resolved
 statically (`cd "$DIR"`, `cd -`) makes every later `git commit` ungrantable
 rather than judged against the wrong tree. `git -C <path>` retargets one
 segment the same way."""
+import json
 import os
 
 import tree_sitter
@@ -432,6 +433,54 @@ GH_VALUE_FLAGS = frozenset(("-R", "--repo", "--hostname"))
 # install/ci/run/exec/publish run scripts or change the tree; `npx` is another
 # verb and parks.
 NPM_READS = frozenset(("ls", "list"))
+
+# `vercel` is a per-channel grant scoped to Vercel projects (#327), modelled on
+# `aws_profile`: the channel policy names what it may reach, and a command that
+# reaches anything else is not granted. The policy key, set in the policy file
+# only (never through set_policy, like `unattended`):
+#
+#     "vercel": {"team": "<slug>", "org_id": "team_...",
+#                "projects": {"<name>": "prj_..."}, "writes": false}
+#
+# The scope is the Vercel project, not the git repo: one repo can deploy to
+# several projects and a project can deploy with no repo at all.
+#
+# Grouped by what the command reaches. Account reads name no target. Team reads
+# need the team resolved. Project commands need every piece of target evidence
+# present to be in scope, and at least one present.
+VERCEL_ACCOUNT_READS = frozenset((("whoami",), ("teams", "ls"), ("teams", "list")))
+VERCEL_TEAM_READS = frozenset((
+    ("project", "ls"), ("project", "list"), ("projects", "ls"), ("projects", "list"),
+    ("domains", "ls"), ("domains", "list"), ("alias", "ls"), ("alias", "list"),
+))
+VERCEL_PROJECT_READS = frozenset((
+    ("ls",), ("list",), ("inspect",), ("logs",), ("env", "ls"), ("env", "list"),
+))
+# Granted only when the policy also says `"writes": true`. Deliberately absent,
+# so they park even in a granted channel: `env pull` writes the project's
+# secrets into the tree, `link` rewrites .vercel/project.json -- the file this
+# check reads -- and `alias set`/`rm` move a domain, which no project ID pins.
+VERCEL_PROJECT_WRITES = frozenset((
+    ("deploy",), ("promote",), ("rollback",),
+    ("env", "add"), ("env", "rm"), ("env", "remove"),
+))
+# Subcommands whose first positional after the subcommand is a deployment (URL
+# or name) and so a target. `ls` takes a project name there instead.
+_VERCEL_DEPLOYMENT_ARG = frozenset(("inspect", "logs", "promote", "rollback"))
+# The credential is skipped unread: naming it does not change the target, and
+# it is usually `"$VERCEL_TOKEN"`, an expansion. Nothing else may be dynamic.
+_VERCEL_TOKEN_FLAGS = frozenset(("--token", "-t"))
+# These ARE the target, so their value is read and checked.
+_VERCEL_TEAM_FLAGS = frozenset(("--scope", "-S", "--team", "-T"))
+# Value flags that only shape output or timing.
+_VERCEL_VALUE_FLAGS = frozenset(("--output", "-o", "--timeout", "--limit", "-n",
+                                 "--environment", "--since", "--until"))
+_VERCEL_FLAGS = frozenset(("--prod", "--yes", "-y", "--debug", "-d", "--no-color",
+                           "--json", "--force", "-f", "--wait", "--follow",
+                           "--version", "-v"))
+# Any other flag parks: `--cwd`, `--local-config`/`-A` and `--global-config`/`-Q`
+# move where the link is read from, `--name` renames the project a deploy goes
+# to, and an unknown value flag would have its value read as a target.
 AWS_VALUE_FLAGS = frozenset((
     "--profile", "--region", "--endpoint-url", "--output", "--query",
     "--ca-bundle", "--cli-read-timeout", "--cli-connect-timeout", "--color",
@@ -546,6 +595,10 @@ class _Walker:
         # Raised while walking the body of a redirect that writes to a real
         # file, so a read verb under it is not granted as a read (#177).
         self.writes_file = False
+        # Set when a vercel segment is granted, and when any other segment is
+        # granted for something other than a read (#327); `check` refuses both.
+        self.vercel_seen = False
+        self.other_effect = False
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -620,6 +673,11 @@ class _Walker:
         before = len(self.reasons)
         saved = self.writes_file
         self.writes_file = self.writes_file or writes
+        if writes:
+            # A redirect writes before a later segment runs, which is the same
+            # hazard the result path marks for `cp`/`mv` (#328 r2):
+            # `printf x > .vercel/project.json && vercel deploy` must park.
+            self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
         if retval[0] and len(self.reasons) > before:
@@ -713,6 +771,8 @@ class _Walker:
             retval = self.aws(args)
         elif verb == "npm":
             retval = self.npm(args)
+        elif verb == "vercel":
+            retval = self.vercel(args)
         elif verb in EGRESS_READS and not self.writes_file:
             retval = self.fetch(verb, text, args)
         elif verb in READ_VERBS and not self.writes_file:
@@ -751,6 +811,11 @@ class _Walker:
                 retval = (False, shadowed or reason)
         if retval[0]:
             self.reasons.append(retval[1])
+            # A vercel grant reads .vercel/project.json now; a write elsewhere
+            # in the same command runs before vercel does and can rewrite it
+            # in between (#327). Reads and `cd` cannot.
+            if verb not in ("vercel", "cd") and not retval[1].endswith("read-only"):
+                self.other_effect = True
         return retval
 
     def flag_checked(self, verb, args):
@@ -1065,6 +1130,162 @@ class _Walker:
             retval = (True, f"npm {words[0]}: read-only")
         return retval
 
+    def vercel(self, args):
+        """A vercel command inside this channel's `vercel` scope (#327), or None,
+        which parks. Never names the token in a reason."""
+        scope = self.policy.get("vercel")
+        if not isinstance(scope, dict) or self.writes_file or self.tracked is None:
+            return None
+        # A host variable passed through is one this check never sees, and
+        # VERCEL_ORG_ID / VERCEL_PROJECT_ID / VERCEL_TOKEN all retarget vercel.
+        if any(str(n).upper().startswith("VERCEL_")
+               for n in (self.policy.get("env_passthrough") or [])):
+            return None
+        parsed = self._vercel_argv(args)
+        if parsed is None:
+            return None
+        words, teams, version, token = parsed
+        if not words and version:
+            return (True, "vercel --version: read-only")
+        # Without a channel token the CLI falls back to the global login in
+        # HOME -- the operator's own account, which no channel was given.
+        if not _vercel_token_ok(token, self.policy):
+            return None
+        if not words:
+            # A bare `vercel` deploys the current directory.
+            words = ["deploy"]
+        key2, key1 = tuple(words[:2]), (words[0],)
+        if key2 in VERCEL_ACCOUNT_READS:
+            return (True, f"vercel {' '.join(key2)}: read-only")
+        org_id = scope.get("org_id")
+        team = scope.get("team")
+        if any(t.lower() != str(team or "").lower() for t in teams):
+            return None
+        if key2 in VERCEL_TEAM_READS:
+            kind, rest = "team", words[2:]
+        elif key2 in VERCEL_PROJECT_READS or key1 in VERCEL_PROJECT_READS:
+            kind = "project"
+            rest = words[2:] if key2 in VERCEL_PROJECT_READS else words[1:]
+        elif key2 in VERCEL_PROJECT_WRITES or key1 in VERCEL_PROJECT_WRITES:
+            if scope.get("writes") is not True:
+                return None
+            kind = "write"
+            rest = words[2:] if key2 in VERCEL_PROJECT_WRITES else words[1:]
+        else:
+            return None
+        projects = scope.get("projects") or {}
+        names = {str(n).lower() for n in projects}
+        ids = {str(i) for i in projects.values()}
+        directory = self.tracked
+        if words[0] == "deploy" and rest:
+            # `vercel deploy <path>` reads that directory's link.
+            if len(rest) != 1:
+                return None
+            directory = _resolve(rest[0], self.tracked)
+            rest = []
+        if words[0] == "deploy" and not _within(directory, self.start_dir):
+            # A deploy uploads the directory. Outside the channel tree that is
+            # a way to ship any readable file to a project this channel owns.
+            return None
+        env = self.policy.get("env") or {}
+        link = _vercel_link(directory)
+        if link is False:
+            return None
+        orgs = [o for o in (env.get("VERCEL_ORG_ID"), link and link[0]) if o]
+        if any(o != org_id for o in orgs):
+            return None
+        team_known = bool(teams or orgs)
+        if kind == "team":
+            if rest or not team_known:
+                return None
+            # The team path read the link too (orgs above), so a write in the
+            # same command must park it like any other vercel grant (#328 r2).
+            self.vercel_seen = True
+            return (True, f"vercel {' '.join(key2)}: read-only, team {team}")
+        evidence = [p for p in (env.get("VERCEL_PROJECT_ID"), link and link[1]) if p]
+        if any(p not in ids for p in evidence):
+            return None
+        if words[0] == "env":
+            # `env add NAME [environment]`: variable names, not targets.
+            rest = []
+        if len(rest) > 1:
+            return None
+        # A deployment URL carries its team; a bare project name does not, and
+        # the same name can exist in a team the token also reaches.
+        url_named = False
+        if rest:
+            target = rest[0]
+            if words[0] in _VERCEL_DEPLOYMENT_ARG:
+                if _vercel_deployment_project(target, names, team) is None:
+                    return None
+                url_named = True
+            elif words[0] in ("ls", "list") and target.lower() in names:
+                if not team_known:
+                    return None
+            else:
+                return None
+        if not evidence and not rest:
+            return None
+        if not team_known and not url_named:
+            return None
+        self.vercel_seen = True
+        what = "read-only" if kind == "project" else "granted write"
+        return (True, f"vercel {' '.join(words[:2] if words[0] == 'env' else words[:1])}: "
+                      f"{what}, in this channel's vercel scope")
+
+    def _vercel_argv(self, args):
+        """(words, team values, saw --version, token argument text or None)
+        for a vercel argv, or None when any part of it cannot be read. Only the
+        token's value may be dynamic; it is returned for `_vercel_token_ok` and
+        never put in a reason."""
+        words, teams, version, token = [], [], False, None
+        pending = None
+        for a in args:
+            static = _static(a)
+            raw = _text(a, self.src)
+            if pending == "token":
+                token = raw
+                pending = None
+                continue
+            if not static:
+                name = raw.split("=", 1)[0]
+                if name in _VERCEL_TOKEN_FLAGS and "=" in raw:
+                    token = raw.split("=", 1)[1]
+                    continue
+                return None
+            t = _unquote(raw)
+            if pending == "team":
+                teams.append(t)
+                pending = None
+                continue
+            if pending == "value":
+                pending = None
+                continue
+            if t.startswith("-"):
+                name, eq, value = t.partition("=")
+                if name in _VERCEL_TOKEN_FLAGS:
+                    if eq:
+                        token = value
+                    else:
+                        pending = "token"
+                elif name in _VERCEL_TEAM_FLAGS:
+                    if eq:
+                        teams.append(value)
+                    else:
+                        pending = "team"
+                elif name in _VERCEL_VALUE_FLAGS:
+                    pending = None if eq else "value"
+                elif name in _VERCEL_FLAGS and not eq:
+                    version = version or name in ("--version", "-v")
+                else:
+                    return None
+            else:
+                words.append(t)
+        if pending is not None:
+            return None
+        retval = (words, teams, version, token)
+        return retval
+
     def aws(self, args):
         """`aws <service> <operation>` when the operation only reads. The scope
         of what it may reach is policy's question, not this one: `_check_aws`
@@ -1080,6 +1301,84 @@ class _Walker:
         return retval
 
 
+def _vercel_link(directory):
+    """(orgId, projectId) from `<directory>/.vercel/project.json`, None when
+    there is no link, or False when there is one this cannot read -- including
+    a monorepo `repo.json`, which links several projects at once (#327).
+
+    The file is in the channel tree, which the agent may write, so it is never
+    the policy. It is evidence of where vercel will go, and that is checked
+    against the policy like any other target."""
+    if directory is None:
+        return False
+    base = os.path.join(directory, ".vercel")
+    if os.path.exists(os.path.join(base, "repo.json")):
+        return False
+    path = os.path.join(base, "project.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        retval = (str(data["orgId"]), str(data["projectId"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        retval = False
+    return retval
+
+
+_VERCEL_HASHED = re.compile(r"^(.+)-[a-z0-9]{9}$")
+_VERCEL_TOKEN_VAR = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
+
+
+def _vercel_token_ok(token, policy):
+    """A token this channel was given: one variable the channel's own `env`
+    sets. Absent, empty, or any other expansion parks, because the CLI would
+    then use the global login (#328). A literal parks too: it would sit in the
+    command text, which the trajectory records and a Vercel token's shape may
+    not be one the redactor knows (#328 r2)."""
+    if token is None:
+        return False
+    value = _unquote(token.strip())
+    m = _VERCEL_TOKEN_VAR.match(value)
+    retval = bool(m) and bool((policy.get("env") or {}).get(m.group(1)))
+    return retval
+
+
+def _within(path, root):
+    """True when `path` resolves inside `root`."""
+    if path is None or root is None:
+        return False
+    p, r = os.path.realpath(path), os.path.realpath(root)
+    retval = p == r or p.startswith(r + os.sep)
+    return retval
+
+
+def _vercel_deployment_project(target, names, team):
+    """The allowed project a deployment URL belongs to, or None.
+
+    Only Vercel's generated `<project>-<hash>-<team>.vercel.app` is read. A
+    custom domain, a `dpl_` ID or a branch URL names no project unambiguously
+    in its text, so it is unresolvable and parks."""
+    host = target.split("://", 1)[-1].split("/", 1)[0].lower()
+    suffix = ".vercel.app"
+    if not team or not host.endswith(suffix):
+        return None
+    label = host[:-len(suffix)]
+    tail = "-" + str(team).lower()
+    if not label.endswith(tail):
+        return None
+    label = label[:-len(tail)]
+    # Exactly `<name>-<9-char hash>`. A prefix match let `site` claim
+    # `site-evil-<hash>`, a different project's deployment. The
+    # `<name>-git-<branch>` form is not accepted: `site-git-x` is equally a
+    # project named `site-git` deploying branch `x`, and nothing in the text
+    # tells them apart.
+    m = _VERCEL_HASHED.match(label)
+    if m and m.group(1) in names:
+        return m.group(1)
+    return None
+
+
 def check(command, policy, channel=None, thread_ts=None):
     """(granted, reason). `reason` lists every segment's grounds when granted,
     or the first refusal when not."""
@@ -1091,5 +1390,8 @@ def check(command, policy, channel=None, thread_ts=None):
     ok, why = walker.walk(tree.root_node)
     if ok and not walker.reasons:
         ok, why = (False, "empty command")
+    if ok and walker.vercel_seen and walker.other_effect:
+        ok, why = (False, "vercel in the same command as a write: the link it was "
+                          "checked against could change before it runs")
     retval = (True, "; ".join(walker.reasons)) if ok else (False, why)
     return retval

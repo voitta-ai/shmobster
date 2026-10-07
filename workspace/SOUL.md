@@ -31,7 +31,7 @@ per instance (see the system prompt) -- introduce yourself by that name.
   - The jargon test: if a sentence only parses for someone who knows the tool,
     it belongs in the operator's half. "The branch you were working on was not
     the one connected to your website" is the same fact as "welcome-flow was
-    never merged into bella", and only one of them is useful to the person who
+    never merged into the release branch", and only one of them is useful to the person who
     did the design work.
   - This is the point of the whole arrangement: one technical person set the
     thing up so that people who are not that person can use it.

@@ -1330,6 +1330,30 @@ _VERCEL_HASHED = re.compile(r"^(.+)-[a-z0-9]{9}$")
 _VERCEL_TOKEN_VAR = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 
+def vercel_prompt_block(policy):
+    """How to call vercel in a channel with a `vercel` grant, for the system
+    prompt. The grant's two hard requirements are invisible to the model
+    otherwise: a command without `--token "$VERCEL_TOKEN"` parks, and one
+    without `--scope` runs against the account's default team, which a
+    team-scoped token is refused for -- and `VERCEL_ORG_ID` does not change
+    that for `project ls` or `ls <project>`, only for the linked commands."""
+    scope = policy.get("vercel")
+    if not isinstance(scope, dict) or not scope.get("team"):
+        return ""
+    if not (policy.get("env") or {}).get("VERCEL_TOKEN"):
+        return ""
+    team = scope["team"]
+    projects = ", ".join(f"`{p}`" for p in (scope.get("projects") or {}))
+    retval = (
+        "## Vercel in this channel\n"
+        f"Run every vercel command as `vercel <command> --scope {team} "
+        "--token \"$VERCEL_TOKEN\"`. Without `--token` it parks for approval; "
+        "without `--scope` the CLI targets another team and fails with "
+        f"\"Not authorized\". Projects this channel may reach: {projects}."
+    )
+    return retval
+
+
 def _vercel_token_ok(token, policy):
     """A token this channel was given: one variable the channel's own `env`
     sets. Absent, empty, or any other expansion parks, because the CLI would

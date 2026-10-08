@@ -7,7 +7,7 @@ import datetime
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, cost, learning, llm, mcp, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, cost, grant, learning, llm, mcp, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
 
 _SYSTEM = None
 
@@ -158,6 +158,12 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     _standing = skills.standing_block(channel)
     if _standing:
         system += "\n\n" + _standing
+    # The vercel grant's calling convention, which the model cannot infer: a
+    # command missing --token parked for a card, one missing --scope hit the
+    # wrong team.
+    _vercel = grant.vercel_prompt_block(policy)
+    if _vercel:
+        system += "\n\n" + _vercel
     # The bar for flagging, in view while the answer is composed (#211). It was
     # only ever in the tool description, which the model reads once it is
     # already deciding to call something -- so a turn whose *conclusion* was the

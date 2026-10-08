@@ -1,7 +1,7 @@
 """The channel repo's own instructions, as standing context (#259).
 
 A repo usually documents how it wants to be worked on, and the agent standing
-in that repo never read it. The case that produced this: `seeds-of-doubt` has
+in that repo never read it. The case that produced this: `scrooge-banking` has
 `docs/BRANCHING-STRATEGY.md` and `docs/PERSONAL_BRANCHES.md`, both committed,
 both saying that a collaborator's branch is what deploys to their subdomain.
 Six weeks of UX work sat on a feature branch instead, invisible, and when asked

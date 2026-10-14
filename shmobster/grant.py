@@ -132,7 +132,8 @@ _UNATTENDED_GH_NOUNS = frozenset((
 # The bar for entry is that no flag turns the command into a write. That is why
 # `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
 # `find` (-delete, -exec) and `xargs` (runs its argument) are absent, and why
-# `awk` is absent despite reading: its program can call system(), and `tree` is
+# `awk` is absent despite reading: its program can call system() (it is checked
+# against an allowlist in FLAG_CHECKED_READS instead), and `tree` is
 # absent because -o writes its output to a file. `sed` is in FS_VERBS already,
 # as the writer -i makes it.
 READ_VERBS = frozenset((
@@ -172,7 +173,7 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk"))
 
 
 def _find_refusal(texts):
@@ -200,7 +201,114 @@ def _sort_refusal(texts):
     return retval
 
 
-_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal}
+# awk is a language, so it is checked against an allowlist of what its program
+# may contain rather than a list of the builtins that run or write things: a
+# function it may call, and characters outside strings and regexes that cannot
+# open a pipe (`|`), a file (`>`), an extension (`@load`, `@include`) or a
+# continuation (`\`). Every builtin name of BWK awk and gawk outside that
+# allowlist is refused wherever it appears, called or not: awk applies a bare
+# builtin to `$0`. Options: the field separator and a variable, nothing that
+# loads a program from a file.
+_AWK_CALLS = frozenset((
+    "length", "substr", "index", "split", "sub", "gsub", "match", "sprintf",
+    "tolower", "toupper", "int", "sqrt", "exp", "log", "sin", "cos", "atan2",
+    "rand", "srand", "printf", "print",
+))
+# The builtin and keyword names of BWK awk and gawk that are not allowed: they
+# run a command, open a file or connection, or flush and close one. A closed
+# set per implementation, unlike user variable names.
+_AWK_REFUSED_NAMES = frozenset((
+    "system", "getline", "close", "fflush", "function", "func",
+    "and", "asort", "asorti", "bindtextdomain", "compl", "dcgettext",
+    "dcngettext", "gensub", "isarray", "lshift", "mktime", "or", "patsplit",
+    "rshift", "strftime", "strtonum", "systime", "typeof", "xor",
+))
+_AWK_CHARS = frozenset("{}();,$+-*/%^!=<~?:[]&|. \t\n\r_0123456789")
+
+
+def _awk_program_refusal(prog):
+    """Why this awk program is not one of the read-only ones, or None."""
+    i, n = 0, len(prog)
+    prev = ""
+    while i < n:
+        c = prog[i]
+        if c == '"':
+            j = i + 1
+            while j < n and prog[j] != '"':
+                j += 2 if prog[j] == "\\" else 1
+            if j >= n:
+                return "awk: unterminated string"
+            i, prev = j + 1, "x"
+            continue
+        if c == "/" and prev not in ("x", ")", "]"):
+            # A regex literal: here `/` cannot be division, so it opens one.
+            j = i + 1
+            while j < n and prog[j] != "/":
+                j += 2 if prog[j] == "\\" else 1
+            if j >= n:
+                return "awk: unterminated regex"
+            i, prev = j + 1, "x"
+            continue
+        if c.isalpha() or c == "_":
+            j = i
+            while j < n and (prog[j].isalnum() or prog[j] == "_"):
+                j += 1
+            word = prog[i:j]
+            k = j
+            while k < n and prog[k] in " \t":
+                k += 1
+            if word in _AWK_REFUSED_NAMES:
+                return f"awk: {word}"
+            if k < n and prog[k] == "(" and word not in _AWK_CALLS and word not in ("if", "while", "for"):
+                return f"awk: calls {word}()"
+            if word in ("print", "printf"):
+                prev = "print"
+            else:
+                prev = "x"
+            i = j
+            continue
+        if c in "+-" and prog[i:i + 2] in ("++", "--"):
+            # Postfix after an operand keeps it an operand, so a `/` next is
+            # division; prefix leaves an operator before the operand to come.
+            i += 2
+            prev = "x" if prev == "x" else "op"
+            continue
+        if c == "|":
+            if prog[i:i + 2] != "||":
+                return "awk: pipe"
+            i += 2
+            prev = "op"
+            continue
+        if c not in _AWK_CHARS:
+            return f"awk: {c!r} outside a string or regex"
+        if c not in " \t\n\r":
+            prev = "x" if c.isdigit() or c in ")]$" else ("op" if c != "." else prev)
+        i += 1
+    return None
+
+
+def _awk_refusal(texts):
+    """`awk [-F sep] [-v var=val] 'program' [file | var=val ...]` whose program
+    passes `_awk_program_refusal`; anything else is refused."""
+    i = 0
+    while i < len(texts) and texts[i].startswith("-") and texts[i] != "-":
+        t = texts[i]
+        if t in ("-F", "-v"):
+            i += 2
+        elif t.startswith("-F") and len(t) > 2:
+            i += 1
+        else:
+            return f"awk: option {t}"
+    if i >= len(texts):
+        return "awk: no program"
+    retval = _awk_program_refusal(texts[i])
+    return retval
+
+
+_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal}
+
+# An interpreter asked only for its version runs no code: `python3 --version`.
+_VERSION_ONLY = frozenset(("python", "python3"))
 
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
@@ -256,6 +364,20 @@ def _fetch_write_flag(texts):
                 continue
             retval = head if head in _FETCH_WRITE_LONG else t
             break
+    return retval
+
+
+def _fetch_names_its_file(texts):
+    """True when every flag that makes this fetch write a file is `-o FILE` or
+    `--output FILE`, so the command names the file itself."""
+    retval = True
+    for t in texts:
+        head = t.split("=", 1)[0]
+        if head in _FETCH_WRITE_LONG:
+            retval = retval and head == "--output"
+        elif t.startswith("-") and not t.startswith("--"):
+            letters = set(t[1:]) & _FETCH_WRITE_LETTERS
+            retval = retval and letters <= {"o"}
     return retval
 
 
@@ -777,6 +899,9 @@ class _Walker:
             retval = self.fetch(verb, text, args)
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
+        elif (verb in _VERSION_ONLY and not self.writes_file and len(args) == 1
+              and _text(args[0], self.src) in ("--version", "-V")):
+            retval = (True, f"{verb} --version: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
         else:
@@ -830,6 +955,15 @@ class _Walker:
         if not all(_static(a) for a in args):
             retval = (False, f"{verb}: an argument is not a literal, so its flags cannot be read")
             return retval
+        if verb == "awk" and not all(
+                a.type == "raw_string"
+                or a.type in ("word", "number") and "\\" not in _text(a, self.src)
+                for a in args):
+            # The program is code: its text must be exactly the word awk gets.
+            # Inside single quotes the shell changes nothing; a double-quoted
+            # or concatenated word, or a bare word with an escape, it does.
+            retval = (False, "awk: an argument is not a plain word or single-quoted string")
+            return retval
         texts = [_unquote(_text(a, self.src)) for a in args]
         why = _FLAG_REFUSAL[verb](texts)
         retval = (False, why) if why else (True, f"{verb}: read-only")
@@ -880,6 +1014,13 @@ class _Walker:
             retval = (False, why)
             return retval
         hit = _fetch_write_flag(texts)
+        if hit and self.unattended and _fetch_names_its_file(texts):
+            # An unattended channel already writes its tree without a card
+            # (#253), and the sandbox confines this write the same way. Only
+            # `-o FILE`: a name taken from the URL or a response header is
+            # still the server choosing it.
+            retval = (True, f"{verb}: fetch to a host in allow_domains, -o to a named file")
+            return retval
         if hit:
             # A fetch that also writes a file is two powers in one command, and
             # the file is the response body -- content from off the box landing

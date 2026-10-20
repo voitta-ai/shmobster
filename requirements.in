@@ -12,7 +12,7 @@
 # this file without recompiling is self-revealing instead: the package does not
 # get installed, and selfcheck says so.
 slack-bolt>=1.18
-litellm>=1.100
+litellm>=1.105.1
 tree-sitter>=0.21
 tree-sitter-bash>=0.21
 pyyaml>=6
@@ -22,4 +22,4 @@ pyyaml>=6
 # where a batch of request-smuggling and redirect credential-leak fixes landed.
 # A floor on a dependency nobody declared is the only way to say "not below
 # this" about a package we do not import directly.
-aiohttp>=3.14.3
+aiohttp>=3.14.5

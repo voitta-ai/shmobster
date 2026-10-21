@@ -98,7 +98,20 @@ def _post_pending(client, channel, thread_ts):
             )
         except Exception:
             logging.exception("could not post approval buttons for %s", req_id)
-            approvals.unsurface(req_id)
+            # Withdrawn, not retried: a card Slack rejects is rejected again on
+            # every mention, and a request no human can see holds the thread's
+            # resume forever. The note carries the id only -- the command is
+            # the likeliest thing the card choked on.
+            if approvals.withdraw(req_id) is not None:
+                try:
+                    client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=(f":warning: [{req_id}] needed approval, but its card could not "
+                              "be posted, so it was withdrawn and did not run. Ask again "
+                              "if it is still needed."),
+                    )
+                except Exception:
+                    logging.exception("could not report the withdrawn request %s", req_id)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
     for key, prop in proposals.claim_unsurfaced(channel):

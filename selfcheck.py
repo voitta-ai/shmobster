@@ -3884,7 +3884,7 @@ for _k in approvals.ids("C_215"):
 # would never fire, and the trusted users would not hear about the
 # unauthorized click at all -- trading the one guarantee this path owes them
 # for a convenience. The original card cannot exist for these either
-# (_post_pending withdraws on the same failure), so there is nothing lost by
+# (_post_pending unsurfaces on the same failure), so there is nothing lost by
 # falling back to the wording that was always text and always fit.
 _long = "echo " + "x" * 4000
 assert not admin_tools._fits(slack_blocks.approval("k-1", {"command": _long, "reason": "r"}))

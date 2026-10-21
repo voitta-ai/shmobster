@@ -259,7 +259,7 @@ def _mark_alerted(request_id, channel, user_id):
 
 # Slack refuses a section whose text runs past 3000 characters, and a parked
 # command can be longer than that (#215). The original card hits the same wall
-# -- `_post_pending` logs the failure and withdraws the request -- so for such
+# -- `_post_pending` logs the failure and unsurfaces the request -- so for such
 # a command there was never a card standing anywhere, and forcing one here
 # would cost the alert itself: the post raises, `_post_alert` returns False,
 # `_mark_alerted` never fires, and the trusted users are simply not told that

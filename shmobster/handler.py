@@ -87,7 +87,13 @@ def resume(req_id, approved, command, result, thread_context=None, channel=None,
     on each click would run three turns in one thread, each seeing a different
     part of the outcome. The rule lives here rather than in the ingest so it
     holds for every ingest and can be checked without one."""
-    if channel is not None and not approvals.begin_resume(channel, thread_ts):
+    # The outcome is handed over so that, if the request still holding this
+    # thread is later withdrawn rather than resolved, the ingest can resume
+    # from it (#356). Only what describes the outcome: the ingest supplies its
+    # own client and re-reads the thread when it gets there.
+    outcome = {"req_id": req_id, "approved": approved, "command": command,
+               "result": result, "user_id": user_id, "requester": requester}
+    if channel is not None and not approvals.begin_resume(channel, thread_ts, outcome):
         logging.info("resume: [%s] resolved, but this thread is not ready to continue "
                      "(still parked, or already resuming)", req_id)
         return None

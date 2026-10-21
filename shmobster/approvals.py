@@ -262,14 +262,35 @@ def claim_unsurfaced(channel, thread_ts=None):
     return retval
 
 
-def unsurface(key):
-    """The ingest could not post the card (#129 review): make the request
-    eligible for another one on the next mention, rather than pending with no
-    surface and no id anyone was ever shown."""
+def withdraw(key):
+    """The ingest could not post the card: drop the request unrun.
+
+    This used to put the request back as unsurfaced (#129 review), to be
+    posted again on the next mention. When the failure was the card itself --
+    Slack rejecting it the same way every time -- that retry failed every turn,
+    and the request stayed parked with no card and no id any human was shown.
+    Nobody could approve or deny it, and since pending_in() and begin_resume()
+    count it, every later approval in the thread resolved and then stopped,
+    waiting on it.
+
+    Withdrawn is the direction the queue already takes on a restart: a request
+    nobody can see is worse than being asked again. Only a pending request is
+    withdrawn; a held one is being acted on by someone who quoted its id, and
+    is left to that surface. Logged before the delete, like acquire(), so a
+    fail-closed scrub leaves the request parked rather than gone unrecorded.
+    Returns the request, or None when there was nothing to withdraw. Nothing
+    here runs the command."""
     with _LOCK:
-        req = _PENDING.get(canonical(key))
-        if req is not None:
-            req["surfaced"] = False
+        k = canonical(key)
+        req = _PENDING.get(k)
+        if req is None:
+            retval = None
+        else:
+            logging.info("approvals: withdrew [%s] in %s, its card could not be posted: %s",
+                         k, req.get("channel"), repr(redact.scrub(req["command"])))
+            del _PENDING[k]
+            retval = req
+    return retval
 
 
 def pop(key, channel):

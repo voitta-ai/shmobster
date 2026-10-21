@@ -24,7 +24,9 @@ does:
   parked in this thread" rule and returns None when the answer is yes -- do not
   re-implement that check, and do pass the thread id to
   `approvals.claim_unsurfaced(channel, thread_ts)` when surfacing cards, or it
-  has nothing to reason about.
+  has nothing to reason about. When a card cannot be delivered, call
+  `approvals.withdraw(req_id)` and say so in the thread: a parked request no
+  human can see still counts as parked, and holds the thread's resume forever.
 - **Skill proposals (#129)** -- after a turn, render `proposals.claim_unsurfaced(channel)`
   the way you render `approvals.claim_unsurfaced`: a card or a line naming the id,
   and a way for a trusted user to answer by id (`propose_skill` / `decline_skill`).

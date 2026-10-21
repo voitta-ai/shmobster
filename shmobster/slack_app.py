@@ -8,6 +8,7 @@ import os
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 
 from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
@@ -84,6 +85,52 @@ def _seen(ts):
     return False
 
 
+def _rejected(exc):
+    """Whether Slack refused the card itself, so posting it again will fail the
+    same way (#356). A SlackApiError carries Slack's answer; a 429 or a 5xx is
+    Slack being busy or down, and anything that is not a SlackApiError never
+    got an answer at all. Those may pass, and get the next mention's retry."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    retval = isinstance(exc, SlackApiError) and status is not None and status != 429 and status < 500
+    return retval
+
+
+def _card_failed(client, channel, thread_ts, req_id, exc):
+    """An approval card did not post. Retry it on the next mention when the
+    failure may pass; withdraw it when Slack rejected the card (#356).
+
+    A rejected card is rejected again on every mention, and a request no human
+    can see holds the thread's resume forever. Withdrawn, it never runs, and
+    the thread says so -- with the id only, since the command is the likeliest
+    thing the card choked on.
+
+    If the thread was only waiting on this one -- another request here was
+    resolved while it was parked, and that resume was refused -- the thread is
+    resumed from that outcome now, after the note, so the resumed turn reads
+    the withdrawal. A thread whose only request was withdrawn is not resumed:
+    take_deferred() has nothing for it."""
+    if not _rejected(exc):
+        approvals.unsurface(req_id)
+        return
+    if approvals.withdraw(req_id) is None:
+        return
+    try:
+        client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=(f":warning: [{req_id}] needed approval, but its card could not be "
+                  "posted, so it was withdrawn and did not run. Ask again if it is "
+                  "still needed."),
+        )
+    except Exception:
+        logging.exception("could not report the withdrawn request %s", req_id)
+    outcome = approvals.take_deferred(channel, thread_ts)
+    if outcome is not None:
+        _resume_thread(client, channel, thread_ts, outcome["req_id"],
+                       {"command": outcome["command"], "requester": outcome["requester"]},
+                       approved=outcome["approved"], result=outcome["result"],
+                       user_id=outcome["user_id"])
+
+
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
@@ -96,22 +143,9 @@ def _post_pending(client, channel, thread_ts):
                 text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
                 blocks=slack_blocks.approval(req_id, req),
             )
-        except Exception:
+        except Exception as exc:
             logging.exception("could not post approval buttons for %s", req_id)
-            # Withdrawn, not retried: a card Slack rejects is rejected again on
-            # every mention, and a request no human can see holds the thread's
-            # resume forever. The note carries the id only -- the command is
-            # the likeliest thing the card choked on.
-            if approvals.withdraw(req_id) is not None:
-                try:
-                    client.chat_postMessage(
-                        channel=channel, thread_ts=thread_ts,
-                        text=(f":warning: [{req_id}] needed approval, but its card could not "
-                              "be posted, so it was withdrawn and did not run. Ask again "
-                              "if it is still needed."),
-                    )
-                except Exception:
-                    logging.exception("could not report the withdrawn request %s", req_id)
+            _card_failed(client, channel, thread_ts, req_id, exc)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
     for key, prop in proposals.claim_unsurfaced(channel):

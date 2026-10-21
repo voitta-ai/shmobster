@@ -179,26 +179,65 @@ def add(command, channel, reason, refused=False, requester=None, thread_ts=None,
 # have ever resumed -- a thread resumes once per round of parks, and there are
 # many rounds.
 _RESUMING = set()
+# The latest outcome per thread that was refused a resume because other
+# requests were still parked (#356). Normally the last of those resolving
+# resumes the thread and this is simply dropped. It is kept for the one case
+# where the last one never resolves by a human: its card is rejected and it is
+# withdrawn, and without this nothing would ever carry the thread on. Bounded
+# like the queue; the oldest thread's entry goes first.
+_DEFERRED = {}  # (channel, thread_ts) -> the resume() arguments
 
 
-def begin_resume(channel, thread_ts):
+def begin_resume(channel, thread_ts, outcome=None):
     """Claim the resume for this thread, or return False (#169 review).
 
     pending_in() alone is not enough. Two clicks land on two Bolt worker
     threads; each pops its own request and runs it, and when both finish both
     see an empty queue for the thread -- so both resume, and one thread gets
     two turns arguing about the same outcome. The check and the claim have to
-    happen under one lock, which is what this is."""
+    happen under one lock, which is what this is.
+
+    `outcome`, when refused because the thread is still parked, is kept for
+    take_deferred() (#356). A claim drops whatever was kept: the turn it
+    starts reads the whole thread, so the deferred outcome is not lost, and
+    keeping it would let a later withdrawal resume the thread a second time."""
+    key = (channel, thread_ts)
     with _LOCK:
-        if (channel, thread_ts) in _RESUMING:
+        if key in _RESUMING:
             retval = False
         elif any(req.get("channel") == channel
                  and req.get("thread_ts") in (thread_ts, None)
                  for req in _PENDING.values()):
+            if outcome is not None:
+                _DEFERRED.pop(key, None)
+                _DEFERRED[key] = outcome
+                while len(_DEFERRED) > _MAX:
+                    del _DEFERRED[next(iter(_DEFERRED))]
             retval = False
         else:
-            _RESUMING.add((channel, thread_ts))
+            _DEFERRED.pop(key, None)
+            _RESUMING.add(key)
             retval = True
+    return retval
+
+
+def take_deferred(channel, thread_ts):
+    """The outcome a withdrawal should resume this thread with, or None (#356).
+
+    Only when nothing is parked in the thread any more and a human resolved a
+    request whose resume was refused while it waited. A thread whose only
+    request was withdrawn has nothing here and is not resumed: no human acted,
+    and a turn started from a withdrawal would likely park the same command
+    and meet the same rejected card. Taken under the lock with the parked
+    check, so two withdrawals cannot both take it."""
+    key = (channel, thread_ts)
+    with _LOCK:
+        if any(req.get("channel") == channel
+               and req.get("thread_ts") in (thread_ts, None)
+               for req in _PENDING.values()):
+            retval = None
+        else:
+            retval = _DEFERRED.pop(key, None)
     return retval
 
 
@@ -262,16 +301,26 @@ def claim_unsurfaced(channel, thread_ts=None):
     return retval
 
 
-def withdraw(key):
-    """The ingest could not post the card: drop the request unrun.
+def unsurface(key):
+    """The ingest could not post the card for a reason that may pass -- a rate
+    limit, a Slack outage, the network (#129 review): make the request
+    eligible for another one on the next mention, rather than pending with no
+    surface and no id anyone was ever shown. A card Slack rejects outright is
+    withdrawn instead (#356)."""
+    with _LOCK:
+        req = _PENDING.get(canonical(key))
+        if req is not None:
+            req["surfaced"] = False
 
-    This used to put the request back as unsurfaced (#129 review), to be
-    posted again on the next mention. When the failure was the card itself --
-    Slack rejecting it the same way every time -- that retry failed every turn,
-    and the request stayed parked with no card and no id any human was shown.
-    Nobody could approve or deny it, and since pending_in() and begin_resume()
-    count it, every later approval in the thread resolved and then stopped,
-    waiting on it.
+
+def withdraw(key):
+    """Slack rejected the card itself: drop the request unrun (#356).
+
+    unsurface() retries on the next mention, and a card Slack rejects is
+    rejected the same way every time -- so the request stayed parked with no
+    card and no id any human was shown. Nobody could approve or deny it, and
+    since pending_in() and begin_resume() count it, every later approval in the
+    thread resolved and then stopped, waiting on it.
 
     Withdrawn is the direction the queue already takes on a restart: a request
     nobody can see is worse than being asked again. Only a pending request is

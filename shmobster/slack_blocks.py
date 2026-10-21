@@ -8,6 +8,50 @@ needs a regression test, since it is one of the surfaces a credential can reach
 ingest-agnostic: it owns the queue, each ingest renders its own surface."""
 from . import redact
 
+# Slack refuses a section whose text runs past 3000 characters
+# (`invalid_blocks`), and a parked command can be far longer than that. Past
+# this length the card carries a head and a tail and links the full command,
+# which the ingest posts as its own thread reply (message text has no such
+# cap). The margin leaves room for the header line and the link.
+CARD_COMMAND_MAX = 2000
+_HEAD = 1200
+_TAIL = 500
+
+
+def command_fits(command):
+    """Whether a command can go on a card whole. Measured after scrubbing,
+    because that is the text the card actually carries."""
+    retval = len(redact.scrub(command)) <= CARD_COMMAND_MAX
+    return retval
+
+
+def _command(req):
+    """The command as a card shows it: whole when it fits, otherwise head and
+    tail around a link to the full text.
+
+    Scrubbed before it is cut, not after: cutting first could split a
+    credential so the redactor no longer recognizes either half."""
+    cmd = redact.scrub(req["command"])
+    if len(cmd) <= CARD_COMMAND_MAX:
+        retval = f"```{cmd}```"
+    else:
+        link = req.get("full_link")
+        where = (f"<{link}|full command ({len(cmd)} chars)>" if link else
+                 f"full command ({len(cmd)} chars) could not be linked -- "
+                 f"look for it just above in this thread")
+        retval = f"```{cmd[:_HEAD]}\n...\n{cmd[-_TAIL:]}```\n{where}"
+    return retval
+
+
+def approval_text(req_id, req):
+    """The notification fallback for an approval card: short, because the
+    full command is on the card or linked from it."""
+    cmd = redact.scrub(req["command"])
+    if len(cmd) > CARD_COMMAND_MAX:
+        cmd = cmd[:200] + " ..."
+    retval = f"Needs approval [{req_id}]: {cmd}"
+    return retval
+
 
 def approval(req_id, req):
     """Approve/Deny buttons for one parked command (#50). The command goes in a
@@ -36,8 +80,7 @@ def approval(req_id, req):
                      f"are sure [{req_id}] ({req['reason']})\n"
                      if req.get("refused") else
                      f":lock: *Needs approval* [{req_id}] ({req['reason']})\n")
-                    + f"```{req['command']}```"
-                ),
+                ) + _command(req),
             },
         },
         {
@@ -84,7 +127,7 @@ def claimed(action_id, req_id, user_id, req):
     text = f":hourglass_flowing_sand: *{_CLAIMED_VERB.get(action_id, 'Working on')}* [{req_id}] -- <@{user_id}>"
     if req:
         # Scrubbed for the reason approval() gives: a credential rides argv.
-        text += "\n" + redact.scrub(f"```{req['command']}```")
+        text += "\n" + _command(req)
     retval = [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
     return retval
 

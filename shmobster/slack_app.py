@@ -84,16 +84,45 @@ def _seen(ts):
     return False
 
 
+# Slack truncates message text past 40000 characters.
+_FULL_COMMAND_MAX = 39000
+
+
+def _post_full_command(client, channel, thread_ts, req_id, command):
+    """Post a command too long for its card as a plain thread reply and return
+    its permalink, or None. Message text has no 3000-character block cap, and
+    this needs only `chat:write` -- a file upload would need `files:write`,
+    which the manifest leaves out on purpose. Never raises: the card must post
+    whether or not this did."""
+    cmd = redact.scrub(command)
+    if len(cmd) > _FULL_COMMAND_MAX:
+        cmd = cmd[:_FULL_COMMAND_MAX] + "\n... (truncated)"
+    retval = None
+    try:
+        resp = client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=f"Full command for [{req_id}]:\n```{cmd}```",
+        )
+        retval = client.chat_getPermalink(channel=channel, message_ts=resp["ts"]).get("permalink") or None
+    except Exception:
+        logging.exception("could not post the full command for %s", req_id)
+    return retval
+
+
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
+        # Kept on the request so a retried card does not post the command
+        # twice, and so any later rendering of this card links the same reply.
+        if not slack_blocks.command_fits(req["command"]) and not req.get("full_link"):
+            req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
         try:
             client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
                 # A parked command is echoed verbatim, and a credential rides
                 # command lines routinely -- that is the YOLT lesson (#72).
-                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
+                text=redact.scrub(slack_blocks.approval_text(req_id, req)),
                 blocks=slack_blocks.approval(req_id, req),
             )
         except Exception:

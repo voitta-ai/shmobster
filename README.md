@@ -1626,6 +1626,24 @@ Nothing raises when the chain still answers, and LiteLLM itself logs nothing at
 WARNING, so without that line a rung that is throttled or holding a bad key
 leaves no trace.
 
+#### When a rung is dead (#353)
+
+Some failures mean the rung will not work until the config changes: any 404
+(a retired model, a dropped free tier, a wrong `api_base`), or a 400 saying the
+model itself is refused (a subscription plan that does not serve it). These are
+parked for 24 hours, logged once at ERROR, and announced once at the end of the
+next reply, with the vendor's suggested replacement when it names one:
+
+    waterfall: DEAD RUNG orfree (openrouter/acme/model-x:free): the vendor says this model or endpoint does not exist for this account (404); the vendor suggests model 'acme/model-x'; skipping it for 24h -- fix or remove it in the waterfall config
+
+- **Fixing the config un-parks it at once.** The park is recorded against the
+  rung's model; a different model under the same name is a different rung.
+- **Bounded, not until restart.** The watchdog restarts the process routinely,
+  so "until restart" would re-pay the failure every few minutes; after 24 hours
+  a rung that only flapped comes back, and one still dead is announced again.
+- **The vendor's error text is never echoed.** These bodies carry account and
+  function ids; only a fixed reason and a charset-bound model slug leave it.
+
 ## Reading a URL (#62)
 
 `web_fetch` reads a page somebody pasted into a channel. It is the fetch the

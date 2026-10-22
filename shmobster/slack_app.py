@@ -85,13 +85,24 @@ def _seen(ts):
     return False
 
 
+# Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
+_TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
+
+
 def _rejected(exc):
     """Whether Slack refused the card itself, so posting it again will fail the
     same way (#356). A SlackApiError carries Slack's answer; a 429 or a 5xx is
-    Slack being busy or down, and anything that is not a SlackApiError never
-    got an answer at all. Those may pass, and get the next mention's retry."""
-    status = getattr(getattr(exc, "response", None), "status_code", None)
-    retval = isinstance(exc, SlackApiError) and status is not None and status != 429 and status < 500
+    Slack being busy or down, so is one of its transient error codes, and
+    anything that is not a SlackApiError never got an answer at all. Those may
+    pass, and get the next mention's retry."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    try:
+        error = resp.get("error") if resp is not None else None
+    except Exception:
+        error = None
+    retval = (isinstance(exc, SlackApiError) and status is not None and status != 429
+              and status < 500 and error not in _TRANSIENT_ERRORS)
     return retval
 
 

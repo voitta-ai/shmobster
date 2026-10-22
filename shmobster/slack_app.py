@@ -85,6 +85,36 @@ def _seen(ts):
     return False
 
 
+def _post_pending(client, channel, thread_ts):
+    """Render any newly parked commands as button messages in this thread."""
+    for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                # A parked command is echoed verbatim, and a credential rides
+                # command lines routinely -- that is the YOLT lesson (#72).
+                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
+                blocks=slack_blocks.approval(req_id, req),
+            )
+        except Exception as exc:
+            logging.exception("could not post approval buttons for %s", req_id)
+            _card_failed(client, channel, thread_ts, req_id, exc)
+    # And any skill the agent flagged this turn (#129): a card tagging the
+    # trusted users, who may open the PR or decline. Same rendering path.
+    for key, prop in proposals.claim_unsurfaced(channel):
+        try:
+            client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}"),
+                blocks=slack_blocks.proposal(key, prop, admin_tools._trusted_tags()),
+            )
+        except Exception:
+            logging.exception("could not post the skill proposal card for %s", key)
+            proposals.unsurface(key)
+
+
 # Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
 _TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
 
@@ -140,36 +170,6 @@ def _card_failed(client, channel, thread_ts, req_id, exc):
                        {"command": outcome["command"], "requester": outcome["requester"]},
                        approved=outcome["approved"], result=outcome["result"],
                        user_id=outcome["user_id"])
-
-
-def _post_pending(client, channel, thread_ts):
-    """Render any newly parked commands as button messages in this thread."""
-    for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
-        try:
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                # A parked command is echoed verbatim, and a credential rides
-                # command lines routinely -- that is the YOLT lesson (#72).
-                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
-                blocks=slack_blocks.approval(req_id, req),
-            )
-        except Exception as exc:
-            logging.exception("could not post approval buttons for %s", req_id)
-            _card_failed(client, channel, thread_ts, req_id, exc)
-    # And any skill the agent flagged this turn (#129): a card tagging the
-    # trusted users, who may open the PR or decline. Same rendering path.
-    for key, prop in proposals.claim_unsurfaced(channel):
-        try:
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text=redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}"),
-                blocks=slack_blocks.proposal(key, prop, admin_tools._trusted_tags()),
-            )
-        except Exception:
-            logging.exception("could not post the skill proposal card for %s", key)
-            proposals.unsurface(key)
 
 
 def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_blocks.claimed):

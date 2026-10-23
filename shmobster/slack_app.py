@@ -55,6 +55,33 @@ def _thread_context(client, channel, thread_ts, cur_ts):
     return retval
 
 
+# (channel, thread_ts) -> the file refs of the mention that started the task in
+# that thread (#362). Refs only, never bytes: a resume re-fetches them through
+# attachments.to_parts, so the type and size caps and the Slack-only download
+# rule are the same ones the original turn went through. In memory, like the
+# parked requests they serve -- a restart drops both together.
+_TASK_FILES = {}
+_TASK_FILES_MAX = 200
+_FILE_REF_KEYS = ("name", "mimetype", "url_private_download", "url_private")
+
+
+def _remember_files(channel, thread_ts, files):
+    """Record what a mention attached, for the turns that resume its task.
+
+    A mention with no files clears the entry, so a later, unrelated task in the
+    same thread does not inherit an old file -- unless the thread still has a
+    parked request, because a "how is it going?" sent while a card waits is not
+    a new task, and clearing then would starve the resume this exists for."""
+    key = (channel, thread_ts)
+    if files:
+        _TASK_FILES.pop(key, None)
+        _TASK_FILES[key] = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files]
+        if len(_TASK_FILES) > _TASK_FILES_MAX:
+            del _TASK_FILES[next(iter(_TASK_FILES))]
+    elif not approvals.pending_in(channel, thread_ts):
+        _TASK_FILES.pop(key, None)
+
+
 _SEEN = {}  # message ts -> None; dedup duplicate Slack deliveries / retries
 
 # Slack's cap on all markdown blocks in one message.
@@ -83,32 +110,6 @@ def _seen(ts):
         del _SEEN[next(iter(_SEEN))]
     return False
 
-
-# (channel, thread_ts) -> the file refs of the mention that started the task in
-# that thread (#362). Refs only, never bytes: a resume re-fetches them through
-# attachments.to_parts, so the type and size caps and the Slack-only download
-# rule are the same ones the original turn went through. In memory, like the
-# parked requests they serve -- a restart drops both together.
-_TASK_FILES = {}
-_TASK_FILES_MAX = 200
-_FILE_REF_KEYS = ("name", "mimetype", "url_private_download", "url_private")
-
-
-def _remember_files(channel, thread_ts, files):
-    """Record what a mention attached, for the turns that resume its task.
-
-    A mention with no files clears the entry, so a later, unrelated task in the
-    same thread does not inherit an old file -- unless the thread still has a
-    parked request, because a "how is it going?" sent while a card waits is not
-    a new task, and clearing then would starve the resume this exists for."""
-    key = (channel, thread_ts)
-    if files:
-        _TASK_FILES.pop(key, None)
-        _TASK_FILES[key] = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files]
-        if len(_TASK_FILES) > _TASK_FILES_MAX:
-            del _TASK_FILES[next(iter(_TASK_FILES))]
-    elif not approvals.pending_in(channel, thread_ts):
-        _TASK_FILES.pop(key, None)
 
 
 def _post_pending(client, channel, thread_ts):

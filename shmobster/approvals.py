@@ -339,11 +339,22 @@ def unsurface(key):
     limit, a Slack outage, the network (#129 review): make the request
     eligible for another one on the next mention, rather than pending with no
     surface and no id anyone was ever shown. A card Slack rejects outright is
-    withdrawn instead (#356)."""
+    withdrawn instead (#356).
+
+    Returns how many times this request's card has now failed this way, or 0
+    when it is no longer pending. Counted on the request, under the lock, so
+    the ingest can stop retrying: Slack can answer some payloads with
+    internal_error or a 5xx every time, and an endless retry is the same
+    permanent thread hold that withdraw() exists to end (#356 review)."""
     with _LOCK:
         req = _PENDING.get(canonical(key))
-        if req is not None:
+        if req is None:
+            retval = 0
+        else:
             req["surfaced"] = False
+            req["card_failures"] = req.get("card_failures", 0) + 1
+            retval = req["card_failures"]
+    return retval
 
 
 def withdraw(key):

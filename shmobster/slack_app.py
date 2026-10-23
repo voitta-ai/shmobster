@@ -117,6 +117,9 @@ def _post_pending(client, channel, thread_ts):
 
 # Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
 _TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
+# A "transient" failure that repeats this many times on one card is treated as
+# a rejection: some payloads get internal_error or a 5xx every time (#356 review).
+_CARD_TRIES = 3
 
 
 def _rejected(exc):
@@ -138,7 +141,8 @@ def _rejected(exc):
 
 def _card_failed(client, channel, thread_ts, req_id, exc):
     """An approval card did not post. Retry it on the next mention when the
-    failure may pass; withdraw it when Slack rejected the card (#356).
+    failure may pass, up to _CARD_TRIES failures; withdraw it when Slack
+    rejected the card, or the retries ran out (#356).
 
     A rejected card is rejected again on every mention, and a request no human
     can see holds the thread's resume forever. Withdrawn, it never runs, and
@@ -150,8 +154,7 @@ def _card_failed(client, channel, thread_ts, req_id, exc):
     resumed from that outcome now, after the note, so the resumed turn reads
     the withdrawal. A thread whose only request was withdrawn is not resumed:
     take_deferred() has nothing for it."""
-    if not _rejected(exc):
-        approvals.unsurface(req_id)
+    if not _rejected(exc) and approvals.unsurface(req_id) < _CARD_TRIES:
         return
     if approvals.withdraw(req_id) is None:
         return

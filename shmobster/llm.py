@@ -27,7 +27,21 @@ restart would otherwise un-learn everything.
 
 Cost of a rebuild: litellm's in-memory 429 cooldowns for the other deployments
 reset. They cool for 60s; this is a rounding error against re-dialling a vendor
-that is dead for a month."""
+that is dead for a month.
+
+Dead rungs (#353). A rung whose model the vendor has retired, dropped from a
+free tier, or refuses for this plan will not work again until someone edits the
+config. litellm cools a 404 for 60s and a 400 not at all, and when a later rung
+covers the failure nothing raises -- so these sat unnoticed for days, until
+every rung died at once and the agent went silent. A dead rung is parked like a
+budget-exhausted one, logged at ERROR, and announced once in the next reply
+(`claim_dead_notices`). The park is keyed to the rung's configured model, so
+fixing the config un-parks it at once. It starts short and doubles on each
+repeat (`_DEAD_PARK_FIRST` up to `_DEAD_PARK_MAX`), rather than lasting until
+restart: the watchdog restarts this process routinely, which would re-learn
+(and re-pay) the failure every few minutes. Short first, because a rung can be
+fixed vendor-side (access enabled, credit added) with no config edit to notice;
+growing, because a rung that really is gone should not be re-dialled hourly."""
 import datetime
 import logging
 import re
@@ -84,8 +98,89 @@ _REGAIN_DATE = re.compile(r"regain access on (\d{4})-(\d{2})-(\d{2})")
 # cap voitta-ai/agents' port of this module carries.
 _MAX_PARK_SEC = 31 * 24 * 3600
 
+# Dead rungs (#353): {vendor name: {"until", "model", "reason", "suggest",
+# "told", "strikes", "back"}}. Separate from the budget parks because a record is
+# only valid for the model it was recorded against -- a config edit that fixes
+# the rung must un-park it. A record outlives its park by `_DEAD_PARK_MAX` so a
+# rung that dies again soon after coming back gets a longer park; after that it
+# is forgotten and the next failure starts over at `_DEAD_PARK_FIRST`.
+_DEAD_KEY = "dead_rungs"
+_DEAD_PARK_FIRST = 3600
+_DEAD_PARK_MAX = 24 * 3600
+
+# A 404 is also "this request has no route": OpenRouter answers "No endpoints
+# found that support image input" for a working model handed an attachment it
+# cannot read. So only a 404 that says the model or endpoint itself is gone
+# counts, and the "no endpoints ... support" family never does.
+_DEAD_404 = re.compile(
+    r"not found for account|model_not_found|does not exist|decommissioned"
+    r"|no longer available|unavailable for free|use this slug instead",
+    re.IGNORECASE)
+_LIVE_404 = re.compile(r"no endpoints found that support", re.IGNORECASE)
+
+# A 400 is also "your request was malformed", and a parameter refused "for this
+# model" names the model too. Only phrasing about the model itself counts, plus
+# Codex's quoted-model shape: "The '<model>' model is not supported when using
+# Codex with a ChatGPT account."
+_DEAD_400 = re.compile(
+    r"model_not_found|does not exist|decommissioned"
+    r"|the '[^'\n]{1,120}' model is not supported when using codex",
+    re.IGNORECASE)
+
+# OpenRouter: "use this slug instead: <slug>". Charset- and length-bound, so
+# nothing but a model slug can ride out of the vendor's body into a log or a
+# channel; the body itself carries account and function ids and is never echoed.
+_SUGGESTED_SLUG = re.compile(r"use this slug instead:\s*([A-Za-z0-9][A-Za-z0-9._:/-]{0,119})")
+
+
+def _dead_records():
+    """Every dead-rung record that still applies, in force or not: recorded
+    against the model the rung is configured with now, and not yet past its
+    history window. Pruned on read; a park running out is logged once."""
+    raw = state.get(_DEAD_KEY) or {}
+    now = time.time()
+    models = {v.get("name"): v.get("model") for v in config.WATERFALL}
+    kept, changed = {}, False
+    for name, rec in raw.items():
+        if not (isinstance(rec, dict) and isinstance(rec.get("until"), (int, float))):
+            changed = True
+            continue
+        if rec.get("model") != models.get(name):
+            changed = True
+            if rec["until"] > now:
+                logging.info("waterfall: %s's config changed; out of its dead-rung park", name)
+            continue
+        if rec["until"] + _DEAD_PARK_MAX <= now:
+            changed = True
+            continue
+        if rec["until"] <= now and not rec.get("back"):
+            rec = dict(rec, back=True)
+            changed = True
+            logging.info("waterfall: %s is out of its dead-rung park; back in the chain", name)
+        kept[name] = rec
+    if changed:
+        state.put(_DEAD_KEY, kept)
+    retval = kept
+    return retval
+
+
+def _dead():
+    """Dead-rung records in force: the rungs parked right now."""
+    now = time.time()
+    retval = {name: rec for name, rec in _dead_records().items() if rec["until"] > now}
+    return retval
+
 
 def _parked():
+    """Every vendor out of the chain -- budget parks and dead rungs -- as
+    vendor -> expiry."""
+    retval = dict(_budget_parked())
+    for name, rec in _dead().items():
+        retval[name] = max(retval.get(name, 0), rec["until"])
+    return retval
+
+
+def _budget_parked():
     """Vendor -> expiry, with anything already expired dropped. Pruning on read
     is what makes a vendor come back: no timer, no background task -- the first
     turn after the window simply stops seeing it as parked."""
@@ -260,7 +355,7 @@ def park(exc, deployment=""):
         return retval
     text = str(getattr(exc, "message", "") or str(exc))
     until, human = _park_until(text)
-    parked = dict(_parked())
+    parked = dict(_budget_parked())
     parked[name] = until
     state.put(_STATE_KEY, parked)
     # The message can carry the failed request; never log it (#72 covers the
@@ -268,6 +363,111 @@ def park(exc, deployment=""):
     logging.warning("waterfall: %s is out of budget; parked %s", name, human)
     _invalidate()
     retval = name
+    return retval
+
+
+def dead_reason(exc):
+    """(reason, suggested slug or "") when `exc` says this rung cannot work as
+    configured; None otherwise. The reason is a fixed label, never the vendor's
+    text, which carries account and function ids. Both statuses need the text to
+    say the model or endpoint itself is gone (`_DEAD_404`, `_DEAD_400`): either
+    can also mean "this one request cannot be served"."""
+    status = getattr(exc, "status_code", None)
+    text = str(getattr(exc, "message", "") or str(exc))
+    if status == 404 and _DEAD_404.search(text) and not _LIVE_404.search(text):
+        reason = "the vendor says this model or endpoint does not exist for this account (404)"
+    elif status == 400 and _DEAD_400.search(text):
+        reason = "the vendor refuses this model for this account or plan (400)"
+    else:
+        retval = None
+        return retval
+    match = _SUGGESTED_SLUG.search(text)
+    retval = (reason, match.group(1).rstrip(".") if match else "")
+    return retval
+
+
+def _hours(sec):
+    retval = f"{sec // 3600}h"
+    return retval
+
+
+def kill(exc, deployment=""):
+    """Park the rung that raised `exc` as dead and say so at ERROR. Returns its
+    name, or None when `exc` is not a dead-rung error or the rung cannot be
+    identified (parking a guess would take a working rung out).
+
+    The park doubles per repeat within the record's history window, from
+    `_DEAD_PARK_FIRST` to `_DEAD_PARK_MAX`. With parking off
+    (`budget_park_sec: 0`) nothing is parked, but the rung is still logged and
+    announced -- once per history window, since an unparked rung fails every
+    turn."""
+    found = dead_reason(exc)
+    if found is None:
+        retval = None
+        return retval
+    reason, suggest = found
+    hint = f"; the vendor suggests model {suggest!r}" if suggest else ""
+    name = _vendor_for(deployment, exc)
+    if name is None:
+        logging.error("waterfall: DEAD RUNG %s: %s%s -- could not tell which configured "
+                      "rung it is, so not parking it", deployment or "unknown rung", reason, hint)
+        retval = None
+        return retval
+    records = dict(_dead_records())
+    prior = records.get(name)
+    now = time.time()
+    parking = bool(config.BUDGET_PARK_SEC)
+    if prior and (prior["until"] > now or not parking):
+        # Dialled while parked (every rung parked, so the full chain is tried;
+        # or a call already in flight), or parking is off. Already announced.
+        logging.warning("waterfall: %s failed again and is still dead: %s", name, reason)
+        retval = name
+        return retval
+    model = next((v.get("model") for v in config.WATERFALL if v.get("name") == name), "")
+    strikes = (prior.get("strikes") or 1) + 1 if prior else 1
+    window = min(_DEAD_PARK_FIRST * 2 ** (strikes - 1), _DEAD_PARK_MAX) if parking else 0
+    records[name] = {"until": now + window, "model": model, "reason": reason,
+                     "suggest": suggest, "told": False, "strikes": strikes,
+                     "back": not parking}  # nothing parked, so nothing to come back from
+    state.put(_DEAD_KEY, records)
+    action = (f"skipping it for {_hours(window)}" if parking
+              else "not parking it (budget_park_sec is 0)")
+    logging.error("waterfall: DEAD RUNG %s (%s): %s%s; %s -- fix or remove it in the "
+                  "waterfall config", name, model, reason, hint, action)
+    if parking:
+        _invalidate()
+    retval = name
+    return retval
+
+
+def claim_dead_notices():
+    """Channel lines for dead rungs not yet announced, marked announced.
+
+    The handler appends them to the next reply, and the Slack ingest to its
+    error reply when every rung failed, so the notice reaches whoever is in the
+    channel without a new transport. Once per park: the flag lives in the state
+    file, so a restart neither repeats nor loses one. The line names the rung,
+    never its model string, which for some providers carries a cloud account
+    id; the model is in the ERROR log line."""
+    records = dict(_dead_records())
+    now = time.time()
+    lines = []
+    for name, rec in records.items():
+        if rec.get("told"):
+            continue
+        records[name] = dict(rec, told=True)
+        if rec["until"] > now:
+            action = f"Skipping it for {_hours(int(rec['until'] - now + 59))}"
+        else:
+            action = "Parking is off, so it is still being tried"
+        line = (f":rotating_light: LLM rung *{name}* is dead: {rec.get('reason')}. "
+                f"{action}; fix or remove it in the waterfall config.")
+        if rec.get("suggest"):
+            line += f" The vendor suggests `{rec['suggest']}`."
+        lines.append(line)
+    if lines:
+        state.put(_DEAD_KEY, records)
+    retval = lines
     return retval
 
 
@@ -294,15 +494,18 @@ def _on_failure(kwargs):
         # out should be visible as a pattern, not as stack traces.
         logging.warning("waterfall: %s timed out; failing over", _deployment_of(kwargs) or "unknown rung")
         return
-    if not is_budget_error(exc):
-        # Named too. When a fallback covers the failure nothing raises and
-        # litellm logs nothing at WARNING, so a rung that was rate-limited,
-        # erroring or holding a bad key left no trace at all. Type and status
-        # only: the message can carry the failed request (#72).
-        logging.warning("waterfall: %s failed (%s %s)", _deployment_of(kwargs) or "unknown rung",
-                        type(exc).__name__, getattr(exc, "status_code", None) or "no status")
+    if is_budget_error(exc):
+        park(exc, _deployment_of(kwargs))
         return
-    park(exc, _deployment_of(kwargs))
+    if dead_reason(exc) is not None:
+        kill(exc, _deployment_of(kwargs))  # logs itself: ERROR when new, WARNING when again
+        return
+    # Named too. When a fallback covers the failure nothing raises and
+    # litellm logs nothing at WARNING, so a rung that was rate-limited,
+    # erroring or holding a bad key left no trace at all. Type and status
+    # only: the message can carry the failed request (#72).
+    logging.warning("waterfall: %s failed (%s %s)", _deployment_of(kwargs) or "unknown rung",
+                    type(exc).__name__, getattr(exc, "status_code", None) or "no status")
 
 
 _WATCH = _BudgetWatch()

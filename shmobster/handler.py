@@ -50,6 +50,10 @@ def _finalize(answer, steps, capped=False):
             f"\n\n:warning: used {steps}/{config.MAX_TOOL_STEPS} tool steps "
             "(nearing the limit -- consider narrowing the request)."
         )
+    # A rung found dead during this (or an earlier, failed) turn (#353). The
+    # fallback answered, so the reply is the only thing an operator reads.
+    for notice in llm.claim_dead_notices():
+        out += f"\n\n{notice}"
     retval = out
     return retval
 

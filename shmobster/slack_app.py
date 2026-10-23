@@ -9,7 +9,7 @@ import os
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, llm, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -361,6 +361,10 @@ def _turn(event, say, client, logger):
         # traceback too.
         logger.exception("handler failed")
         reply = redact.scrub(f":warning: shmobster error: {exc}")
+        # Every rung failing is the turn most likely to have found a dead one
+        # (#353), and the success path that normally carries the notice never ran.
+        for notice in llm.claim_dead_notices():
+            reply += f"\n\n{notice}"
     say(thread_ts=thread_ts, **_reply_payload(reply))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.

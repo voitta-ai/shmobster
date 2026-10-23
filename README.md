@@ -1626,6 +1626,41 @@ Nothing raises when the chain still answers, and LiteLLM itself logs nothing at
 WARNING, so without that line a rung that is throttled or holding a bad key
 leaves no trace.
 
+#### When a rung is dead (#353)
+
+Some failures mean the rung will not work until something changes: a 404 that
+says the model or endpoint is gone (a retired model, a dropped free tier), or a
+400 that says the model itself is refused (`model_not_found`, "does not exist",
+"decommissioned", or a subscription plan that does not serve it). These are
+parked, logged at ERROR, and announced once at the end of the next reply -- or
+of the error reply, when every rung failed -- with the vendor's suggested
+replacement when it names one:
+
+    waterfall: DEAD RUNG orfree (openrouter/acme/model-x:free): the vendor says this model or endpoint does not exist for this account (404); the vendor suggests model 'acme/model-x'; skipping it for 1h -- fix or remove it in the waterfall config
+
+The channel line names only the rung, never its model string, which for some
+providers carries a cloud account id; the model is in the log line.
+
+- **Request-shaped failures are not dead.** OpenRouter's "No endpoints found
+  that support image input" is a 404 about one request (an attachment the model
+  cannot read), and a 400 rejecting a parameter "for this model" is about the
+  request too. Neither parks anything.
+- **The park grows on repeat.** 1 hour first, doubling each time the rung dies
+  again within a day of coming back, capped at 24 hours. A rung can be fixed on
+  the vendor's side (access enabled, credit added) with no config edit, so the
+  first park is short; one that is really gone stops being re-dialled hourly.
+- **Fixing the config un-parks it at once.** The park is recorded against the
+  rung's model; a different model under the same name is a different rung.
+- **To un-park it by hand** after a vendor-side fix, delete the rung's entry
+  under `dead_rungs` in `shmobster-state.json`. The file is re-read every turn,
+  so no restart is needed.
+- **Bounded, not until restart.** The watchdog restarts the process routinely,
+  so "until restart" would re-pay the failure every few minutes.
+- **`budget_park_sec: 0` turns this parking off too.** The rung is still logged
+  and announced, once a day, and a repeat failure logs a WARNING.
+- **The vendor's error text is never echoed.** These bodies carry account and
+  function ids; only a fixed reason and a charset-bound model slug leave it.
+
 ## Reading a URL (#62)
 
 `web_fetch` reads a page somebody pasted into a channel. It is the fetch the

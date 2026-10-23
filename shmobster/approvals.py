@@ -170,7 +170,7 @@ def add(command, channel, reason, refused=False, requester=None, thread_ts=None,
             victim = next((k for k in _PENDING if k != key), None)
             if victim is None:
                 break
-            del _PENDING[victim]
+            _forget_deferred(_PENDING.pop(victim))
     retval = key
     return retval
 
@@ -179,26 +179,98 @@ def add(command, channel, reason, refused=False, requester=None, thread_ts=None,
 # have ever resumed -- a thread resumes once per round of parks, and there are
 # many rounds.
 _RESUMING = set()
+# The latest outcome per thread that was refused a resume because other
+# requests were still parked (#356). Normally the last of those resolving
+# resumes the thread and this is simply dropped. It is kept for the one case
+# where the last one never resolves by a human: its card is rejected and it is
+# withdrawn, and without this nothing would ever carry the thread on. Bounded
+# like the queue; the oldest thread's entry goes first.
+_DEFERRED = {}  # (channel, thread_ts) -> the resume() arguments
+# Requests a surface has acquired and not yet released (#356 review). Not
+# _INFLIGHT: finish() takes a request out of that BEFORE its command runs, so
+# for the whole run nothing in the queue says the thread has a resolution
+# coming. take_deferred() reads this so a withdrawal cannot resume the thread
+# under a click that is still running -- that click resumes it when it is done.
+_RESOLVING = {}  # request id -> the request dict
 
 
-def begin_resume(channel, thread_ts):
+def _parked(channel, thread_ts, pool):
+    """Whether any request in `pool` waits in this thread. Caller holds _LOCK.
+    A request with no thread counts against every thread, as in pending_in()."""
+    retval = any(req.get("channel") == channel and req.get("thread_ts") in (thread_ts, None)
+                 for req in pool)
+    return retval
+
+
+def _forget_deferred(req):
+    """A request left _PENDING by a route that is not withdraw(): drop the
+    outcome kept for its thread if nothing there is parked any more (#356
+    review). Caller holds _LOCK.
+
+    A typed approve or deny, and overflow eviction, take the last request out
+    of a thread without going through begin_resume(), which used to be the only
+    thing that dropped a kept outcome. It then survived into a later round of
+    parks, and a withdrawal hours on resumed the thread from an approval that
+    round had nothing to do with. withdraw() does not call this: it is the one
+    exit that is meant to hand the outcome to take_deferred()."""
+    channel, thread_ts = req.get("channel"), req.get("thread_ts")
+    for key in [k for k in _DEFERRED if k[0] == channel and thread_ts in (k[1], None)]:
+        if not _parked(key[0], key[1], _PENDING.values()):
+            del _DEFERRED[key]
+
+
+def begin_resume(channel, thread_ts, outcome=None):
     """Claim the resume for this thread, or return False (#169 review).
 
     pending_in() alone is not enough. Two clicks land on two Bolt worker
     threads; each pops its own request and runs it, and when both finish both
     see an empty queue for the thread -- so both resume, and one thread gets
     two turns arguing about the same outcome. The check and the claim have to
-    happen under one lock, which is what this is."""
+    happen under one lock, which is what this is.
+
+    `outcome`, when refused because the thread is still parked, is kept for
+    take_deferred() (#356). A claim drops whatever was kept: the turn it
+    starts reads the whole thread, so the deferred outcome is not lost, and
+    keeping it would let a later withdrawal resume the thread a second time."""
+    key = (channel, thread_ts)
     with _LOCK:
-        if (channel, thread_ts) in _RESUMING:
+        if key in _RESUMING:
             retval = False
-        elif any(req.get("channel") == channel
-                 and req.get("thread_ts") in (thread_ts, None)
-                 for req in _PENDING.values()):
+        elif _parked(channel, thread_ts, _PENDING.values()):
+            if outcome is not None:
+                _DEFERRED.pop(key, None)
+                _DEFERRED[key] = outcome
+                while len(_DEFERRED) > _MAX:
+                    del _DEFERRED[next(iter(_DEFERRED))]
             retval = False
         else:
-            _RESUMING.add((channel, thread_ts))
+            _DEFERRED.pop(key, None)
+            _RESUMING.add(key)
             retval = True
+    return retval
+
+
+def take_deferred(channel, thread_ts):
+    """The outcome a withdrawal should resume this thread with, or None (#356).
+
+    Only when nothing is parked in the thread any more and a human resolved a
+    request whose resume was refused while it waited. A thread whose only
+    request was withdrawn has nothing here and is not resumed: no human acted,
+    and a turn started from a withdrawal would likely park the same command
+    and meet the same rejected card. Taken under the lock with the parked
+    check, so two withdrawals cannot both take it.
+
+    Not while a request in the thread is being resolved, either: that surface
+    calls resume() when it is done, and resuming here first would leave its
+    outcome to an "already resuming" refusal. The kept outcome stays; that
+    claim drops it."""
+    key = (channel, thread_ts)
+    with _LOCK:
+        if (_parked(channel, thread_ts, _PENDING.values())
+                or _parked(channel, thread_ts, _RESOLVING.values())):
+            retval = None
+        else:
+            retval = _DEFERRED.pop(key, None)
     return retval
 
 
@@ -263,13 +335,55 @@ def claim_unsurfaced(channel, thread_ts=None):
 
 
 def unsurface(key):
-    """The ingest could not post the card (#129 review): make the request
+    """The ingest could not post the card for a reason that may pass -- a rate
+    limit, a Slack outage, the network (#129 review): make the request
     eligible for another one on the next mention, rather than pending with no
-    surface and no id anyone was ever shown."""
+    surface and no id anyone was ever shown. A card Slack rejects outright is
+    withdrawn instead (#356).
+
+    Returns how many times this request's card has now failed this way, or 0
+    when it is no longer pending. Counted on the request, under the lock, so
+    the ingest can stop retrying: Slack can answer some payloads with
+    internal_error or a 5xx every time, and an endless retry is the same
+    permanent thread hold that withdraw() exists to end (#356 review)."""
     with _LOCK:
         req = _PENDING.get(canonical(key))
-        if req is not None:
+        if req is None:
+            retval = 0
+        else:
             req["surfaced"] = False
+            req["card_failures"] = req.get("card_failures", 0) + 1
+            retval = req["card_failures"]
+    return retval
+
+
+def withdraw(key):
+    """Slack rejected the card itself: drop the request unrun (#356).
+
+    unsurface() retries on the next mention, and a card Slack rejects is
+    rejected the same way every time -- so the request stayed parked with no
+    card and no id any human was shown. Nobody could approve or deny it, and
+    since pending_in() and begin_resume() count it, every later approval in the
+    thread resolved and then stopped, waiting on it.
+
+    Withdrawn is the direction the queue already takes on a restart: a request
+    nobody can see is worse than being asked again. Only a pending request is
+    withdrawn; a held one is being acted on by someone who quoted its id, and
+    is left to that surface. Logged before the delete, like acquire(), so a
+    fail-closed scrub leaves the request parked rather than gone unrecorded.
+    Returns the request, or None when there was nothing to withdraw. Nothing
+    here runs the command."""
+    with _LOCK:
+        k = canonical(key)
+        req = _PENDING.get(k)
+        if req is None:
+            retval = None
+        else:
+            logging.info("approvals: withdrew [%s] in %s, its card could not be posted: %s",
+                         k, req.get("channel"), repr(redact.scrub(req["command"])))
+            del _PENDING[k]
+            retval = req
+    return retval
 
 
 def pop(key, channel):
@@ -282,6 +396,7 @@ def pop(key, channel):
     req = acquire(key, channel)
     if req is not None:
         finish(key)
+        release(key)  # a no-op on the queue after finish(); ends the resolving mark
     retval = req
     return retval
 
@@ -313,6 +428,8 @@ def acquire(key, channel):
             logging.info("approvals: claimed [%s] in %s: %s", k, channel, repr(redact.scrub(req["command"])))
             del _PENDING[k]
             _INFLIGHT[k] = req
+            _RESOLVING[k] = req
+            _forget_deferred(req)
             retval = req
     return retval
 
@@ -359,11 +476,13 @@ def status(key, channel):
 
 def release(key):
     """Put a held request back in the queue -- the surface could not or did
-    not act on it. No-op after finish() and for a key never acquired, so a
-    finally: release() is always safe. `surfaced` is left as it was: the card
+    not act on it. No-op on the queue after finish() and for a key never
+    acquired, so a finally: release() is always safe; either way it ends the
+    request's resolving mark (#356 review). `surfaced` is left as it was: the card
     that acquired it is still standing."""
     with _LOCK:
         k = canonical(key)
+        _RESOLVING.pop(k, None)
         req = _INFLIGHT.pop(k, None)
         if req is not None:
             _PENDING[k] = req

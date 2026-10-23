@@ -8,6 +8,7 @@ import os
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 
 from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 
@@ -96,9 +97,9 @@ def _post_pending(client, channel, thread_ts):
                 text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
                 blocks=slack_blocks.approval(req_id, req),
             )
-        except Exception:
+        except Exception as exc:
             logging.exception("could not post approval buttons for %s", req_id)
-            approvals.unsurface(req_id)
+            _card_failed(client, channel, thread_ts, req_id, exc)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
     for key, prop in proposals.claim_unsurfaced(channel):
@@ -112,6 +113,66 @@ def _post_pending(client, channel, thread_ts):
         except Exception:
             logging.exception("could not post the skill proposal card for %s", key)
             proposals.unsurface(key)
+
+
+# Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
+_TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
+# A "transient" failure that repeats this many times on one card is treated as
+# a rejection: some payloads get internal_error or a 5xx every time (#356 review).
+_CARD_TRIES = 3
+
+
+def _rejected(exc):
+    """Whether Slack refused the card itself, so posting it again will fail the
+    same way (#356). A SlackApiError carries Slack's answer; a 429 or a 5xx is
+    Slack being busy or down, so is one of its transient error codes, and
+    anything that is not a SlackApiError never got an answer at all. Those may
+    pass, and get the next mention's retry."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    try:
+        error = resp.get("error") if resp is not None else None
+    except Exception:
+        error = None
+    retval = (isinstance(exc, SlackApiError) and status is not None and status != 429
+              and status < 500 and error not in _TRANSIENT_ERRORS)
+    return retval
+
+
+def _card_failed(client, channel, thread_ts, req_id, exc):
+    """An approval card did not post. Retry it on the next mention when the
+    failure may pass, up to _CARD_TRIES failures; withdraw it when Slack
+    rejected the card, or the retries ran out (#356).
+
+    A rejected card is rejected again on every mention, and a request no human
+    can see holds the thread's resume forever. Withdrawn, it never runs, and
+    the thread says so -- with the id only, since the command is the likeliest
+    thing the card choked on.
+
+    If the thread was only waiting on this one -- another request here was
+    resolved while it was parked, and that resume was refused -- the thread is
+    resumed from that outcome now, after the note, so the resumed turn reads
+    the withdrawal. A thread whose only request was withdrawn is not resumed:
+    take_deferred() has nothing for it."""
+    if not _rejected(exc) and approvals.unsurface(req_id) < _CARD_TRIES:
+        return
+    if approvals.withdraw(req_id) is None:
+        return
+    try:
+        client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=(f":warning: [{req_id}] needed approval, but its card could not be "
+                  "posted, so it was withdrawn and did not run. Ask again if it is "
+                  "still needed."),
+        )
+    except Exception:
+        logging.exception("could not report the withdrawn request %s", req_id)
+    outcome = approvals.take_deferred(channel, thread_ts)
+    if outcome is not None:
+        _resume_thread(client, channel, thread_ts, outcome["req_id"],
+                       {"command": outcome["command"], "requester": outcome["requester"]},
+                       approved=outcome["approved"], result=outcome["result"],
+                       user_id=outcome["user_id"])
 
 
 def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_blocks.claimed):

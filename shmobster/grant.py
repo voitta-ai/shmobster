@@ -904,6 +904,17 @@ class _Walker:
             retval = (True, f"{verb} --version: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
+        elif self.unattended and verb in READ_VERBS:
+            # A read whose output lands in a file is a file write (#177), and an
+            # unattended channel already writes its tree without a card: `tee`,
+            # `cp` and `apply_patch` are in UNATTENDED_VERBS, confined by the
+            # same sandbox. Carding `cat > f` or `jq ... > f` there covered
+            # nothing `tee` does not already do, and taught the agent to retry
+            # the same write in other shapes, one card each. The redirect target
+            # was already held to a literal, non-device path by redirect_write.
+            retval = (True, f"{verb}: unattended channel, output to a file")
+        elif self.unattended and verb in FLAG_CHECKED_READS:
+            retval = self.flag_checked(verb, args)
         else:
             retval = None
         # Why the read rule did not apply, kept for the refusal below (#213).

@@ -111,7 +111,6 @@ def _seen(ts):
     return False
 
 
-
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):

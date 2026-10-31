@@ -131,14 +131,15 @@ _UNATTENDED_GH_NOUNS = frozenset((
 #
 # The bar for entry is that no flag turns the command into a write. That is why
 # `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
-# `find` (-delete, -exec) and `xargs` (runs its argument) are absent, and why
+# `find` (-delete, -exec), `rg` (runs a preprocessor) and `xargs` (runs its
+# argument) are absent, and why
 # `awk` is absent despite reading: its program can call system() (it is checked
 # against an allowlist in FLAG_CHECKED_READS instead), and `tree` is
 # absent because -o writes its output to a file. `sed` is in FS_VERBS already,
 # as the writer -i makes it.
 READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
-    "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep", "rg",
+    "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
     "jq", "id", "uname", "printenv", "ps",
 ))
 
@@ -173,12 +174,22 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg"))
 
 
 def _find_refusal(texts):
     hit = next((t for t in texts if t in _FIND_WRITES), None)
     retval = f"find: flag {hit}" if hit else None
+    return retval
+
+
+# ripgrep's two preprocessor options. `--pretty` shares the prefix and prints.
+_RG_RUNS = frozenset(("--pre", "--pre-glob"))
+
+
+def _rg_refusal(texts):
+    hit = next((t for t in texts if t.split("=")[0] in _RG_RUNS), None)
+    retval = f"rg: flag {hit.split('=')[0]}" if hit else None
     return retval
 
 
@@ -305,7 +316,8 @@ def _awk_refusal(texts):
     return retval
 
 
-_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal}
+_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
+                 "rg": _rg_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
 _VERSION_ONLY = frozenset(("python", "python3"))
@@ -689,6 +701,39 @@ def _unquote(text):
     return retval
 
 
+def _literal_word(node, src):
+    """The word bash ends up with, when that takes no shell rules to work out,
+    else None. A path check has to read what bash opens rather than what the
+    source looks like, so anything with an escape, a glob or more than one
+    quoted part is not read at all."""
+    text = _text(node, src)
+    retval = None
+    if node.type == "raw_string":
+        retval = text[1:-1]
+    elif node.type == "word":
+        retval = text if not any(ch in text for ch in "\\*?[") else None
+    elif (node.type == "string" and "\\" not in text
+          and all(c.type in ('"', "string_content") for c in node.children)):
+        retval = text[1:-1]
+    return retval
+
+
+def _is_device(target):
+    """True for a path under /dev, however it is spelled."""
+    t = os.path.normpath(target)
+    t = "/" + t.lstrip("/") if t.startswith("/") else t
+    retval = t == "/dev" or t.startswith("/dev/")
+    return retval
+
+
+# What a heredoc may hold besides its text. tree-sitter hangs whatever follows
+# the opening `<<EOF` on that line under the heredoc node, so a child outside
+# this set is more shell the walk would otherwise never reach.
+_HEREDOC_PARTS = frozenset((
+    "<<", "<<-", "heredoc_start", "heredoc_body", "heredoc_end", "file_redirect",
+))
+
+
 def _resolve(target, tracked):
     """A literal path against the tracked directory, or None."""
     retval = None
@@ -761,8 +806,10 @@ class _Walker:
         dest = c.children[-1] if c.children else None
         if dest is None or not _static(dest):
             return ("redirect target is not a literal", None)
-        target = _unquote(_text(dest, self.src))
-        if target.startswith("/dev/") and target not in _DEV_OK:
+        target = _literal_word(dest, self.src)
+        if target is None:
+            return ("redirect target is not a plain literal", None)
+        if _is_device(target) and target not in _DEV_OK:
             return (f"redirect to device {target}", None)
         # A read verb stops being a read when its output lands in a file
         # (#177). YOLT cannot tell us this -- `cat x`, `cat x > out.txt` and
@@ -771,6 +818,27 @@ class _Walker:
         # not at all.
         retval = (None, not _reads_only(c) and target not in _DEV_OK)
         return retval
+
+    def stdin_redirect(self, c):
+        """One heredoc or herestring judged: (refusal, writes_a_file).
+
+        Their text is expanded by bash exactly as an argument is, so it answers
+        to the same rule as an argument, and a redirect on the heredoc's opening
+        line answers to `redirect_write`. A quoted heredoc delimiter makes the
+        body literal, and tree-sitter then reports nothing in it to refuse."""
+        if not _no_substitution(c):
+            return ("command substitution in a heredoc or herestring", None)
+        writes = False
+        if c.type == "heredoc_redirect":
+            for part in c.children:
+                if part.type not in _HEREDOC_PARTS:
+                    return (f"{part.type} after a heredoc is not grantable", None)
+                if part.type == "file_redirect":
+                    refusal, redirect_writes = self.redirect_write(part)
+                    if refusal is not None:
+                        return (refusal, None)
+                    writes = writes or redirect_writes
+        return (None, writes)
 
     def redirected(self, node):
         """A command, pipeline or list with redirects. The body is judged as
@@ -787,7 +855,10 @@ class _Walker:
                     return (False, refusal)
                 writes = writes or redirect_writes
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
-                continue
+                refusal, redirect_writes = self.stdin_redirect(c)
+                if refusal is not None:
+                    return (False, refusal)
+                writes = writes or redirect_writes
             else:
                 return (False, f"{c.type} under a redirect is not grantable")
         if body is None:
@@ -857,6 +928,13 @@ class _Walker:
                 if refusal is not None:
                     return (False, refusal)
                 self.writes_file = self.writes_file or writes
+            elif c.type in ("heredoc_redirect", "herestring_redirect"):
+                refusal, writes = self.stdin_redirect(c)
+                if refusal is not None:
+                    return (False, refusal)
+                self.writes_file = self.writes_file or writes
+            elif c.type == "heredoc_body" and not _no_substitution(c):
+                return (False, "command substitution in a heredoc or herestring")
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")

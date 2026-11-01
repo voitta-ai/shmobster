@@ -183,8 +183,8 @@ def _find_refusal(texts):
     return retval
 
 
-# ripgrep's two preprocessor options. `--pretty` shares the prefix and prints.
-_RG_RUNS = frozenset(("--pre", "--pre-glob"))
+# The ripgrep options that run a program. `--pretty` shares a prefix and prints.
+_RG_RUNS = frozenset(("--pre", "--pre-glob", "--hostname-bin"))
 
 
 def _rg_refusal(texts):
@@ -702,19 +702,26 @@ def _unquote(text):
 
 
 def _literal_word(node, src):
-    """The word bash ends up with, when that takes no shell rules to work out,
-    else None. A path check has to read what bash opens rather than what the
-    source looks like, so anything with an escape, a glob or more than one
-    quoted part is not read at all."""
+    """The word bash ends up with, when that takes no shell rules beyond quote
+    removal to work out, else None. A check has to read what the command gets
+    rather than what the source looks like, so quoted pieces are joined, and
+    anything with a glob, a brace or an escape is not read at all. The escaped
+    parentheses and `!` of a `find` expression are the one exception."""
     text = _text(node, src)
     retval = None
     if node.type == "raw_string":
         retval = text[1:-1]
-    elif node.type == "word":
-        retval = text if not any(ch in text for ch in "\\*?[") else None
+    elif node.type in ("word", "number"):
+        if text in ("\\(", "\\)", "\\!"):
+            retval = text[1:]
+        elif not any(ch in text for ch in "\\{*?["):
+            retval = text
     elif (node.type == "string" and "\\" not in text
           and all(c.type in ('"', "string_content") for c in node.children)):
         retval = text[1:-1]
+    elif node.type == "concatenation":
+        parts = [_literal_word(c, src) for c in node.children]
+        retval = "".join(parts) if all(p is not None for p in parts) else None
     return retval
 
 
@@ -800,7 +807,8 @@ class _Walker:
         """
         # Words after the target belong to the command, whatever node the
         # parser hangs them on, and nothing here reads them as arguments.
-        if len(c.children_by_field_name("destination")) > 1:
+        dests = c.children_by_field_name("destination")
+        if len(dests) > 1 or (dests and any(k.type in _CLOSE_OPS for k in c.children)):
             return ("words after a redirect target are not grantable", None)
         # No path, nothing to judge: not a device, not in the tree, not a
         # write. Checked before the destination is read at all, because for
@@ -1046,7 +1054,12 @@ class _Walker:
             # or concatenated word, or a bare word with an escape, it does.
             retval = (False, "awk: an argument is not a plain word or single-quoted string")
             return retval
-        texts = [_unquote(_text(a, self.src)) for a in args]
+        # The deny lists compare words, so they have to be the words the
+        # command gets, not their spelling in the source.
+        texts = [_literal_word(a, self.src) for a in args]
+        if any(t is None for t in texts):
+            retval = (False, f"{verb}: an argument takes shell rules to read")
+            return retval
         why = _FLAG_REFUSAL[verb](texts)
         retval = (False, why) if why else (True, f"{verb}: read-only")
         return retval

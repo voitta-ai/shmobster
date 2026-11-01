@@ -798,6 +798,10 @@ class _Walker:
         its command, and bash writes the file either way, so the two parse
         shapes have to reach the same verdict or the rule is decoration (#213).
         """
+        # Words after the target belong to the command, whatever node the
+        # parser hangs them on, and nothing here reads them as arguments.
+        if len(c.children_by_field_name("destination")) > 1:
+            return ("words after a redirect target are not grantable", None)
         # No path, nothing to judge: not a device, not in the tree, not a
         # write. Checked before the destination is read at all, because for
         # `2>&1` the "destination" is the number 1.

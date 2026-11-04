@@ -183,8 +183,9 @@ def _find_refusal(texts):
     return retval
 
 
-# The ripgrep options that run a program. `--pretty` shares a prefix and prints.
-_RG_RUNS = frozenset(("--pre", "--pre-glob", "--hostname-bin"))
+# The ripgrep options that run a named program. `--pretty` shares a prefix and
+# prints.
+_RG_RUNS = frozenset(("--pre", "--hostname-bin"))
 
 
 def _rg_refusal(texts):
@@ -193,23 +194,41 @@ def _rg_refusal(texts):
     return retval
 
 
-def _sort_refusal(texts):
-    """`sort` writes only through -o/--output, and every spelling of it.
+# `sort` as an allowlist. Its writers and program runners differ between
+# implementations, and long options can be abbreviated, so a deny list has to
+# know every spelling of every one. These are the ordering and field options;
+# anything else cards.
+_SORT_FLAGS = frozenset("bcCdfghiMmnRrsuV")
+_SORT_VALUE_FLAGS = frozenset("kt")
+_SORT_LONG = frozenset((
+    "--check", "--dictionary-order", "--field-separator", "--general-numeric-sort",
+    "--human-numeric-sort", "--ignore-case", "--ignore-leading-blanks",
+    "--ignore-nonprinting", "--key", "--merge", "--month-sort", "--numeric-sort",
+    "--random-sort", "--reverse", "--stable", "--unique", "--version-sort",
+))
+_SORT_LONG_VALUE = frozenset(("--key", "--field-separator"))
 
-    The attached and bundled forms are the point: `sort -o out f`, `sort -oout`
-    and `sort -uo out` all redirect the result into a file, and only the first
-    is caught by comparing against "-o". So any single-dash cluster containing
-    an `o` is refused -- `-u`, `-n`, `-r` and the rest survive, and a cluster
-    that merely looks unfamiliar is refused rather than guessed at."""
-    retval = None
-    for t in texts:
-        if t == "--output" or t.startswith("--output="):
-            retval = f"sort: flag {t.split('=')[0]}"
-            break
-        if t.startswith("-") and not t.startswith("--") and "o" in t[1:]:
-            retval = f"sort: flag {t} redirects the result into a file"
-            break
-    return retval
+
+def _sort_refusal(texts):
+    """`sort` with only ordering and field options, and any files."""
+    i = 0
+    while i < len(texts):
+        t = texts[i]
+        i += 1
+        if t.startswith("--"):
+            if t.split("=")[0] not in _SORT_LONG:
+                return f"sort: option {t.split('=')[0]}"
+            if t in _SORT_LONG_VALUE:
+                i += 1
+        elif t.startswith("-") and len(t) > 1:
+            for k, ch in enumerate(t[1:], 1):
+                if ch in _SORT_VALUE_FLAGS:
+                    if k == len(t) - 1:
+                        i += 1  # its value is the next word
+                    break
+                if ch not in _SORT_FLAGS:
+                    return f"sort: option -{ch}"
+    return None
 
 
 # awk is a language, so it is checked against an allowlist of what its program
@@ -628,6 +647,8 @@ _CONTAINERS = frozenset(("program", "list", "pipeline"))
 _SKIP = frozenset(("&&", "||", ";", "|", "&", "\n", ";;", "comment"))
 
 _DEV_OK = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
+_SYSTEM_BIN = frozenset(("", "/bin", "/usr/bin", "/sbin", "/usr/sbin",
+                         "/usr/local/bin", "/opt/homebrew/bin"))
 
 # `<` is the only redirect operator that does not write. Anything else, and
 # anything unrecognized, counts as a write -- the fail-closed direction.
@@ -725,20 +746,46 @@ def _literal_word(node, src):
     return retval
 
 
-def _is_device(target):
-    """True for a path under /dev, however it is spelled."""
-    t = os.path.normpath(target)
+def _is_device(target, tracked=None):
+    """True for a path under /dev, however it is spelled, including relative to
+    the tracked directory."""
+    t = os.path.normpath(_resolve(target, tracked) or target)
     t = "/" + t.lstrip("/") if t.startswith("/") else t
     retval = t == "/dev" or t.startswith("/dev/")
     return retval
 
 
-# What a heredoc may hold besides its text. tree-sitter hangs whatever follows
-# the opening `<<EOF` on that line under the heredoc node, so a child outside
-# this set is more shell the walk would otherwise never reach.
-_HEREDOC_PARTS = frozenset((
-    "<<", "<<-", "heredoc_start", "heredoc_body", "heredoc_end", "file_redirect",
-))
+# A heredoc is granted only in the shapes where bash and tree-sitter provably
+# agree on where it ends and what its text does: a plain delimiter or a wholly
+# quoted one, and a closing line that is the delimiter and nothing else. In an
+# unquoted body, anything the parser does not model is refused from the raw
+# bytes, because a node that is not in the tree cannot be walked.
+_HEREDOC_OPEN = frozenset(("<<", "<<-", "heredoc_start", "heredoc_body", "heredoc_end"))
+_HEREDOC_DELIM = re.compile(r"""[A-Za-z0-9_]+|'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+\"""")
+_HEREDOC_UNSAFE = (b"`", b"$(", b"\\\n")
+
+
+def _heredoc_refusal(c, src):
+    """Why this heredoc's extent or body cannot be trusted, or None."""
+    kinds = {k.type: k for k in c.children}
+    start = kinds.get("heredoc_start")
+    end = kinds.get("heredoc_end")
+    if start is None or end is None:
+        return "heredoc without an opening or closing delimiter"
+    raw = _text(start, src)
+    if not _HEREDOC_DELIM.fullmatch(raw):
+        return "heredoc delimiter is not plain or wholly quoted"
+    delim = _unquote(raw).encode()
+    clean = (lambda ln: ln.lstrip(b"\t")) if "<<-" in kinds else (lambda ln: ln)
+    last = src.rfind(b"\n", 0, end.start_byte) + 1
+    if clean(src[last:end.end_byte]) != delim or src[end.end_byte:end.end_byte + 1] not in (b"", b"\n"):
+        return "heredoc closing line is not its delimiter"
+    body = src[src.find(b"\n", start.end_byte) + 1:last]
+    if any(clean(ln) == delim for ln in body.split(b"\n")):
+        return "heredoc delimiter appears inside its body"
+    if raw == _unquote(raw) and any(tok in body for tok in _HEREDOC_UNSAFE):
+        return "command substitution in a heredoc or herestring"
+    return None
 
 
 def _resolve(target, tracked):
@@ -821,7 +868,11 @@ class _Walker:
         target = _literal_word(dest, self.src)
         if target is None:
             return ("redirect target is not a plain literal", None)
-        if _is_device(target) and target not in _DEV_OK:
+        # `~+` and `~-` expand to directories `cd` chose, so only the home form
+        # can be read from here.
+        if target.startswith("~") and target != "~" and not target.startswith("~/"):
+            return ("redirect target is not a plain literal", None)
+        if _is_device(target, self.tracked) and target not in _DEV_OK:
             return (f"redirect to device {target}", None)
         # A read verb stops being a read when its output lands in a file
         # (#177). YOLT cannot tell us this -- `cat x`, `cat x > out.txt` and
@@ -835,21 +886,30 @@ class _Walker:
         """One heredoc or herestring judged: (refusal, writes_a_file).
 
         Their text is expanded by bash exactly as an argument is, so it answers
-        to the same rule as an argument, and a redirect on the heredoc's opening
-        line answers to `redirect_write`. A quoted heredoc delimiter makes the
-        body literal, and tree-sitter then reports nothing in it to refuse."""
+        to the same rule as an argument. What follows a heredoc's opening word
+        on its line hangs under this node: a redirect answers to
+        `redirect_write`, and the rest of a pipeline or list to `walk`."""
         if not _no_substitution(c):
             return ("command substitution in a heredoc or herestring", None)
         writes = False
         if c.type == "heredoc_redirect":
+            refusal = _heredoc_refusal(c, self.src)
+            if refusal is not None:
+                return (refusal, None)
             for part in c.children:
-                if part.type not in _HEREDOC_PARTS:
-                    return (f"{part.type} after a heredoc is not grantable", None)
                 if part.type == "file_redirect":
                     refusal, redirect_writes = self.redirect_write(part)
                     if refusal is not None:
                         return (refusal, None)
                     writes = writes or redirect_writes
+                elif part.type in ("command", "pipeline", "list", "redirected_statement"):
+                    saved = getattr(self, "_seg_text", None)
+                    ok, why = self.walk(part)
+                    self._seg_text = saved
+                    if not ok:
+                        return (why, None)
+                elif part.type not in _HEREDOC_OPEN and part.type not in ("|", "&&", "||"):
+                    return (f"{part.type} after a heredoc is not grantable", None)
         return (None, writes)
 
     def redirected(self, node):
@@ -898,7 +958,12 @@ class _Walker:
             if c.type == "command_name":
                 if not _static(c):
                     return (None, [])
-                verb = os.path.basename(_unquote(_text(c, self.src)))
+                # A path outside the system's own directories is some other
+                # program that shares a name with a verb, so it keeps its path
+                # and matches nothing here.
+                verb = _unquote(_text(c, self.src))
+                if os.path.dirname(verb) in _SYSTEM_BIN:
+                    verb = os.path.basename(verb)
             elif c.type == "variable_assignment":
                 return (None, [])
             elif c.type == "heredoc_body":

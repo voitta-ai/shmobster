@@ -452,6 +452,8 @@ GIT_READ = frozenset((
     # for `git merge-base --is-ancestor A B`, and took every other segment of
     # the command with it.
     "merge-base", "for-each-ref",
+    # Which commits of one branch are not yet upstream: a listing, like log.
+    "cherry",
 ))
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways
@@ -611,6 +613,20 @@ AWS_VALUE_FLAGS = frozenset((
 # Local git writes that need no repository state.
 GIT_LOCAL = frozenset(("add", "mv", "stash"))
 
+# git global options that leave alone where git takes its repository, its
+# configuration and its helper programs from. An allowlist: every other global
+# option is refused, because several of the ones that are not here choose
+# exactly that, and an unlisted one is not one this layer has read.
+_GIT_GLOBAL_OK = frozenset((
+    "--no-pager", "-P", "--no-optional-locks", "--literal-pathspecs",
+    "--no-replace-objects", "--no-advice",
+))
+
+# Verbs the classifier may judge that cannot move the shell or change how a
+# later `cd` resolves. An allowlist: any other unread segment leaves the
+# tracked directory unknown.
+_DIR_NEUTRAL = frozenset(("echo", "true", "false"))
+
 # Structural nodes to descend through; their operator tokens are skipped.
 _CONTAINERS = frozenset(("program", "list", "pipeline"))
 _SKIP = frozenset(("&&", "||", ";", "|", "&", "\n", ";;", "comment"))
@@ -682,6 +698,23 @@ def _no_substitution(node):
     return retval
 
 
+def _plain_word(node, src):
+    """(text, quoted) for one argument bash reads exactly as written: a bare
+    word with no escapes, or a whole quoted string with nothing expanded or
+    escaped inside it. None for anything else, such as a word mixing quoted
+    and unquoted parts, whose meaning this layer does not reproduce."""
+    raw = _text(node, src)
+    if not _static(node) or "\\" in raw:
+        return None
+    if node.type == "word":
+        retval = (raw, False)
+    elif node.type in ("raw_string", "string") and len(raw) >= 2 and raw[0] == raw[-1]:
+        retval = (raw[1:-1], True)
+    else:
+        retval = None
+    return retval
+
+
 def _unquote(text):
     retval = text
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
@@ -689,11 +722,15 @@ def _unquote(text):
     return retval
 
 
-def _resolve(target, tracked):
-    """A literal path against the tracked directory, or None."""
+def _resolve(target, tracked, quoted=False):
+    """A literal path against the tracked directory, or None. A quoted word
+    keeps its `~`: the shell does not expand it there, so neither may this."""
     retval = None
     if tracked is not None and target not in ("-",):
-        t = os.path.expanduser(target)
+        if not quoted and target[:1] == "~" and target[1:2] in ("+", "-") + tuple("0123456789"):
+            # `~+`, `~-` and `~N` are the shell's directories, not a home.
+            return retval
+        t = target if quoted else os.path.expanduser(target)
         retval = t if os.path.isabs(t) else os.path.join(tracked, t)
     return retval
 
@@ -701,7 +738,6 @@ def _resolve(target, tracked):
 class _Walker:
     def __init__(self, src, start_dir, policy=None, channel=None, thread_ts=None):
         self.src = src
-        self.tracked = start_dir
         self.start_dir = start_dir
         self.policy = policy or {}
         # File-only channel opt-in (#253), read once per walk. Not settable
@@ -721,15 +757,52 @@ class _Walker:
         # granted for something other than a read (#327); `check` refuses both.
         self.vercel_seen = False
         self.other_effect = False
+        # Directory tracking for git: every directory bash could be in at
+        # this point of the command, None for one this layer cannot name.
+        # While every separator so far is `&&` there is exactly one; past
+        # `;`, `||` or a newline an earlier `cd` may have failed, so a later
+        # one can start from any of them and they accumulate.
+        self.dirs = [start_dir]
+        self.and_chain = True
+        self.in_pipeline = False
+
+    @property
+    def tracked(self):
+        """The one directory the shell is in, or None when it could be more
+        than one or cannot be named."""
+        retval = self.dirs[0] if len(self.dirs) == 1 else None
+        return retval
+
+    def _move(self, targets):
+        """Record where a directory change lands, from each possible base."""
+        if self.and_chain:
+            self.dirs = list(dict.fromkeys(targets))
+        else:
+            self.dirs = list(dict.fromkeys(self.dirs + targets))
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
         retval = (True, "")
         if node.type in _CONTAINERS:
-            for c in node.children:
+            children = node.children
+            for n, c in enumerate(children):
                 if c.type in _SKIP:
+                    # Past `;`, `||`, `&` or a newline a later segment can run
+                    # although an earlier `cd` failed or ran in the background,
+                    # so git may be in any directory the command has named.
+                    if c.type not in ("&&", "|", "comment"):
+                        self.and_chain = False
                     continue
+                saved = self.in_pipeline
+                self.in_pipeline = saved or node.type == "pipeline"
+                # Whatever precedes `&` runs in a subshell of its own: a `cd`
+                # in it moves the rest of that job, and nothing after it.
+                nxt = children[n + 1] if n + 1 < len(children) else None
+                dirs = list(self.dirs) if nxt is not None and nxt.type == "&" else None
                 retval = self.walk(c)
+                if dirs is not None:
+                    self.dirs = dirs
+                self.in_pipeline = saved
                 if not retval[0]:
                     break
         elif node.type == "command":
@@ -851,12 +924,17 @@ class _Walker:
         # `git push` is granted on its subcommand and still has to name a host
         # this channel was given (#253).
         self._seg_text = text
+        # Set by a git refusal the classifier must not overturn: where git
+        # would load its repository from is this layer's question, not YOLT's.
+        self.git_final = False
         for c in node.children:
             if c.type == "file_redirect":
                 refusal, writes = self.redirect_write(c)
                 if refusal is not None:
                     return (False, refusal)
                 self.writes_file = self.writes_file or writes
+                if writes:
+                    self.other_effect = True
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")
@@ -916,7 +994,7 @@ class _Walker:
         shadowed = (f"{verb} reads, but this segment redirects output to a file"
                     if retval is None and (verb in READ_VERBS or verb in FLAG_CHECKED_READS)
                     else None)
-        if retval is None or (retval[0] is False and verb == "git"):
+        if retval is None or (retval[0] is False and verb == "git" and not self.git_final):
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
             # `cd` to a target we could not resolve falls back to the
@@ -924,6 +1002,10 @@ class _Walker:
             decision, reason = yolt_gate.classify(
                 text, cwd=self.tracked or self.start_dir,
             )
+            if verb not in _DIR_NEUTRAL:
+                # A segment this layer did not read may have moved the shell
+                # or changed how a later `cd` resolves.
+                self._move([None])
             if decision == "safe":
                 # "Read-only" is about this machine, and a fetch is read-only
                 # here while being an effect out there (#149). Without this the
@@ -939,7 +1021,7 @@ class _Walker:
             # A vercel grant reads .vercel/project.json now; a write elsewhere
             # in the same command runs before vercel does and can rewrite it
             # in between (#327). Reads and `cd` cannot.
-            if verb not in ("vercel", "cd") and not retval[1].endswith("read-only"):
+            if verb not in ("vercel", "cd") and not retval[1].endswith(("read-only", "listing")):
                 self.other_effect = True
         return retval
 
@@ -1032,13 +1114,31 @@ class _Walker:
         return retval
 
     def cd(self, args):
+        """Move the tracked directory, or make it unknown wherever bash could
+        land somewhere this layer does not model."""
+        if self.in_pipeline:
+            # A pipeline's `cd` runs in its own subshell and moves nothing.
+            return (True, "cd")
+        env = self._env_names()
+        word = _plain_word(args[0], self.src) if len(args) == 1 else None
         if not args:
-            self.tracked = os.path.expanduser("~")
-        elif len(args) == 1 and _static(args[0]):
-            self.tracked = _resolve(_unquote(_text(args[0], self.src)), self.tracked)
+            targets = [None if "HOME" in env else os.path.expanduser("~")]
+        elif word is None:
+            targets = [None]
         else:
-            self.tracked = None
+            target, quoted = word
+            if (target.startswith("-") or "CDPATH" in env and not os.path.isabs(target)
+                    or "HOME" in env and not quoted and target.startswith("~")):
+                targets = [None]
+            else:
+                targets = [_logical(_resolve(target, d, quoted)) for d in self.dirs]
+        self._move(targets)
         retval = (True, "cd")
+        return retval
+
+    def _env_names(self):
+        """Names of the variables this channel's commands run with."""
+        retval = set(self.policy.get("env") or ()) | set(self.policy.get("env_passthrough") or ())
         return retval
 
     def checked(self, why):
@@ -1066,7 +1166,7 @@ class _Walker:
         return retval
 
     def git(self, args):
-        directory = self.tracked
+        dirs = list(self.dirs)
         sub = None
         rest = []
         config_override = False
@@ -1077,23 +1177,27 @@ class _Walker:
         # a config).
         while i < len(args):
             a = args[i]
-            t = _text(a, self.src) if _static(a) else None
             if sub is not None:
-                rest.append(t)
+                rest.append(_text(a, self.src) if _static(a) else None)
                 i += 1
                 continue
-            if t is None:
+            # Before the subcommand a word is read as bash reads it, so a
+            # quoted `-C` is still `-C`.
+            word = _plain_word(a, self.src)
+            if word is None:
+                self.git_final = True
                 return (False, "git subcommand is not literal")
-            if t == "-C" and i + 1 < len(args):
-                directory = (
-                    _resolve(_unquote(_text(args[i + 1], self.src)), directory)
-                    if _static(args[i + 1]) else None
-                )
+            t = word[0]
+            if t == "-C" and i + 1 >= len(args):
+                self.git_final = True
+                return (False, "git -C: no directory follows it")
+            if t == "-C":
+                word = _plain_word(args[i + 1], self.src)
+                if word is None or "HOME" in self._env_names() and not word[1] and word[0].startswith("~"):
+                    dirs = [None]
+                else:
+                    dirs = [_resolve(word[0], d, word[1]) for d in dirs]
                 i += 2
-                continue
-            if t.startswith("-C") and len(t) > 2:
-                directory = _resolve(t[2:], directory)
-                i += 1
                 continue
             # `git -c <key>=<value>` runs arbitrary commands through several
             # config keys, and the subcommand still looks like a read. Measured
@@ -1108,6 +1212,9 @@ class _Walker:
                 i += 2 if t == "-c" else 1
                 continue
             if t.startswith("-"):
+                if t not in _GIT_GLOBAL_OK:
+                    self.git_final = True
+                    return (False, f"git {t.split('=', 1)[0]}: not a global option this layer reads")
                 i += 1
                 continue
             sub = t
@@ -1118,8 +1225,32 @@ class _Walker:
             r == "-O" or r == "--output" or r.startswith(("-O", "--output="))
             for r in rest if r
         )
-        if config_override:
+        # Before anything below runs git to ask about the repository: those
+        # probes run outside the sandbox and load the configuration of
+        # whatever repository `directory` turns out to hold.
+        pin = next((r for r in (_git_pin_refusal(d, self.start_dir) for d in dirs) if r), None)
+        # A repository-selecting variable in the channel's environment
+        # (GIT_DIR, GIT_WORK_TREE, GIT_CONFIG_*) outranks the directory.
+        git_env = sorted(n for n in self._env_names() if n.startswith("GIT_"))
+        # The probes below need the one directory git runs in. Reached with
+        # a None in `dirs` only when `pin` already refuses.
+        real = {os.path.realpath(d) for d in dirs if d is not None}
+        directory = dirs[0] if len(real) == 1 and None not in dirs else None
+        if git_env:
+            self.git_final = True
+            retval = (False, f"git: the channel's environment sets {git_env[0]}")
+        elif pin:
+            self.git_final = True
+            retval = (False, pin)
+        elif config_override:
+            self.git_final = True
             retval = (False, "git -c: a config override can run an arbitrary command")
+        elif self.other_effect and not self.unattended and sub not in ("add", "commit"):
+            # An earlier segment's write lands before this git loads the
+            # repository, and can change what it loads. `add` and `commit`
+            # are exempt: writing files and then committing them is the work.
+            self.git_final = True
+            retval = (False, f"git {sub}: after a write in the same command")
         elif self.unattended and sub in _UNATTENDED_GIT_SUBS:
             # Reached only past the `-c` / `--config-env` refusal above, and
             # only for a subcommand git defines -- an unknown word here is an
@@ -1201,6 +1332,9 @@ class _Walker:
         if sub not in _GIT_NET_SUBS_LOCAL:
             retval = (True, f"git {sub}: unattended channel")
             return retval
+        if directory is None:
+            self.git_final = True
+            return (False, f"git {sub}: directory not statically known")
         name = next((r for r in rest if r and not r.startswith("-")), "origin")
         url = self.probe.remote_url(directory, name)
         if not url:
@@ -1482,6 +1616,46 @@ def _vercel_token_ok(token, policy):
     value = _unquote(token.strip())
     m = _VERCEL_TOKEN_VAR.match(value)
     retval = bool(m) and bool((policy.get("env") or {}).get(m.group(1)))
+    return retval
+
+
+def _git_pin_refusal(directory, start_dir):
+    """Why git may not be granted in `directory`, or None.
+
+    A git read is only as safe as the repository configuration it loads, and
+    that configuration can name commands git runs. So git is granted only where
+    the channel's policy put a repository: its checkout, or a worktree root
+    under the `<checkout>.worktrees` sibling the sandbox makes writable for
+    that purpose. Anywhere else -- a subdirectory, the temp dir, a parent --
+    the repository git would discover is one nobody named."""
+    if directory is None:
+        return "git: directory not statically known"
+    d = os.path.realpath(directory)
+    root = os.path.realpath(start_dir)
+    # Built the way sandbox.roots builds the writable sibling.
+    worktrees = os.path.realpath(root + ".worktrees")
+    dot = os.path.join(d, ".git")
+    # A `.git` symlink hands the repository to wherever it points.
+    if os.path.islink(dot):
+        return "git: the repository's .git is a symlink"
+    if d == root and os.path.lexists(dot):
+        return None
+    # A linked worktree's `.git` is a file naming its gitdir.
+    if d.startswith(worktrees + os.sep) and os.path.isfile(dot):
+        return None
+    retval = "git: not the channel's checkout or one of its worktrees"
+    return retval
+
+
+def _logical(joined):
+    """The directory `cd` lands in for an absolute path, or None.
+
+    bash's `cd` drops `a/..` as text; realpath goes through a symlink at `a`
+    first. Where the two disagree, the directory bash lands in is not the one
+    this layer would judge."""
+    retval = os.path.normpath(joined) if joined is not None else None
+    if retval is not None and os.path.realpath(retval) != os.path.realpath(joined):
+        retval = None
     return retval
 
 

@@ -182,6 +182,9 @@ READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
     "jq", "id", "whoami", "uname", "printenv", "ps",
+    # Print-only builtins and a pause. `printf` is absent: its numeric
+    # conversions are not a plain print.
+    "echo", "pwd", "true", "sleep",
 ))
 
 # Reads that stay reads unless a named flag turns them into something else
@@ -970,6 +973,8 @@ class _Walker:
         # granted for something other than a read (#327); `check` refuses both.
         self.vercel_seen = False
         self.other_effect = False
+        # Raised while walking a single command whose stdin is a heredoc.
+        self.heredoc_stdin = False
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -1091,6 +1096,11 @@ class _Walker:
             return (False, "redirect without a command")
         before = len(self.reasons)
         saved = self.writes_file
+        saved_heredoc = self.heredoc_stdin
+        # `cat > f <<EOF` is how an agent writes a file. The heredoc was judged
+        # above, so a lone `cat` reading it is the same write `tee f` is.
+        self.heredoc_stdin = body.type == "command" and any(
+            c.type == "heredoc_redirect" for c in node.children)
         self.writes_file = self.writes_file or writes
         if writes:
             # A redirect writes before a later segment runs, which is the same
@@ -1099,6 +1109,7 @@ class _Walker:
             self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
+        self.heredoc_stdin = saved_heredoc
         if retval[0]:
             # A redirect after a list opens its file once the list's `cd`s
             # have run, so the directory is judged again where it now stands.
@@ -1223,6 +1234,8 @@ class _Walker:
             retval = (True, f"{verb}: unattended channel") if allowed else (False, why)
         elif verb in FS_VERBS:
             retval = (True, f"{verb}: in-tree write")
+        elif verb == "cat" and self.writes_file and self.heredoc_stdin and not args:
+            retval = (True, "cat: heredoc into an in-tree file")
         elif verb == "git":
             retval = self.git(args)
         elif verb == "gh":
@@ -1268,16 +1281,10 @@ class _Walker:
             decision, reason = yolt_gate.classify(
                 text, cwd=self.tracked or self.start_dir,
             )
-            if decision == "safe":
-                # "Read-only" is about this machine, and a fetch is read-only
-                # here while being an effect out there (#149). Without this the
-                # layer that exists to vouch for local writes would vouch for
-                # `touch f && curl https://elsewhere/...`, one segment at a
-                # time, and hand back the grant the egress check just refused.
-                allowed, why = policy_mod.check_egress(text, self.policy)
-                retval = (True, f"{verb}: read-only") if allowed else (False, why)
-            elif retval is None:
-                retval = (False, shadowed or reason)
+            # Asked for the reason a card shows. This layer vouches by its own
+            # rules, so a segment none of them covers parks.
+            if retval is None:
+                retval = (False, shadowed or (f"no grant rule: {verb}" if decision == "safe" else reason))
         if retval[0]:
             self.reasons.append(retval[1])
             # A vercel grant reads .vercel/project.json now; a write elsewhere

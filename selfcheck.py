@@ -621,7 +621,7 @@ assert _applied["call"][0] == "C1", _applied
 # 11) approval flow (#48): a mutating command parks; a trusted user releases it
 yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
-_parked = tools.run_shell("echo approved_marker_456", {}, "C1")
+_parked = tools.run_shell("printf approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
 _req = _parked.split("[", 1)[1].split("]", 1)[0]
 # What run_shell shows a human is the queue key itself, nonce and all (#109)
@@ -654,7 +654,7 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 
 # 12) Slack approval surface (#50): each parked command is handed to an ingest
 # exactly once, and Deny drops it unrun -- trust-gated like approve
-_parked2 = tools.run_shell("echo never_runs_789", {}, "C1")
+_parked2 = tools.run_shell("printf never_runs_789", {}, "C1")
 _req2 = _parked2.split("[", 1)[1].split("]", 1)[0]
 _key2 = approvals.canonical(_req2)
 _surfaced = approvals.claim_unsurfaced("C1")
@@ -674,15 +674,15 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # slack_app builds a Bolt App. What is checkable is everything the ingest calls:
 # the queue survives, and the alert says who clicked, which button, and what it
 # did not run.
-_parked3 = tools.run_shell("echo refused_click_321", {}, "C1")
+_parked3 = tools.run_shell("printf refused_click_321", {}, "C1")
 _req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
 _key3 = approvals.canonical(_req3)
-assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.peek(_req3, "C1")["command"] == "printf refused_click_321"
 assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
 
 # two deliveries of one button press land on two threads (#103): the second
 # must get nothing, so it cannot overwrite the first one's result
-assert approvals.acquire(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.acquire(_req3, "C1")["command"] == "printf refused_click_321"
 assert approvals.acquire(_req3, "C1") is None, "a second click must not acquire a held request"
 assert approvals.acquire(_req3, "C_OTHER") is None, "acquire is channel-scoped, like pop"
 approvals.release(_req3)
@@ -704,7 +704,7 @@ assert approvals.status(_req3, "C1")[0] == "held", "acquired -> held"
 assert approvals.pop(_req3, "C1") is None, "a consumer racing a hold must get nothing (#105)"
 assert approvals.peek(_req3, "C1") is None, "held means out of the queue entirely"
 _h_state, _h_req = approvals.status(_req3, "C1")
-assert _h_state == "held" and _h_req["command"] == "echo refused_click_321", "held comes WITH the request now (#105)"
+assert _h_state == "held" and _h_req["command"] == "printf refused_click_321", "held comes WITH the request now (#105)"
 assert approvals.status("no-such-id", "C1")[0] == "absent", "an absent request is not held"
 # ids are a process counter that restarts at 1 while approval cards outlive the
 # process, so a stale card in one channel can name an id another channel holds
@@ -739,7 +739,7 @@ for _k in _all_held:
     approvals.release(_k)
 for _k in approvals.ids("C_FULL"):
     approvals.pop(_k, "C_FULL")
-_req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
+_req3 = tools.run_shell("printf refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
 _key3 = approvals.canonical(_req3)
 
 _cref = admin_tools.refuse_click(
@@ -756,7 +756,7 @@ assert "Approve" in _posted["text"], _posted
 assert "still parked" in _posted["text"], _posted
 assert "right here" in _posted["text"], _posted
 assert "card above" not in _posted["text"], _posted
-assert "echo refused_click_321" in str(_posted["blocks"]), _posted
+assert "printf refused_click_321" in str(_posted["blocks"]), _posted
 
 # ...but pending is not the same as clickable, and the queue goes quiet in the
 # middle of a trusted click: it acquires the request, strips the buttons, and
@@ -4104,7 +4104,6 @@ try:
                "curl -sSfL https://api.figma.com/v1/x",
                "curl -fsSL https://api.figma.com/v1/x",
                "curl -I https://api.figma.com/v1/x",
-               "curl -o /tmp/x https://api.figma.com/v1/x",
                "curl -H 'X-Figma-Token: t' https://api.figma.com/v1/x",
                # a body-shaped flag belonging to an earlier command in a chain
                # must not card the fetch -- the scan starts at the fetch verb

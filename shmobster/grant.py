@@ -408,7 +408,13 @@ _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refus
                  "rg": _rg_refusal, "date": _date_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
-_VERSION_ONLY = frozenset(("python", "python3"))
+# Each interpreter's own spelling of the version flag: `node -v` is version,
+# `python -v` is verbose, so the flags are per interpreter.
+_VERSION_ONLY = {
+    "python": ("--version", "-V"),
+    "python3": ("--version", "-V"),
+    "node": ("--version", "-v"),
+}
 
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
@@ -1196,8 +1202,14 @@ class _Walker:
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
         elif (verb in _VERSION_ONLY and not self.writes_file and len(args) == 1
-              and _text(args[0], self.src) in ("--version", "-V")):
+              and _text(args[0], self.src) in _VERSION_ONLY[verb]):
             retval = (True, f"{verb} --version: read-only")
+        elif (verb == "node" and not self.writes_file and len(args) == 2
+              and _text(args[0], self.src) in ("--check", "-c")
+              and (_literal_word(args[1], self.src) or "-")[0] != "-"):
+            # Parses the one file and exits; no other option, so nothing is
+            # preloaded and nothing runs.
+            retval = (True, "node --check: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
         else:

@@ -57,6 +57,44 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
 _GIT_IDENTITY_KEYS = frozenset(("user.name", "user.email"))
+
+# `git config` that only reads, as an allowlist: a lookup or listing, with the
+# scope and display options. A value, --unset, --add, --edit and the rest all
+# write, and every option outside this set is refused rather than judged.
+_GIT_CONFIG_SCOPE = frozenset((
+    "--global", "--local", "--system", "--worktree", "--show-origin",
+    "--show-scope", "--name-only", "--null", "-z", "--includes", "--no-includes",
+    "--bool", "--int", "--path",
+))
+_GIT_CONFIG_GETS = frozenset(("--get", "--get-all", "--get-regexp"))
+
+
+def _git_config_refusal(rest):
+    """Why this `git config` is not a read, or None."""
+    if None in rest:
+        return "git config: an argument is not a literal"
+    words = list(rest)
+    mode = None
+    if words[:1] in (["get"], ["list"]):  # git 2.46+ subcommand form
+        mode = words.pop(0)
+    positionals = []
+    for w in words:
+        if w in _GIT_CONFIG_GETS or w in ("--list", "-l"):
+            mode = mode or w
+        elif w in _GIT_CONFIG_SCOPE or w.startswith("--type="):
+            continue
+        elif w.startswith("-"):
+            return f"git config: option {w}"
+        else:
+            positionals.append(w)
+    if mode in ("list", "--list", "-l"):
+        ok = not positionals
+    elif mode is not None:
+        ok = 1 <= len(positionals) <= 2
+    else:
+        ok = len(positionals) == 1
+    retval = None if ok else "git config: only a lookup or a listing is a read"
+    return retval
 _GIT_NET_RISKY = frozenset((
     "--repo", "--upload-pack", "--receive-pack", "--exec", "--config",
     "--template", "--reference", "--separate-git-dir",
@@ -1500,6 +1538,9 @@ class _Walker:
                 retval = (True, "git remote: listing")
             else:
                 retval = (False, "git remote: only the bare listing is read-only")
+        elif sub == "config" and not self.writes_file:
+            why = _git_config_refusal(rest)
+            retval = (False, why) if why else (True, "git config: read")
         elif sub == "worktree" and not self.writes_file and not writes_flag:
             # `git worktree list` reads the same administrative file `git
             # worktree add` writes, and `add`, `remove`, `move`, `prune`,

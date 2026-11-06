@@ -805,6 +805,15 @@ def _fd_dup(node):
     return retval
 
 
+def _stdout_write(node):
+    """True for a `>` or `>>` file redirect of standard output."""
+    ops = [c.type for c in node.children]
+    fds = [c for c in node.children if c.type == "file_descriptor"]
+    retval = (any(op in (">", ">>") for op in ops)
+              and all(c.text in (b"1",) for c in fds))
+    return retval
+
+
 def _reads_only(node):
     retval = any(c.type in _READ_REDIRECT for c in node.children)
     return retval
@@ -1099,8 +1108,20 @@ class _Walker:
         saved_heredoc = self.heredoc_stdin
         # `cat > f <<EOF` is how an agent writes a file. The heredoc was judged
         # above, so a lone `cat` reading it is the same write `tee f` is.
-        self.heredoc_stdin = body.type == "command" and any(
-            c.type == "heredoc_redirect" for c in node.children)
+        # Only when the heredoc is the sole stdin and stdout is what lands in
+        # the file: bash takes the last stdin redirect, so a `<` beside it
+        # would make this a file copy (#177), and a stderr redirect writes
+        # nothing of cat's output.
+        # A redirect written after the heredoc's opening word hangs under the
+        # heredoc node, so its children count too.
+        kids = list(node.children) + list(body.children)
+        kids += [k for c in node.children if c.type == "heredoc_redirect" for k in c.children]
+        self.heredoc_stdin = (
+            body.type == "command"
+            and sum(c.type == "heredoc_redirect" for c in kids) == 1
+            and not any(c.type == "herestring_redirect" or c.type == "file_redirect" and _reads_only(c)
+                        for c in kids)
+            and any(c.type == "file_redirect" and _stdout_write(c) for c in kids))
         self.writes_file = self.writes_file or writes
         if writes:
             # A redirect writes before a later segment runs, which is the same
@@ -1273,7 +1294,7 @@ class _Walker:
         shadowed = (f"{verb} reads, but this segment redirects output to a file"
                     if retval is None and (verb in READ_VERBS or verb in FLAG_CHECKED_READS)
                     else None)
-        if retval is None or (retval[0] is False and verb == "git"):
+        if retval is None:
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
             # `cd` to a target we could not resolve falls back to the

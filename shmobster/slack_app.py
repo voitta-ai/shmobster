@@ -323,6 +323,19 @@ def on_decline_skill(ack, body, client, action):
     )
 
 
+def _failure_line(exc):
+    """The one line a failed turn posts. Never the exception text (#352).
+
+    Model failures are told apart by where the exception class lives: litellm
+    raises its own types (litellm.exceptions) and the Router its own
+    (litellm.types.router), so the module prefix covers both without listing
+    classes that move between litellm releases."""
+    if type(exc).__module__.split(".")[0] in ("litellm", "openai"):
+        return (":warning: No language model is available right now, so I could not "
+                "answer. Please try again in a few minutes; the details are in my log.")
+    return ":warning: Something went wrong and I could not finish this. The details are in my log."
+
+
 def _turn(event, say, client, logger):
     """One turn, from whichever Slack event carried it.
 
@@ -355,12 +368,13 @@ def _turn(event, say, client, logger):
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, slack_client=client, attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
-        # Both paths are scrubbed: a provider exception can carry the request it
-        # failed on, api_key and Authorization header included (#72). The log
-        # side is covered by redact.install_logging(), which scrubs the rendered
-        # traceback too.
+        # The exception goes to the log only (#352). A router failure's text is
+        # the whole multi-provider dump -- deployment hashes, fallback groups,
+        # vendor JSON with account ids -- which nobody in the channel can act on
+        # and the operator reads in the log anyway. The log side is scrubbed by
+        # redact.install_logging(), the traceback included (#72).
         logger.exception("handler failed")
-        reply = redact.scrub(f":warning: shmobster error: {exc}")
+        reply = redact.scrub(_failure_line(exc))
     say(thread_ts=thread_ts, **_reply_payload(reply))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.

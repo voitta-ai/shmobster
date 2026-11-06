@@ -740,9 +740,45 @@ def _literal_word(node, src):
     elif (node.type == "string" and "\\" not in text
           and all(c.type in ('"', "string_content") for c in node.children)):
         retval = text[1:-1]
-    elif node.type == "concatenation":
+    elif node.type == "concatenation" and _contiguous(node):
         parts = [_literal_word(c, src) for c in node.children]
         retval = "".join(parts) if all(p is not None for p in parts) else None
+    return retval
+
+
+def _contiguous(node):
+    """True when the parts of a word touch: nothing, not even a line
+    continuation, sits between them."""
+    kids = node.children
+    retval = all(a.end_byte == b.start_byte for a, b in zip(kids, kids[1:]))
+    return retval
+
+
+def _glob_text(node, src):
+    """A word as written, globs and all, when quote removal is the only other
+    rule it needs; else None."""
+    text = _text(node, src)
+    retval = None
+    if node.type in ("word", "number"):
+        retval = text if "\\" not in text else None
+    elif node.type == "concatenation" and _contiguous(node):
+        parts = [_glob_text(c, src) for c in node.children]
+        retval = "".join(parts) if all(p is not None for p in parts) else None
+    else:
+        retval = _literal_word(node, src)
+    return retval
+
+
+def _arg_word(node, src):
+    """An argument as the command gets it, for checks that compare it with
+    option names; None when that cannot be read. A glob is kept as written
+    when it starts with a literal character other than a dash: every word it
+    can expand to starts with that character, so none of them is an option."""
+    retval = _literal_word(node, src)
+    if retval is None:
+        text = _glob_text(node, src)
+        if text and text[0] not in "-*?[{":
+            retval = text
     return retval
 
 
@@ -1012,6 +1048,12 @@ class _Walker:
                 self.writes_file = self.writes_file or writes
             elif c.type == "heredoc_body" and not _no_substitution(c):
                 return (False, "command substitution in a heredoc or herestring")
+        # Two parser words with only line continuations between them are one
+        # word to bash, and every check below would read it as two.
+        for a, b in zip(node.children, node.children[1:]):
+            gap = self.src[a.end_byte:b.start_byte]
+            if gap and not gap.replace(b"\\\n", b""):
+                return (False, "a line continuation joins two words")
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")
@@ -1121,7 +1163,7 @@ class _Walker:
             return retval
         # The deny lists compare words, so they have to be the words the
         # command gets, not their spelling in the source.
-        texts = [_literal_word(a, self.src) for a in args]
+        texts = [_arg_word(a, self.src) for a in args]
         if any(t is None for t in texts):
             retval = (False, f"{verb}: an argument takes shell rules to read")
             return retval
@@ -1151,8 +1193,12 @@ class _Walker:
         texts = []
         for a in args:
             raw = _text(a, self.src)
-            if _static(a):
-                texts.append(_unquote(raw))
+            word = _arg_word(a, self.src) if _static(a) else None
+            if word is not None:
+                texts.append(word)
+            elif _static(a):
+                retval = (False, f"{verb}: an argument takes shell rules to read")
+                return retval
             elif _quoted_non_flag(raw):
                 # The case this grant exists for: `-H "X-Api-Key: $TOKEN"`,
                 # where the credential comes from the channel's `env` and never
@@ -1237,7 +1283,7 @@ class _Walker:
         # a config).
         while i < len(args):
             a = args[i]
-            t = _text(a, self.src) if _static(a) else None
+            t = _arg_word(a, self.src) if _static(a) else None
             if sub is not None:
                 rest.append(t)
                 i += 1
@@ -1337,7 +1383,9 @@ class _Walker:
             else:
                 retval = (False, "git worktree: only `list` is read-only")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
-            retval = (True, f"git {sub}: read-only")
+            # A word this cannot read could be the output flag.
+            retval = ((False, f"git {sub}: an argument is not a literal")
+                      if None in rest else (True, f"git {sub}: read-only"))
         else:
             retval = (False, f"git {sub}: not a local write")
         return retval
@@ -1383,7 +1431,7 @@ class _Walker:
         retval = []
         skip = False
         for a in args:
-            t = _text(a, self.src) if _static(a) else None
+            t = _arg_word(a, self.src) if _static(a) else None
             if t is None:
                 return None
             if skip:

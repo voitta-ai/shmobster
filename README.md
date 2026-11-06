@@ -781,6 +781,13 @@ machine's channel layout is versioned separately from the token/key config:
     argument skipped unread, so `--token "$VERCEL_TOKEN"` works and is never
     logged. Policy-file only, like `unattended`.
 
+    The grant only decides what may run. Making the CLI work in a channel
+    takes a team (not project) token, `--scope <team>` on every command
+    (the system prompt says so), the team and project IDs and a writable
+    `XDG_DATA_HOME` in `env` -- each of which otherwise fails with an error
+    that points elsewhere:
+    [docs/VERCEL.md](docs/VERCEL.md).
+
   - `mcp` -- MCP servers this channel may use, and which of each server's tools,
     turning any MCP server into gated tools the agent can call (#299). The
     default, like every capability, is none. Shape:

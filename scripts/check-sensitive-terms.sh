@@ -69,18 +69,13 @@ internal-domain|[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.(internal|corp|intranet)
 
 status=0
 
-# Set to "-i" by the wordlist pass: names are written in every casing
-# (Foo, foo, FOO), so a case-sensitive term match misses most of them.
-# Structural patterns stay case-SENSITIVE on purpose - AKIA, sk-, xoxb-,
-# AIza are fixed-case prefixes, and -i would only add false positives.
-CASE_FLAG=""
-
 check_pattern() {
   label="$1"
   regex="$2"
   shift 2
   # grep -rEn over the paths; -I skips binaries. Suppress the "no match" exit.
-  matches=$(grep -rEnI $CASE_FLAG "$regex" "$@" 2>/dev/null)
+  # Case-SENSITIVE on purpose: AKIA, sk-, xoxb-, AIza are fixed-case prefixes.
+  matches=$(grep -rEnI "$regex" "$@" 2>/dev/null)
   if [ -n "$matches" ]; then
     echo "SENSITIVE [$label]:" >&2
     echo "$matches" | sed 's/^/  /' >&2
@@ -120,19 +115,17 @@ wordlist_ran=0
 
 if [ -f "$terms_file" ]; then
   wordlist_ran=1
-  # Case-insensitive and WHOLE-WORD (-w): a short listed name otherwise fires
-  # inside ordinary words and identifiers ("rubella", "isLabelEvent"), and a
-  # gate that cries wolf gets bypassed with --no-verify. A word boundary is any
-  # non-[A-Za-z0-9_] character, so "#name", "name-site" and "name.com" still match.
-  CASE_FLAG="-i -w"
-  while IFS= read -r term; do
-    case "$term" in
-      ""|\#*) continue ;;
-    esac
-    # The term is treated as an extended regex.
-    check_pattern "private-term" "$term" "$@"
-  done < "$terms_file"
-  CASE_FLAG=""
+  # Whole word, where a camelCase hump also counts as a boundary: a short
+  # listed name must not fire inside ordinary words ("rubella"), or a gate
+  # that cries wolf gets bypassed with --no-verify -- but a name embedded in
+  # an identifier ("AcmeCorpThing", "ACMECORP_PROD") must. grep cannot say
+  # that, so the name pass is Python; the rule is in check_names.py.
+  matches=$(python3 -I "$(dirname "$0")/check_names.py" "$terms_file" "$@")
+  if [ -n "$matches" ]; then
+    echo "SENSITIVE [private-term]:" >&2
+    echo "$matches" | sed 's/^/  /' >&2
+    status=1
+  fi
   echo "using name wordlist: $terms_file" >&2
 elif [ -n "${SHMOBSTER_SENSITIVE_TERMS_FILE:-}" ]; then
   # Explicitly pointed at a file that isn't there - that is an error, not a

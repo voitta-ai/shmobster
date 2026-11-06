@@ -13,6 +13,13 @@ per instance (see the system prompt) -- introduce yourself by that name.
   -- it is the work, and in a channel set up for it that just runs. When
   something does park, say what the actual risk is; never present a card as
   though asking permission were itself the safe habit.
+- Read with the tools that run without a card. To read, count, search or
+  extract from files, use `jq`, `grep`, `rg`, `wc`, `head`, `sed -n` or a
+  print-only `awk`. An interpreter one-liner (`node -e`, `python3 -c`, a
+  heredoc to `python3 -`) always gets a card, whatever it does, because
+  nothing can check your description of it -- and one carded segment parks
+  the whole chain. Reach for an interpreter only when the job is beyond those
+  tools, and say why in the card.
 - Finish the task you were given. Stop mid-task only for a decision that is
   genuinely someone else's to make, or a card. A clean boundary in the work is
   not a reason to stop, and neither is the tool-step limit: the loop enforces

@@ -56,6 +56,10 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # reads it; when it does not, an unattended git subcommand that contacts a
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+_GIT_NET_RISKY = frozenset((
+    "--repo", "--upload-pack", "--receive-pack", "--exec", "--config",
+    "--template", "--reference", "--separate-git-dir",
+))
 _GIT_NET_SUBS_LOCAL = frozenset(("clone", "fetch", "pull", "push", "ls-remote", "submodule"))
 
 # Filesystem writes the sandbox confines to the tree.
@@ -190,7 +194,12 @@ _RG_RUNS = frozenset(("--pre", "--hostname-bin"))
 
 def _rg_refusal(texts):
     hit = next((t for t in texts if t.split("=")[0] in _RG_RUNS), None)
-    retval = f"rg: flag {hit.split('=')[0]}" if hit else None
+    # -z / --search-zip runs decompressors found on PATH. A short cluster is
+    # refused whenever it holds a z, attached values included.
+    zipped = next((t for t in texts if t == "--search-zip"
+                   or t.startswith("-") and not t.startswith("--") and "z" in t), None)
+    retval = (f"rg: flag {hit.split('=')[0]}" if hit
+              else f"rg: {zipped} searches compressed files" if zipped else None)
     return retval
 
 
@@ -647,6 +656,7 @@ _CONTAINERS = frozenset(("program", "list", "pipeline"))
 _SKIP = frozenset(("&&", "||", ";", "|", "&", "\n", ";;", "comment"))
 
 _DEV_OK = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
+_TEXT_SCOPED = frozenset(("git", "gh", "aws", "npm"))
 _SYSTEM_BIN = frozenset(("", "/bin", "/usr/bin", "/sbin", "/usr/sbin",
                          "/usr/local/bin", "/opt/homebrew/bin"))
 
@@ -908,6 +918,8 @@ class _Walker:
         # can be read from here.
         if target.startswith("~") and target != "~" and not target.startswith("~/"):
             return ("redirect target is not a plain literal", None)
+        if self.tracked is None and not os.path.isabs(os.path.expanduser(target)):
+            return ("redirect target is relative to a directory this cannot read", None)
         if _is_device(target, self.tracked) and target not in _DEV_OK:
             return (f"redirect to device {target}", None)
         # A read verb stops being a read when its output lands in a file
@@ -919,34 +931,32 @@ class _Walker:
         return retval
 
     def stdin_redirect(self, c):
-        """One heredoc or herestring judged: (refusal, writes_a_file).
+        """One heredoc or herestring judged: (refusal, writes_a_file, trailing).
 
         Their text is expanded by bash exactly as an argument is, so it answers
         to the same rule as an argument. What follows a heredoc's opening word
         on its line hangs under this node: a redirect answers to
-        `redirect_write`, and the rest of a pipeline or list to `walk`."""
+        `redirect_write`, and the rest of a pipeline or list is returned for
+        the caller to walk after the command it follows, in source order."""
+        trailing = []
         if not _no_substitution(c):
-            return ("command substitution in a heredoc or herestring", None)
+            return ("command substitution in a heredoc or herestring", None, trailing)
         writes = False
         if c.type == "heredoc_redirect":
             refusal = _heredoc_refusal(c, self.src)
             if refusal is not None:
-                return (refusal, None)
+                return (refusal, None, trailing)
             for part in c.children:
                 if part.type == "file_redirect":
                     refusal, redirect_writes = self.redirect_write(part)
                     if refusal is not None:
-                        return (refusal, None)
+                        return (refusal, None, trailing)
                     writes = writes or redirect_writes
                 elif part.type in ("command", "pipeline", "list", "redirected_statement"):
-                    saved = getattr(self, "_seg_text", None)
-                    ok, why = self.walk(part)
-                    self._seg_text = saved
-                    if not ok:
-                        return (why, None)
+                    trailing.append(part)
                 elif part.type not in _HEREDOC_OPEN and part.type not in ("|", "&&", "||"):
-                    return (f"{part.type} after a heredoc is not grantable", None)
-        return (None, writes)
+                    return (f"{part.type} after a heredoc is not grantable", None, trailing)
+        return (None, writes, trailing)
 
     def redirected(self, node):
         """A command, pipeline or list with redirects. The body is judged as
@@ -954,6 +964,8 @@ class _Walker:
         it names a device other than the three harmless ones."""
         body = None
         writes = False
+        trailing = []
+        redirects = []
         for c in node.children:
             if c.type in ("command", "pipeline", "list"):
                 body = c
@@ -962,11 +974,13 @@ class _Walker:
                 if refusal is not None:
                     return (False, refusal)
                 writes = writes or redirect_writes
+                redirects.append(c)
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
-                refusal, redirect_writes = self.stdin_redirect(c)
+                refusal, redirect_writes, more = self.stdin_redirect(c)
                 if refusal is not None:
                     return (False, refusal)
                 writes = writes or redirect_writes
+                trailing.extend(more)
             else:
                 return (False, f"{c.type} under a redirect is not grantable")
         if body is None:
@@ -981,8 +995,19 @@ class _Walker:
             self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
+        if retval[0]:
+            # A redirect after a list opens its file once the list's `cd`s
+            # have run, so the directory is judged again where it now stands.
+            for c in redirects:
+                refusal, _ = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
         if retval[0] and len(self.reasons) > before:
             self.reasons[-1] += " > redirect"
+        for part in trailing:
+            if not retval[0]:
+                break
+            retval = self.walk(part)
         return retval
 
     def argv(self, node):
@@ -1042,9 +1067,11 @@ class _Walker:
                     return (False, refusal)
                 self.writes_file = self.writes_file or writes
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
-                refusal, writes = self.stdin_redirect(c)
+                refusal, writes, more = self.stdin_redirect(c)
                 if refusal is not None:
                     return (False, refusal)
+                if more:
+                    return (False, "a statement after a heredoc here is not grantable")
                 self.writes_file = self.writes_file or writes
             elif c.type == "heredoc_body" and not _no_substitution(c):
                 return (False, "command substitution in a heredoc or herestring")
@@ -1063,6 +1090,16 @@ class _Walker:
         # segments that fall through to it, so the check is unconditional.
         if not all(_no_substitution(a) for a in args):
             return (False, f"{verb}: command substitution in arguments")
+        # Scope checks for these (`_check_github`, `_check_aws`) read
+        # the command's text, so an option has to be spelled the way the
+        # command receives it, or the check and the command see two commands.
+        # Its value may be quoted as usual.
+        if verb in _TEXT_SCOPED:
+            for a in args:
+                word = _literal_word(a, self.src)
+                name = (word or "").split("=")[0]
+                if name.startswith("-") and not _text(a, self.src).startswith(name):
+                    return (False, f"{verb}: option {name} is quoted or escaped")
         if verb == "cd":
             retval = self.cd(args)
         elif self.unattended and verb in UNATTENDED_VERBS:
@@ -1193,7 +1230,7 @@ class _Walker:
         texts = []
         for a in args:
             raw = _text(a, self.src)
-            word = _arg_word(a, self.src) if _static(a) else None
+            word = _literal_word(a, self.src) if _static(a) else None
             if word is not None:
                 texts.append(word)
             elif _static(a):
@@ -1241,7 +1278,12 @@ class _Walker:
         if not args:
             self.tracked = os.path.expanduser("~")
         elif len(args) == 1 and _static(args[0]):
-            self.tracked = _resolve(_unquote(_text(args[0], self.src)), self.tracked)
+            word = _literal_word(args[0], self.src)
+            # `~-` and `~+` are the previous and current directory, which a
+            # literal reading would take for a relative path.
+            known = word is not None and not (word.startswith("~") and word != "~"
+                                              and not word.startswith("~/"))
+            self.tracked = _resolve(word, self.tracked) if known else None
         else:
             self.tracked = None
         retval = (True, "cd")
@@ -1273,6 +1315,7 @@ class _Walker:
 
     def git(self, args):
         directory = self.tracked
+        self._git_globbed = False
         sub = None
         rest = []
         config_override = False
@@ -1283,9 +1326,12 @@ class _Walker:
         # a config).
         while i < len(args):
             a = args[i]
-            t = _arg_word(a, self.src) if _static(a) else None
+            t = _literal_word(a, self.src) if _static(a) else None
             if sub is not None:
-                rest.append(t)
+                # A pathspec may glob; the word is still never an option.
+                globbed = t is None and _static(a) and _arg_word(a, self.src) is not None
+                rest.append(_arg_word(a, self.src) if globbed else t)
+                self._git_globbed = self._git_globbed or globbed
                 i += 1
                 continue
             if t is None:
@@ -1409,7 +1455,15 @@ class _Walker:
         if sub not in _GIT_NET_SUBS_LOCAL:
             retval = (True, f"git {sub}: unattended channel")
             return retval
-        name = next((r for r in rest if r and not r.startswith("-")), "origin")
+        if None in rest or self._git_globbed:
+            return (False, f"git {sub}: an argument is not a literal")
+        # Options that pick the destination themselves, or name a program to
+        # run for the transport. The remote read below would be the wrong one.
+        risky = next((r for r in rest if r.split("=")[0] in _GIT_NET_RISKY
+                      or (sub == "clone" and r in ("-u", "-c"))), None)
+        if risky:
+            return (False, f"git {sub}: option {risky.split('=')[0]}")
+        name = next((r for r in rest if not r.startswith("-")), "origin")
         url = self.probe.remote_url(directory, name)
         if not url:
             retval = (False, f"git {sub}: remote {name!r} does not resolve to a URL here")
@@ -1431,7 +1485,7 @@ class _Walker:
         retval = []
         skip = False
         for a in args:
-            t = _arg_word(a, self.src) if _static(a) else None
+            t = _literal_word(a, self.src) if _static(a) else None
             if t is None:
                 return None
             if skip:

@@ -56,6 +56,7 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # reads it; when it does not, an unattended git subcommand that contacts a
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+_GIT_IDENTITY_KEYS = frozenset(("user.name", "user.email"))
 _GIT_NET_RISKY = frozenset((
     "--repo", "--upload-pack", "--receive-pack", "--exec", "--config",
     "--template", "--reference", "--separate-git-dir",
@@ -134,7 +135,7 @@ _UNATTENDED_GH_NOUNS = frozenset((
 # all four mutate. Reproducing that set would re-import the holes #148 closed.
 #
 # The bar for entry is that no flag turns the command into a write. That is why
-# `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
+# `sort` (-o), `uniq` (output positional), `date` (-s; flag-checked below), `hostname` (sets it),
 # `find` (-delete, -exec), `rg` (runs a preprocessor) and `xargs` (runs its
 # argument) are absent, and why
 # `awk` is absent despite reading: its program can call system() (it is checked
@@ -144,7 +145,7 @@ _UNATTENDED_GH_NOUNS = frozenset((
 READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
-    "jq", "id", "uname", "printenv", "ps",
+    "jq", "id", "whoami", "uname", "printenv", "ps",
 ))
 
 # Reads that stay reads unless a named flag turns them into something else
@@ -178,7 +179,7 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date"))
 
 
 def _find_refusal(texts):
@@ -344,8 +345,67 @@ def _awk_refusal(texts):
     return retval
 
 
+# `date` prints a time unless it is asked to set one, and what counts as asking
+# differs by implementation. BSD getopt stops at the first non-option and BSD
+# then treats a following word as the time to set, where GNU permutes; a `+`
+# word is the format only in BSD's first position; and without `-j`, BSD's `-f`
+# exists only to parse a time to set. So this reads the strictest common shape:
+# allowlisted options first, nothing dash-shaped after them, and then either
+# `-j` among those options (parse, never set) or at most one `+format`. The
+# conversions an agent reaches for -- `date -u -r 1770068151`, `date -d @1770068151`,
+# `date -j -f %s 1770068151 +%F` -- used to card.
+_DATE_FLAGS = frozenset("uRjn")
+_DATE_VALUE_FLAGS = frozenset("rdvfz")
+_DATE_LONG = frozenset((
+    "--utc", "--universal", "--rfc-email", "--rfc-2822", "--iso-8601",
+    "--rfc-3339", "--debug", "--help", "--version", "--date", "--reference",
+    "--file",
+))
+_DATE_LONG_VALUE = frozenset(("--date", "--reference", "--file"))
+
+
+def _date_refusal(texts):
+    """`date` whose words read the same to BSD and GNU, and print on both."""
+    no_set = False
+    parses_input = False
+    i = 0
+    while i < len(texts) and texts[i].startswith("-") and len(texts[i]) > 1:
+        t = texts[i]
+        i += 1
+        if t.startswith("--"):
+            if t.split("=")[0] not in _DATE_LONG:
+                return f"date: option {t}"
+            if t in _DATE_LONG_VALUE:
+                i += 1
+            continue
+        for k, ch in enumerate(t[1:], 1):
+            if ch == "j":
+                no_set = True
+            if ch in _DATE_FLAGS:
+                continue
+            if ch == "I":
+                break  # -I[FMT]: the rest of the word is its argument
+            if ch in _DATE_VALUE_FLAGS:
+                parses_input = parses_input or ch == "f"
+                if k == len(t) - 1:
+                    i += 1  # its value is the next word
+                break
+            return f"date: option -{ch}"
+    rest = texts[i:]
+    if any(t.startswith("-") and len(t) > 1 for t in rest):
+        return "date: an option after a positional reads differently on BSD and GNU"
+    if no_set:
+        return None
+    if parses_input:
+        return "date: -f without -j sets the clock"
+    setting = rest[1:] if rest[:1] and rest[0].startswith("+") else rest
+    if setting:
+        return f"date: {setting[0]} would set the clock"
+    return None
+
+
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
-                 "rg": _rg_refusal}
+                 "rg": _rg_refusal, "date": _date_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
 _VERSION_ONLY = frozenset(("python", "python3"))
@@ -490,8 +550,10 @@ GIT_READ = frozenset((
     # `merge-base` has no writing form: --is-ancestor, --fork-point, --octopus,
     # --independent and -a only change what it answers. Its absence cost a card
     # for `git merge-base --is-ancestor A B`, and took every other segment of
-    # the command with it.
-    "merge-base", "for-each-ref",
+    # the command with it. `rev-list` is the same question counted (`--count
+    # A..B`); it takes revision options only, and the diff family's `--output`
+    # is refused for every subcommand below anyway.
+    "merge-base", "for-each-ref", "rev-list",
 ))
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways
@@ -1199,8 +1261,10 @@ class _Walker:
             retval = (False, "awk: an argument is not a plain word or single-quoted string")
             return retval
         # The deny lists compare words, so they have to be the words the
-        # command gets, not their spelling in the source.
-        texts = [_arg_word(a, self.src) for a in args]
+        # command gets, not their spelling in the source. `date` counts its
+        # positionals, so a glob that could become several words is refused.
+        reader = _literal_word if verb == "date" else _arg_word
+        texts = [reader(a, self.src) for a in args]
         if any(t is None for t in texts):
             retval = (False, f"{verb}: an argument takes shell rules to read")
             return retval
@@ -1356,7 +1420,13 @@ class _Walker:
             # The pager route does not fire (git pages only to a terminal), but
             # these do, so no git command carrying an override is granted here.
             if t == "-c" or t.startswith("-c") or t.startswith("--config-env"):
-                config_override = True
+                # The commit identity is the one override that names no
+                # program, and agents reach for it to commit.
+                value = (_literal_word(args[i + 1], self.src) if t == "-c" and i + 1 < len(args)
+                         else t[2:] if t.startswith("-c") and t != "-c" else None)
+                key = value.split("=")[0].lower() if value and "=" in value else None
+                if key not in _GIT_IDENTITY_KEYS:
+                    config_override = True
                 i += 2 if t == "-c" else 1
                 continue
             if t.startswith("-"):

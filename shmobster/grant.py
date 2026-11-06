@@ -56,8 +56,6 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # reads it; when it does not, an unattended git subcommand that contacts a
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
-_GIT_IDENTITY_KEYS = frozenset(("user.name", "user.email"))
-
 # `git config` that only reads, as an allowlist: a lookup or listing, with the
 # scope and display options. A value, --unset, --add, --edit and the rest all
 # write, and every option outside this set is refused rather than judged.
@@ -1470,13 +1468,7 @@ class _Walker:
             # The pager route does not fire (git pages only to a terminal), but
             # these do, so no git command carrying an override is granted here.
             if t == "-c" or t.startswith("-c") or t.startswith("--config-env"):
-                # The commit identity is the one override that names no
-                # program, and agents reach for it to commit.
-                value = (_literal_word(args[i + 1], self.src) if t == "-c" and i + 1 < len(args)
-                         else t[2:] if t.startswith("-c") and t != "-c" else None)
-                key = value.split("=")[0].lower() if value and "=" in value else None
-                if key not in _GIT_IDENTITY_KEYS:
-                    config_override = True
+                config_override = True
                 i += 2 if t == "-c" else 1
                 continue
             if t.startswith("-"):
@@ -1539,7 +1531,11 @@ class _Walker:
             else:
                 retval = (False, "git remote: only the bare listing is read-only")
         elif sub == "config" and not self.writes_file:
-            why = _git_config_refusal(rest)
+            # Read strictly: a lookup and a set differ only in how many words
+            # follow, so a word that could expand into two cannot be judged.
+            strict = [_literal_word(a, self.src) if _static(a) else None
+                      for a in args[len(args) - len(rest):]]
+            why = _git_config_refusal(strict)
             retval = (False, why) if why else (True, "git config: read")
         elif sub == "worktree" and not self.writes_file and not writes_flag:
             # `git worktree list` reads the same administrative file `git

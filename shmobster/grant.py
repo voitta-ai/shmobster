@@ -56,6 +56,43 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # reads it; when it does not, an unattended git subcommand that contacts a
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+# `git config` that only reads, as an allowlist: a lookup or listing, with the
+# scope and display options. A value, --unset, --add, --edit and the rest all
+# write, and every option outside this set is refused rather than judged.
+_GIT_CONFIG_SCOPE = frozenset((
+    "--global", "--local", "--system", "--worktree", "--show-origin",
+    "--show-scope", "--name-only", "--null", "-z", "--includes", "--no-includes",
+    "--bool", "--int", "--path",
+))
+_GIT_CONFIG_GETS = frozenset(("--get", "--get-all", "--get-regexp"))
+
+
+def _git_config_refusal(rest):
+    """Why this `git config` is not a read, or None."""
+    if None in rest:
+        return "git config: an argument is not a literal"
+    words = list(rest)
+    mode = None
+    if words[:1] in (["get"], ["list"]):  # git 2.46+ subcommand form
+        mode = words.pop(0)
+    positionals = []
+    for w in words:
+        if w in _GIT_CONFIG_GETS or w in ("--list", "-l"):
+            mode = mode or w
+        elif w in _GIT_CONFIG_SCOPE or w.startswith("--type="):
+            continue
+        elif w.startswith("-"):
+            return f"git config: option {w}"
+        else:
+            positionals.append(w)
+    if mode in ("list", "--list", "-l"):
+        ok = not positionals
+    elif mode is not None:
+        ok = 1 <= len(positionals) <= 2
+    else:
+        ok = len(positionals) == 1
+    retval = None if ok else "git config: only a lookup or a listing is a read"
+    return retval
 _GIT_NET_RISKY = frozenset((
     "--repo", "--upload-pack", "--receive-pack", "--exec", "--config",
     "--template", "--reference", "--separate-git-dir",
@@ -134,7 +171,7 @@ _UNATTENDED_GH_NOUNS = frozenset((
 # all four mutate. Reproducing that set would re-import the holes #148 closed.
 #
 # The bar for entry is that no flag turns the command into a write. That is why
-# `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
+# `sort` (-o), `uniq` (output positional), `date` (-s; flag-checked below), `hostname` (sets it),
 # `find` (-delete, -exec), `rg` (runs a preprocessor) and `xargs` (runs its
 # argument) are absent, and why
 # `awk` is absent despite reading: its program can call system() (it is checked
@@ -144,7 +181,7 @@ _UNATTENDED_GH_NOUNS = frozenset((
 READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
-    "jq", "id", "uname", "printenv", "ps",
+    "jq", "id", "whoami", "uname", "printenv", "ps",
 ))
 
 # Reads that stay reads unless a named flag turns them into something else
@@ -178,7 +215,7 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date"))
 
 
 def _find_refusal(texts):
@@ -344,11 +381,76 @@ def _awk_refusal(texts):
     return retval
 
 
+# `date` prints a time unless it is asked to set one, and what counts as asking
+# differs by implementation. BSD getopt stops at the first non-option and BSD
+# then treats a following word as the time to set, where GNU permutes; a `+`
+# word is the format only in BSD's first position; and without `-j`, BSD's `-f`
+# exists only to parse a time to set. So this reads the strictest common shape:
+# allowlisted options first, nothing dash-shaped after them, and then either
+# `-j` among those options (parse, never set) or at most one `+format`. The
+# conversions an agent reaches for -- `date -u -r 1770068151`, `date -d @1770068151`,
+# `date -j -f %s 1770068151 +%F` -- used to card.
+_DATE_FLAGS = frozenset("uRjn")
+_DATE_VALUE_FLAGS = frozenset("rdvfz")
+_DATE_LONG = frozenset((
+    "--utc", "--universal", "--rfc-email", "--rfc-2822", "--iso-8601",
+    "--rfc-3339", "--debug", "--help", "--version", "--date", "--reference",
+    "--file",
+))
+_DATE_LONG_VALUE = frozenset(("--date", "--reference", "--file"))
+
+
+def _date_refusal(texts):
+    """`date` whose words read the same to BSD and GNU, and print on both."""
+    no_set = False
+    parses_input = False
+    i = 0
+    while i < len(texts) and texts[i].startswith("-") and len(texts[i]) > 1:
+        t = texts[i]
+        i += 1
+        if t.startswith("--"):
+            if t.split("=")[0] not in _DATE_LONG:
+                return f"date: option {t}"
+            if t in _DATE_LONG_VALUE:
+                i += 1
+            continue
+        for k, ch in enumerate(t[1:], 1):
+            if ch == "j":
+                no_set = True
+            if ch in _DATE_FLAGS:
+                continue
+            if ch == "I":
+                break  # -I[FMT]: the rest of the word is its argument
+            if ch in _DATE_VALUE_FLAGS:
+                parses_input = parses_input or ch == "f"
+                if k == len(t) - 1:
+                    i += 1  # its value is the next word
+                break
+            return f"date: option -{ch}"
+    rest = texts[i:]
+    if any(t.startswith("-") and len(t) > 1 for t in rest):
+        return "date: an option after a positional reads differently on BSD and GNU"
+    if no_set:
+        return None
+    if parses_input:
+        return "date: -f without -j sets the clock"
+    setting = rest[1:] if rest[:1] and rest[0].startswith("+") else rest
+    if setting:
+        return f"date: {setting[0]} would set the clock"
+    return None
+
+
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
-                 "rg": _rg_refusal}
+                 "rg": _rg_refusal, "date": _date_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
-_VERSION_ONLY = frozenset(("python", "python3"))
+# Each interpreter's own spelling of the version flag: `node -v` is version,
+# `python -v` is verbose, so the flags are per interpreter.
+_VERSION_ONLY = {
+    "python": ("--version", "-V"),
+    "python3": ("--version", "-V"),
+    "node": ("--version", "-v"),
+}
 
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
@@ -490,8 +592,10 @@ GIT_READ = frozenset((
     # `merge-base` has no writing form: --is-ancestor, --fork-point, --octopus,
     # --independent and -a only change what it answers. Its absence cost a card
     # for `git merge-base --is-ancestor A B`, and took every other segment of
-    # the command with it.
-    "merge-base", "for-each-ref",
+    # the command with it. `rev-list` is the same question counted (`--count
+    # A..B`); it takes revision options only, and the diff family's `--output`
+    # is refused for every subcommand below anyway.
+    "merge-base", "for-each-ref", "rev-list",
 ))
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways
@@ -1134,8 +1238,14 @@ class _Walker:
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
         elif (verb in _VERSION_ONLY and not self.writes_file and len(args) == 1
-              and _text(args[0], self.src) in ("--version", "-V")):
+              and _text(args[0], self.src) in _VERSION_ONLY[verb]):
             retval = (True, f"{verb} --version: read-only")
+        elif (verb == "node" and not self.writes_file and len(args) == 2
+              and _text(args[0], self.src) in ("--check", "-c")
+              and (_literal_word(args[1], self.src) or "-")[0] != "-"):
+            # Parses the one file and exits; no other option, so nothing is
+            # preloaded and nothing runs.
+            retval = (True, "node --check: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
         else:
@@ -1199,8 +1309,10 @@ class _Walker:
             retval = (False, "awk: an argument is not a plain word or single-quoted string")
             return retval
         # The deny lists compare words, so they have to be the words the
-        # command gets, not their spelling in the source.
-        texts = [_arg_word(a, self.src) for a in args]
+        # command gets, not their spelling in the source. `date` counts its
+        # positionals, so a glob that could become several words is refused.
+        reader = _literal_word if verb == "date" else _arg_word
+        texts = [reader(a, self.src) for a in args]
         if any(t is None for t in texts):
             retval = (False, f"{verb}: an argument takes shell rules to read")
             return retval
@@ -1418,6 +1530,13 @@ class _Walker:
                 retval = (True, "git remote: listing")
             else:
                 retval = (False, "git remote: only the bare listing is read-only")
+        elif sub == "config" and not self.writes_file:
+            # Read strictly: a lookup and a set differ only in how many words
+            # follow, so a word that could expand into two cannot be judged.
+            strict = [_literal_word(a, self.src) if _static(a) else None
+                      for a in args[len(args) - len(rest):]]
+            why = _git_config_refusal(strict)
+            retval = (False, why) if why else (True, "git config: read")
         elif sub == "worktree" and not self.writes_file and not writes_flag:
             # `git worktree list` reads the same administrative file `git
             # worktree add` writes, and `add`, `remove`, `move`, `prune`,

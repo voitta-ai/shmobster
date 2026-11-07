@@ -182,6 +182,9 @@ READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
     "jq", "id", "whoami", "uname", "printenv", "ps",
+    # Print-only builtins and a pause. `printf` is absent: its numeric
+    # conversions are not a plain print.
+    "echo", "pwd", "true", "sleep",
 ))
 
 # Reads that stay reads unless a named flag turns them into something else
@@ -802,6 +805,15 @@ def _fd_dup(node):
     return retval
 
 
+def _stdout_write(node):
+    """True for a `>` or `>>` file redirect of standard output."""
+    ops = [c.type for c in node.children]
+    fds = [c for c in node.children if c.type == "file_descriptor"]
+    retval = (any(op in (">", ">>") for op in ops)
+              and all(c.text in (b"1",) for c in fds))
+    return retval
+
+
 def _reads_only(node):
     retval = any(c.type in _READ_REDIRECT for c in node.children)
     return retval
@@ -970,6 +982,8 @@ class _Walker:
         # granted for something other than a read (#327); `check` refuses both.
         self.vercel_seen = False
         self.other_effect = False
+        # Raised while walking a single command whose stdin is a heredoc.
+        self.heredoc_stdin = False
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -1091,6 +1105,23 @@ class _Walker:
             return (False, "redirect without a command")
         before = len(self.reasons)
         saved = self.writes_file
+        saved_heredoc = self.heredoc_stdin
+        # `cat > f <<EOF` is how an agent writes a file. The heredoc was judged
+        # above, so a lone `cat` reading it is the same write `tee f` is.
+        # Only when the heredoc is the sole stdin and stdout is what lands in
+        # the file: bash takes the last stdin redirect, so a `<` beside it
+        # would make this a file copy (#177), and a stderr redirect writes
+        # nothing of cat's output.
+        # A redirect written after the heredoc's opening word hangs under the
+        # heredoc node, so its children count too.
+        kids = list(node.children) + list(body.children)
+        kids += [k for c in node.children if c.type == "heredoc_redirect" for k in c.children]
+        self.heredoc_stdin = (
+            body.type == "command"
+            and sum(c.type == "heredoc_redirect" for c in kids) == 1
+            and not any(c.type == "herestring_redirect" or c.type == "file_redirect" and _reads_only(c)
+                        for c in kids)
+            and any(c.type == "file_redirect" and _stdout_write(c) for c in kids))
         self.writes_file = self.writes_file or writes
         if writes:
             # A redirect writes before a later segment runs, which is the same
@@ -1099,6 +1130,7 @@ class _Walker:
             self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
+        self.heredoc_stdin = saved_heredoc
         if retval[0]:
             # A redirect after a list opens its file once the list's `cd`s
             # have run, so the directory is judged again where it now stands.
@@ -1223,6 +1255,8 @@ class _Walker:
             retval = (True, f"{verb}: unattended channel") if allowed else (False, why)
         elif verb in FS_VERBS:
             retval = (True, f"{verb}: in-tree write")
+        elif verb == "cat" and self.writes_file and self.heredoc_stdin and not args:
+            retval = (True, "cat: heredoc into an in-tree file")
         elif verb == "git":
             retval = self.git(args)
         elif verb == "gh":
@@ -1260,7 +1294,7 @@ class _Walker:
         shadowed = (f"{verb} reads, but this segment redirects output to a file"
                     if retval is None and (verb in READ_VERBS or verb in FLAG_CHECKED_READS)
                     else None)
-        if retval is None or (retval[0] is False and verb == "git"):
+        if retval is None:
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
             # `cd` to a target we could not resolve falls back to the
@@ -1268,16 +1302,10 @@ class _Walker:
             decision, reason = yolt_gate.classify(
                 text, cwd=self.tracked or self.start_dir,
             )
-            if decision == "safe":
-                # "Read-only" is about this machine, and a fetch is read-only
-                # here while being an effect out there (#149). Without this the
-                # layer that exists to vouch for local writes would vouch for
-                # `touch f && curl https://elsewhere/...`, one segment at a
-                # time, and hand back the grant the egress check just refused.
-                allowed, why = policy_mod.check_egress(text, self.policy)
-                retval = (True, f"{verb}: read-only") if allowed else (False, why)
-            elif retval is None:
-                retval = (False, shadowed or reason)
+            # Asked for the reason a card shows. This layer vouches by its own
+            # rules, so a segment none of them covers parks.
+            if retval is None:
+                retval = (False, shadowed or (f"no grant rule: {verb}" if decision == "safe" else reason))
         if retval[0]:
             self.reasons.append(retval[1])
             # A vercel grant reads .vercel/project.json now; a write elsewhere

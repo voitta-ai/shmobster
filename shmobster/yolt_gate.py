@@ -115,7 +115,7 @@ _PROBE_RETRY_SECONDS = 1.0
 # `git pull` there changes every verdict live, between restarts. On 2026-10-07
 # another session pulled it from v2.4.0 to v2.7.0 without knowing the agent
 # read it. Keep the clone detached at this tag; move both together.
-YOLT_PIN = "v2.8.0"
+YOLT_PIN = "v2.9.0"
 
 
 def pinned_version():

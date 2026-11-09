@@ -11,6 +11,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
 from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from .surface import SlackSurface
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -216,7 +217,7 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
         "user_id": body["user"]["id"],
         "channel": channel,
         "thread_ts": thread_ts,
-        "client": client,
+        "surface": SlackSurface(client),
     }
     # A click that resolves nothing must not touch the card (#94). chat_update
     # is destructive, and the card is the only place a parked command is ever
@@ -347,7 +348,7 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             # The clicking trusted user, matching the text path: "approve <id>"
             # runs inside that user's own turn, so the resumed turn carries the
             # same identity a typed approval would.
-            user_id=user_id, slack_client=client,
+            user_id=user_id, surface=SlackSurface(client),
             requester=req.get("requester"),
         )
         if reply is None:
@@ -443,7 +444,7 @@ def _turn(event, say, client, logger):
     # not an audience: it gets what a webhook post (no user) gets.
     asker = None if event.get("bot_id") else event.get("user")
     try:
-        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, slack_client=client, attachments=parts)
+        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, surface=SlackSurface(client), attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
         # Both paths are scrubbed: a provider exception can carry the request it
         # failed on, api_key and Authorization header included (#72). The log

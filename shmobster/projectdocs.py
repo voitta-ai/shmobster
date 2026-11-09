@@ -65,10 +65,17 @@ def _safe(path):
 
 
 def _entry(directory, path):
-    """(mode, type, sha) of `path` in the HEAD tree, or None."""
-    out = _git(directory, "ls-tree", "-z", _REV, "--", path) if _safe(path) else None
-    fields = out.split(b"\t", 1)[0].decode("ascii", "replace").split(" ") if out else []
-    retval = tuple(fields) if len(fields) == 3 else None
+    """(mode, type, sha) of `path` in the HEAD tree, or None.
+
+    `--full-tree`, because `git show HEAD:<path>` reads from the repository
+    root and a channel's cwd can be a subdirectory of its repo; without it the
+    two calls would look at different files. And only an entry whose path IS
+    the one asked for: `ls-tree` on a directory lists its children, and the
+    first child must not stand in for the directory."""
+    out = _git(directory, "ls-tree", "-z", "--full-tree", _REV, "--", path) if _safe(path) else None
+    head, _, name = (out or b"").split(b"\0", 1)[0].partition(b"\t")
+    fields = head.decode("ascii", "replace").split(" ")
+    retval = tuple(fields) if len(fields) == 3 and name == path.encode() else None
     return retval
 
 

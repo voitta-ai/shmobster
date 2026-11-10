@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, cost as cost_mod, gitcfg, grant, mcp, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
+from . import approvals, config, cost as cost_mod, gitcfg, grant, identity, mcp, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -118,7 +118,7 @@ def _asker_tag(user_id):
     thread transcript excludes the current message -- so "tag the person who
     asked" was an instruction the model could only guess at (Codex adversarial
     review)."""
-    retval = f"<@{user_id}>" if user_id else "the person who asked"
+    retval = identity.mention(user_id) if user_id else "the person who asked"
     return retval
 
 
@@ -126,7 +126,7 @@ def _trusted_tags():
     """The trusted users, as Slack mentions, for the approver half of a park
     message (#256). Built here from config rather than imported from
     admin_tools, which imports this module -- one helper is not worth a cycle."""
-    retval = " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "the trusted users"
+    retval = " ".join(identity.mention(u) for u in config.TRUSTED_USERS) or "the trusted users"
     return retval
 
 

@@ -8,7 +8,7 @@ the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
 policy still bounds its scope when it runs. reload_skills re-reads the skills
 catalog (#74) -- gated too, since it changes which instructions I will follow."""
-from . import approvals, config, learning, mcp, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
+from . import approvals, config, identity, learning, mcp, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
 
 TOOLS = [
     {
@@ -142,7 +142,7 @@ def run_denied(request_id, req, ctx):
     it and report. The button path acquires in _resolve; the text path in
     deny()."""
     approvals.finish(request_id)
-    retval = f"DENIED by <@{ctx.get('user_id')}>, not run: {req['command']}"
+    retval = f"DENIED by {identity.mention(ctx.get('user_id'))}, not run: {req['command']}"
     return retval
 
 
@@ -167,7 +167,7 @@ def deny(request_id, ctx):
 
 
 def _trusted_tags():
-    return " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "(no trusted users configured)"
+    return " ".join(identity.mention(u) for u in config.TRUSTED_USERS) or "(no trusted users configured)"
 
 
 _REFUSED = "REFUSED: requester is not a trusted user. Trusted users have been notified."
@@ -184,20 +184,14 @@ def _post_alert(ctx, alert, card=None):
     one. The alert text becomes the first block: blocks win over `text` in the
     client, so a card without it would drop the sentence explaining why the
     card is there, and `text` stays as the notification fallback."""
-    client, channel = ctx.get("client"), ctx.get("channel")
-    if not (client and channel):
+    surface, channel = ctx.get("surface"), ctx.get("channel")
+    if not (surface and channel):
         retval = False
         return retval
     blocks = None
     if card:
         blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": alert}}] + list(card)
-    try:
-        client.chat_postMessage(channel=channel, text=alert, blocks=blocks,
-                                thread_ts=ctx.get("thread_ts") or None)
-    except Exception:
-        retval = False
-        return retval
-    retval = True
+    retval = surface.post(channel, ctx.get("thread_ts"), alert, blocks)
     return retval
 
 
@@ -213,7 +207,7 @@ def _refuse(ctx, what):
     The button path does know who acted and writes its own alert -- see
     refuse_click, where the hedge above would be a lie (#94)."""
     alert = (
-        f":warning: A privileged change was attempted during <@{ctx.get('user_id')}>'s turn "
+        f":warning: A privileged change was attempted during {identity.mention(ctx.get('user_id'))}'s turn "
         f"(to {what}) and refused -- only trusted users may. This can be my own "
         f"doing, not necessarily their request. {_trusted_tags()} for visibility."
     )
@@ -313,7 +307,7 @@ def refuse_click(request_id, ctx, action_id):
     """
     label = _CLICK_LABELS.get(action_id, "a button")
     user_id = ctx.get("user_id")
-    who = f"<@{user_id}>"
+    who = identity.mention(user_id)
     channel = ctx.get("channel")
     # Keyed on the canonical id, so a `#4` and a `4` are one request and one
     # alert -- and so a previous boot's id and this boot's cannot share an entry
@@ -432,7 +426,7 @@ def run_approved(request_id, req, ctx):
     else:
         policy = policy_mod.resolve(ctx.get("channel"))
         out = tools.execute(req["command"], policy)
-    retval = f"APPROVED by <@{ctx.get('user_id')}> and ran: {req['command']}\n{out}"
+    retval = f"APPROVED by {identity.mention(ctx.get('user_id'))} and ran: {req['command']}\n{out}"
     return retval
 
 

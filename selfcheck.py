@@ -43,6 +43,7 @@ for _var in (
 
 import litellm  # noqa: E402
 
+from shmobster.surface import SlackSurface  # noqa: E402
 from shmobster import __version__, admin_tools, announce, approvals, build, config, cost, handler, identity, llm, memory, policy, projectdocs, redact, sandbox, skills, slack_blocks, slack_tools, spine, state, tools, trajectory, web, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
@@ -576,7 +577,7 @@ def _cap_ch(messages, tools=None):
 
 llm.complete = _cap_ch
 config.BOT_USER_ID = "UBOTSELF"
-handler.handle("hey", channel=_ex_ch, thread_ts="123.456", slack_client=_fs)
+handler.handle("hey", channel=_ex_ch, thread_ts="123.456", surface=SlackSurface(_fs))
 assert f"Slack channel {_ex_ch}" in _capch["sys"], _capch["sys"]
 assert "123.456" in _capch["sys"], _capch["sys"]
 assert "UBOTSELF" in _capch["sys"], _capch["sys"]  # self user-id injected
@@ -596,7 +597,7 @@ class _FakePost:
 # non-trusted -> loud refusal + trusted users tagged, no write
 _res = admin_tools.dispatch(
     "set_policy", {"channel_id": "C1", "cwd": "/x"},
-    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+    {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())},
 )
 assert _res.startswith("REFUSED"), _res
 assert "<@U_TRUSTED>" in _posted["text"], _posted
@@ -613,7 +614,7 @@ def _fake_set(ch, updates):
 config.set_channel_policy = _fake_set
 _res2 = admin_tools.dispatch(
     "set_policy", {"channel_id": "C1", "cwd": "/x"},
-    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C1", "surface": None},
 )
 assert "updated" in _res2, _res2
 assert _applied["call"][0] == "C1", _applied
@@ -632,7 +633,7 @@ assert approvals.ids("C1") == [_key], approvals.ids("C1")
 # non-trusted approval is refused, and the request stays parked
 _ref = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+    {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())},
 )
 assert _ref.startswith("REFUSED"), _ref
 assert approvals.ids("C1") == [_key], approvals.ids("C1")
@@ -640,14 +641,14 @@ assert approvals.ids("C1") == [_key], approvals.ids("C1")
 # wrong channel can't release another channel's request
 _other = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_TRUSTED", "channel": "C_OTHER", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_OTHER", "surface": None},
 )
 assert "no pending request" in _other, _other
 
 # trusted, same channel -> runs, and the request is consumed
 _ran = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C1", "surface": None},
 )
 assert "approved_marker_456" in _ran, _ran
 assert approvals.ids("C1") == [], approvals.ids("C1")
@@ -661,11 +662,11 @@ _surfaced = approvals.claim_unsurfaced("C1")
 assert [k for k, _ in _surfaced] == [_key2], _surfaced
 assert approvals.claim_unsurfaced("C1") == [], "already surfaced -> no duplicate buttons"
 
-_dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+_dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())})
 assert _dref.startswith("REFUSED"), _dref
 assert approvals.ids("C1") == [_key2], approvals.ids("C1")
 
-_den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert _den.startswith("DENIED"), _den
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
@@ -743,7 +744,7 @@ _req3 = tools.run_shell("printf refused_click_321", {}, "C1").split("[", 1)[1].s
 _key3 = approvals.canonical(_req3)
 
 _cref = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command"
 )
 assert _cref.startswith("REFUSED"), _cref
 assert approvals.ids("C1") == [_key3], approvals.ids("C1")
@@ -767,14 +768,14 @@ assert "printf refused_click_321" in str(_posted["blocks"]), _posted
 _flight = approvals.add("echo in_flight", "C1", "mutating")
 approvals.acquire(_flight, "C1")
 _posted.clear()
-admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "already acting on it" in _posted["text"], _posted
 assert "still live" not in _posted["text"], _posted
 
 assert approvals.pop(_flight, "C1") is None, "the text path cannot steal a held request (#105)"
 approvals.finish(_flight)  # what run_approved does before it executes
 _posted.clear()
-admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "no longer pending" in _posted["text"], "consumed is absent now, and the alert says so"
 approvals.release(_flight)  # no-op after finish (#105)
 assert approvals.status(_flight, "C1")[0] == "absent", "release after finish resurrects nothing"
@@ -785,17 +786,17 @@ assert approvals.status(_flight, "C1")[0] == "absent", "release after finish res
 # users are meant to hear about
 _dup = approvals.add("echo same_id_other_channel", "C_DUP", "mutating")
 _posted.clear()
-admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "<@U_STRANGER>" in _posted["text"], "first channel alerts"
 _posted.clear()
-admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "<@U_STRANGER>" in _posted["text"], "same id and user in another channel must still alert"
 approvals.pop(_dup, "C_DUP")
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted
 
-_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert _den3.startswith("DENIED"), _den3
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
@@ -804,7 +805,7 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # refused, but silent.
 _posted.clear()
 _again = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())}, "deny_command"
 )
 assert _again.startswith("REFUSED"), _again
 assert _posted == {}, _posted
@@ -815,9 +816,9 @@ assert _posted == {}, _posted
 _race = approvals.add("echo race_marker_105", "C1", "mutating")
 _race_req = approvals.acquire(_race, "C1")           # the click side takes it
 _ans = admin_tools.dispatch("approve_command", {"request_id": _race},
-                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+                            {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "already being acted on" in _ans and "race_marker_105" not in _ans, _ans
-_ans = admin_tools.deny(_race, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_ans = admin_tools.deny(_race, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "already being acted on" in _ans, _ans
 # the click side finishes: the runner executes the request it was HANDED
 _out = admin_tools.run_approved(_race, _race_req, {"user_id": "U_TRUSTED", "channel": "C1"})
@@ -827,14 +828,14 @@ assert approvals.status(_race, "C1")[0] == "absent" and approvals.ids("C1") == [
 # and a text approval that wins cleanly still works end to end
 _race2 = approvals.add("echo race2_marker", "C1", "mutating")
 _ans = admin_tools.dispatch("approve_command", {"request_id": _race2},
-                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+                            {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "race2_marker" in _ans and approvals.ids("C1") == [], _ans
 
 # a click on a stale card -- the request already claimed, denied, or cleared by
 # a restart -- must not claim it is "still parked". Being confidently wrong in
 # the alert is the failure this whole path exists to stop.
 _sref = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "client": _FakePost()}, "deny_command"
+    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "surface": SlackSurface(_FakePost())}, "deny_command"
 )
 assert _sref.startswith("REFUSED"), _sref
 assert "no longer pending" in _posted["text"], _posted
@@ -849,11 +850,11 @@ class _FailingPost:
         raise RuntimeError("slack is down")
 
 
-_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "client": _FailingPost()}
+_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "surface": SlackSurface(_FailingPost())}
 _posted.clear()
 assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
 assert _posted == {}, _posted
-_ctx_flaky["client"] = _FakePost()
+_ctx_flaky["surface"] = SlackSurface(_FakePost())
 assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
 assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the alert"
 
@@ -913,16 +914,16 @@ assert "block_id" not in json.dumps(_exp), "echoed block ids are dropped"
 assert approvals.peek("1", "C_BOOT") is None, "a bare number is not this boot's id"
 assert admin_tools.dispatch(
     "approve_command", {"request_id": "1"},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 ).startswith("no pending request"), "typing the short number must not approve anything"
-assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None}) \
+assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None}) \
     .startswith("no pending request"), "nor deny anything"
 # the refusal says the queue is not empty without naming what is in it: this
 # answer goes back into the tool loop, and a live id there is an approvable id
 # the human never quoted (#109)
 _stale = admin_tools.dispatch(
     "approve_command", {"request_id": _card_value},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 )
 assert _after not in _stale, "a stale id must not be answered with the live ones"
 assert "1 other request(s) are parked here" in _stale, _stale
@@ -937,12 +938,12 @@ assert approvals.peek(f"[{_after}]", "C_BOOT") is not None, "a quoted id still r
 assert approvals.peek("[1]", "C_BOOT") is None, "brackets do not complete a bare number"
 _bracketed = admin_tools.dispatch(
     "approve_command", {"request_id": f"[{_after}]"},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 )
 assert "different_command" in _bracketed, _bracketed
 _denyable = approvals.add("echo never_runs_at_all", "C_BOOT", "mutating")
 assert admin_tools.deny(
-    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 ).startswith("DENIED"), "deny takes a quoted id too"
 assert approvals.ids("C_BOOT") == [], approvals.ids("C_BOOT")
 
@@ -989,7 +990,7 @@ def _turn(messages, tools=None):
 config.MAX_TOOL_STEPS = 5
 config.WARN_TOOL_STEPS = 4
 llm.complete = _turn
-handler.handle("go", channel="C1", slack_client=_fs)
+handler.handle("go", channel="C1", surface=SlackSurface(_fs))
 assert _seen_pol and _seen_pol[-1] == {"cwd": "/new"}, _seen_pol  # run_shell saw the post-set_policy value
 
 # 15) cwd exclude guard (#55): a path under an excluded dir is blocked, siblings
@@ -1061,7 +1062,7 @@ def _cap_skill(messages, tools=None):
 tools.dispatch = _rec_tools  # (already stubbed above; keep exec off this machine)
 llm.complete = _cap_skill
 handler._SYSTEM = None
-handler.handle("do the thing", channel="C1", slack_client=_fs)
+handler.handle("do the thing", channel="C1", surface=SlackSurface(_fs))
 assert "## Skills" in _capsk["sys"], _capsk["sys"]
 assert "load_skill" in _capsk["tools"], _capsk["tools"]
 assert "Put worktrees" in skills.dispatch("load_skill", {"name": "worktree-convention"})
@@ -1069,9 +1070,9 @@ assert "Put worktrees" in skills.dispatch("load_skill", {"name": "worktree-conve
 # reload_skills is trust-gated like the other admin tools (14) stubbed these out)
 admin_tools.dispatch, admin_tools.NAMES = _real_admin
 assert "reload_skills" in admin_tools.NAMES, admin_tools.NAMES
-_skref = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+_skref = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())})
 assert _skref.startswith("REFUSED"), _skref
-_skok = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_skok = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "skills reloaded: 1" in _skok, _skok
 
 # no configured paths -> no menu, no tool, nothing paid for the feature
@@ -1094,7 +1095,7 @@ def _cap_ver(messages, tools=None):
 
 llm.complete = _cap_ver
 handler._SYSTEM = None
-handler.handle("what version are you", channel="C1", slack_client=_fs)
+handler.handle("what version are you", channel="C1", surface=SlackSurface(_fs))
 assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
 
 # 19) upgrade announcement (#77): a version change is announced once, a restart
@@ -1191,7 +1192,7 @@ if True:
         if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
     )
     config.MAX_TOOL_STEPS, config.WARN_TOOL_STEPS = 5, 4
-    _out = handler.handle("dump env", channel="C1", slack_client=_fs)
+    _out = handler.handle("dump env", channel="C1", surface=SlackSurface(_fs))
     assert _akia not in "".join(_leaked), "raw credential reached the model context"
     assert _akia not in _out, _out
 
@@ -1729,7 +1730,7 @@ trajectory._DIR = tempfile.mkdtemp()
 _state_path, state._PATH = state._PATH, os.path.join(tempfile.mkdtemp(), "state.json")
 _trusted, config.TRUSTED_USERS = config.TRUSTED_USERS, {"UT"}
 _repo, config.LEARNING_REPO = config.LEARNING_REPO, ""
-_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "client": None}
+_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "surface": None}
 # capture: one line per turn, scrubbed, dispositions read off the results
 _steps = [trajectory.step("run_shell", {"command": "echo hi"}, "hi"),
           trajectory.step("run_shell", {"command": "rm -rf x"}, "NOT RUN -- pending approval [k] (mutating)"),
@@ -1765,7 +1766,7 @@ _alerts = []
 class _AlertClient:
     def chat_postMessage(self, **kw):
         _alerts.append(kw)
-admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
+admin_tools.refuse_click(_key, {**_l_ctx, "surface": SlackSurface(_AlertClient())}, "open_skill_pr")
 assert any("Open PR" in _a["text"] for _a in _alerts), _alerts
 # the proposal's own card rides along, not the approval one: each queue renders
 # its own surface, and a proposal has a name where a command would be (#215)
@@ -1774,7 +1775,7 @@ assert any("open_skill_pr" in str(_a.get("blocks")) for _a in _alerts), _alerts
 assert proposals.peek(_key, "C9") is not None
 # a held proposal refuses the text path the same way approvals do (#105)
 assert proposals.acquire(_key, "C9") is not None
-_ans = learning.propose(_key, {"user_id": "UT", "channel": "C9", "thread_ts": "1.1", "client": None})
+_ans = learning.propose(_key, {"user_id": "UT", "channel": "C9", "thread_ts": "1.1", "surface": None})
 assert "already being acted on" in _ans, _ans
 proposals.release(_key)
 assert proposals.peek(_key, "C9") is not None, "released back pending"
@@ -3837,7 +3838,7 @@ def _btns(blocks):
 _r215 = approvals.add("jq . structure.json 2>&1", "C_215", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215", "channel": "C_215",
-                                 "thread_ts": "9.9", "client": _FakePost()}, "approve_command")
+                                 "thread_ts": "9.9", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == ["approve_command", "deny_command"], _posted
 # same request, so either card resolves it -- the new one is not a second queue
 # entry, it is a second door onto the same one
@@ -3855,7 +3856,7 @@ assert sum("structure.json" in str(_b) for _b in _posted["blocks"]) == 1, _poste
 approvals.acquire(_r215, "C_215")
 _posted.clear()
 admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215b", "channel": "C_215",
-                                 "client": _FakePost()}, "approve_command")
+                                 "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == [], _posted
 assert _posted["blocks"] is None, _posted
 approvals.release(_r215)
@@ -3863,14 +3864,14 @@ approvals.release(_r215)
 # nor does an absent one
 _posted.clear()
 admin_tools.refuse_click("nosuchrequest-9", {"user_id": "U_STRANGER_215c", "channel": "C_215",
-                                             "client": _FakePost()}, "approve_command")
+                                             "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == [], _posted
 
 # one alert per user per request still holds. Leaving the card standing leaves
 # it re-clickable (#94), and now each alert carries a card of its own, so the
 # dedupe is what keeps a stranger on the button from filling the thread.
 _r215b = approvals.add("ls", "C_215", "unknown")
-_ctx215 = {"user_id": "U_STRANGER_215d", "channel": "C_215", "client": _FakePost()}
+_ctx215 = {"user_id": "U_STRANGER_215d", "channel": "C_215", "surface": SlackSurface(_FakePost())}
 admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
 _posted.clear()
 admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
@@ -3896,7 +3897,7 @@ assert len(slack_blocks.approval_text("k-1", {"command": _long})) < 3000, "the f
 _r215e = approvals.add(_long, "C_215L", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215e, {"user_id": "U_STRANGER_215e", "channel": "C_215L",
-                                  "client": _FakePost()}, "approve_command")
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _posted["blocks"], "the cut card fits, so the alert carries it"
 assert "U_STRANGER_215e" in _posted["text"], _posted
 assert "<@U_TRUSTED>" in _posted["text"], _posted
@@ -3921,11 +3922,11 @@ class _CountPost:
         return {"ok": True, "ts": "1"}
 for _i in range(6):   # one stranger, six clicks
     admin_tools.refuse_click(_r215f, {"user_id": "U_SPAM", "channel": "C_215S",
-                                      "client": _CountPost()}, "approve_command")
+                                      "surface": SlackSurface(_CountPost())}, "approve_command")
 assert len(_posts) == 1, "six clicks from one user must post once, card or no card"
 for _u in ("U_A", "U_B", "U_C"):   # three strangers, one click each
     admin_tools.refuse_click(_r215f, {"user_id": _u, "channel": "C_215S",
-                                      "client": _CountPost()}, "approve_command")
+                                      "surface": SlackSurface(_CountPost())}, "approve_command")
 assert len(_posts) == 4, len(_posts)
 assert all(_b is not None for _b in _posts), "each alert carries its own card"
 
@@ -3937,7 +3938,7 @@ _secret = "AKIA" + "4KEYSELFCHECK0000"[:16]
 _r215g = approvals.add(f"aws configure set x {_secret}", "C_215K", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215g", "channel": "C_215K",
-                                  "client": _FakePost()}, "approve_command")
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _secret not in str(_posted["blocks"]), "a credential reached the card"
 assert _secret not in _posted["text"], _posted["text"]
 assert "REDACTED" in str(_posted["blocks"]), _posted["blocks"]
@@ -3950,7 +3951,7 @@ approvals.acquire(_r215g, "C_215K")
 approvals.finish(_r215g)
 _posted.clear()
 admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215h", "channel": "C_215K",
-                                  "client": _FakePost()}, "approve_command")
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "no longer pending" in _posted["text"], _posted
 assert _posted["blocks"] is None, "a consumed request must not be handed live buttons"
 for _c in ("C_215S", "C_215K"):
@@ -4184,7 +4185,7 @@ _lr52, config.LEARNING_REPO = config.LEARNING_REPO, "o/r"
 _cx52, llm.complete = llm.complete, (lambda messages, tools=None: _FakeMsg(content="done"))
 try:
     # offered (learning enabled) and the turn did not call it
-    handler.handle("what is 2+2", channel="C52", thread_ts="5.2", slack_client=_fs)
+    handler.handle("what is 2+2", channel="C52", thread_ts="5.2", surface=SlackSurface(_fs))
     _r = trajectory.thread("C52", "5.2")
     assert _r and _r[-1]["flag_skill"] == "offered, not used", _r[-1]
 
@@ -4193,14 +4194,14 @@ try:
     _seen = {}
     llm.complete = lambda messages, tools=None: (
         _seen.setdefault("system", messages[0]["content"]), _FakeMsg(content="done"))[1]
-    handler.handle("hello", channel="C52", thread_ts="5.4", slack_client=_fs)
+    handler.handle("hello", channel="C52", thread_ts="5.4", surface=SlackSurface(_fs))
     assert "When to flag this thread as a skill" in _seen["system"], _seen["system"][:200]
     assert "wrong and you now know why" in _seen["system"]
 
     # off where no PR can follow the flag -- no tool, no bar, and the row says so
     config.LEARNING_REPO = ""
     _seen.clear()
-    handler.handle("hello", channel="C52", thread_ts="5.3", slack_client=_fs)
+    handler.handle("hello", channel="C52", thread_ts="5.3", surface=SlackSurface(_fs))
     assert "When to flag this thread as a skill" not in _seen["system"]
     _r = trajectory.thread("C52", "5.3")
     assert _r and _r[-1]["flag_skill"] == "not offered", _r[-1]
@@ -4232,7 +4233,7 @@ _flagged52 = [_FakeMsg(tool_calls=[_FakeCall("f1", "flag_skill",
 llm.complete = lambda messages, tools=None: _flagged52.pop(0)
 try:
     handler.handle("fix it", channel="C54", thread_ts="6.1",
-                   user_id="U1", slack_client=_fs)
+                   user_id="U1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C54", "6.1")
     assert _r and _r[-1]["flag_skill"] == "used", _r[-1]
 finally:
@@ -4255,7 +4256,7 @@ try:
     llm.complete = lambda messages, tools=None: (
         _FakeMsg(tool_calls=[_FakeCall("x", "run_shell", '{"command": "echo hi"}')])
         if tools else _FakeMsg(content="capped"))
-    handler.handle("loop", channel="C55", thread_ts="7.1", slack_client=_fs)
+    handler.handle("loop", channel="C55", thread_ts="7.1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C55", "7.1")
     assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
     assert len(_r[-1]["steps"]) == config.MAX_TOOL_STEPS, _r[-1]
@@ -4264,7 +4265,7 @@ try:
     # the same tools and the same row
     llm.complete = lambda messages, tools=None: _FakeMsg(content="resumed")
     handler.resume("req-1", True, "echo x", "out", channel="C55", thread_ts="7.2",
-                   user_id="U1", slack_client=_fs)
+                   user_id="U1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C55", "7.2")
     assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
 finally:

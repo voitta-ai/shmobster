@@ -139,3 +139,14 @@ def _has_broadcast_block(blocks):
             if isinstance(value, list):
                 stack.extend(value)
     return False
+
+
+def mention(user_id):
+    """A user id as the surface it came from renders a mention (#336).
+
+    Slack ids are bare (`U...`), and this is the `<@U...>` every message here
+    used to build inline. An id from any other transport carries its prefix
+    (`signal:...`) and is shown as it is: nothing else renders it into a
+    notification, and a Slack mention of it would render as garbage."""
+    retval = user_id if ":" in str(user_id) else f"<@{user_id}>"
+    return retval

@@ -99,6 +99,7 @@ check_pattern() {
 
 # 1) structural patterns
 structural=$(mktemp "${TMPDIR:-/tmp}/shmobster_structural.XXXXXX") || exit 2
+trap 'rm -f "$structural"' EXIT          # also when a run is killed part-way
 echo "$STRUCTURAL" | while IFS='|' read -r label regex; do
   [ -z "$label" ] && continue
   echo "${label}|${regex}"

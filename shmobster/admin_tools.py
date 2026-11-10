@@ -6,7 +6,7 @@ non-trusted attempt is refused loudly and all trusted users are tagged.
 set_policy changes *restrictions* (cwd / github_repos / aws_profile) -- never
 the trusted_users list itself (that stays file-only, to prevent escalation).
 approve_command grants *permission* for one already-parked command; the channel
-policy still bounds its scope when it runs. reload_skills re-reads the skills
+policy still bounds its scope when it runs, and deny_command drops one unrun. reload_skills re-reads the skills
 catalog (#74) -- gated too, since it changes which instructions I will follow."""
 from . import approvals, config, identity, learning, mcp, policy as policy_mod, proposals, redact, skills, slack_blocks, tools
 
@@ -62,6 +62,25 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "request_id": {"type": "string", "description": "The id from the 'pending approval [id]' message, in full -- ids are unique per boot and a bare number resolves to nothing."},
+                },
+                "required": ["request_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "deny_command",
+            "description": (
+                "Deny a command that run_shell parked for approval: it is dropped "
+                "and never runs. ONLY trusted users may -- use when a trusted user "
+                "turns down a pending request id (e.g. 'deny a1b2c3d4e5f60718-3'). "
+                "The typed twin of the Deny button, for a surface without one."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request_id": {"type": "string", "description": "The id from the 'pending approval [id]' message, in full."},
                 },
                 "required": ["request_id"],
             },
@@ -471,6 +490,7 @@ def dispatch(name, args, ctx):
             "reload_skills": "reload my skills",
             "propose_skill": "open a skill PR",
             "decline_skill": "decline a skill proposal",
+            "deny_command": "deny a mutating command",
         }.get(name, "approve a mutating command")
         return _refuse(ctx, what)
     if name == "reload_skills":
@@ -478,6 +498,9 @@ def dispatch(name, args, ctx):
         return retval
     if name == "approve_command":
         retval = _approve_command(args, ctx)
+        return retval
+    if name == "deny_command":
+        retval = deny(args.get("request_id", ""), ctx)
         return retval
     if name == "propose_skill":
         retval = learning.propose(args.get("request_id", ""), ctx, scope=args.get("scope"))

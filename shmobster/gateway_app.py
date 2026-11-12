@@ -366,8 +366,13 @@ def _post_pending(channel, surface):
         head = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]{reason}"
                 if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]{reason}")
         card = _verbatim(head, cmd, f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\".")
-        if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a reason long enough to push it over
-            card = _verbatim(head[:200], cmd, f"Reply \"approve {req_id}\" or \"deny {req_id}\".")
+        if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a reason long enough to push it over:
+            short = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]"
+                     if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]")
+            card = _verbatim(short, cmd, f"Reply \"approve {req_id}\" or \"deny {req_id}\".")   # one message
+        if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a card is never split (#386 review)
+            _card_failed(channel, req_id, surface, rejected=True)
+            continue
         outcome = send(channel, None, key=f"card:{req_id}", raw=card)
         if outcome != "ok":
             _card_failed(channel, req_id, surface, rejected=outcome == "rejected")

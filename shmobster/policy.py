@@ -14,7 +14,18 @@ from . import config, spine
 
 
 def resolve(channel):
+    # A gateway conversation linked to a Slack channel shares that channel's
+    # policy (#336): one capability envelope, set in one place.
+    channel = linked(channel) or channel
     retval = config.CHANNEL_POLICIES.get(channel) or config.DEFAULT_POLICY
+    return retval
+
+
+def linked(channel):
+    """The Slack channel id a gateway conversation (`<channel>:<label>`) is
+    linked to, or None."""
+    label = str(channel or "").partition(":")[2]
+    retval = (config.GATEWAY_CONVERSATIONS.get(label) or {}).get("link") if label else None
     return retval
 
 

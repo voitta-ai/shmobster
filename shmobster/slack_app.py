@@ -10,7 +10,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
-from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, diag, gateway_app, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 from .surface import SlackSurface
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
@@ -456,6 +456,9 @@ def _turn(event, say, client, logger):
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
     _post_pending(client, channel, thread_ts)
+    # The question and the answer, into linked gateway conversations that
+    # mirror this channel (#336). Off unless configured.
+    gateway_app.mirror_in(channel, event.get("text", ""), reply)
 
 
 @app.event("app_mention")
@@ -581,6 +584,7 @@ def main():
             except Exception:
                 logging.exception(
                     "announce: could not post to %s", config.CHANNEL_NAMES.get(channel, channel))
+        delivered += gateway_app.announce(text)  # listed gateway conversations too (#336)
         if not delivered:
             raise RuntimeError("no configured channel accepted the announcement")
 
@@ -684,6 +688,9 @@ def main():
             "with a working keychain.", sandbox._GH_HOSTS)
     if learning.enabled():
         logging.info("learning: proposals go to %s (%s)", config.LEARNING_REPO, config.LEARNING_PATH)
+    # The second door (#336): messages the gateway addresses to this agent.
+    gateway_app.start(slack_post=lambda channel, text: app.client.chat_postMessage(
+        channel=channel, **_reply_payload(text)))
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
     # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
     # the connection ourselves and exit when it stops hearing Slack.

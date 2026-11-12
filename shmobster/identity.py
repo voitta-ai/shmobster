@@ -146,7 +146,17 @@ def mention(user_id):
 
     Slack ids are bare (`U...`), and this is the `<@U...>` every message here
     used to build inline. An id from any other transport carries its prefix
-    (`signal:...`) and is shown as it is: nothing else renders it into a
-    notification, and a Slack mention of it would render as garbage."""
-    retval = user_id if ":" in str(user_id) else f"<@{user_id}>"
+    (`signal:...`) and is shown by the name that transport reported for it:
+    the id itself is an account identifier, which has no business in a prompt
+    or a reply, and nothing renders it into a notification anyway."""
+    if ":" in str(user_id):
+        medium = str(user_id).partition(":")[0]
+        retval = NAMES.get(user_id) or f"a {medium.title()} user"
+        return retval
+    retval = f"<@{user_id}>"
     return retval
+
+
+# Display names of users on other transports (`signal:<id>` -> name), filled
+# in by their ingest as messages arrive (#336).
+NAMES = {}

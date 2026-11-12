@@ -516,6 +516,8 @@ def dispatch(name, args, ctx):
         "skills": args.get("skills"),
     }
     channel_id = args.get("channel_id") or ctx.get("channel")
+    # A linked gateway conversation has no policy of its own (#336).
+    channel_id = policy_mod.linked(channel_id) or channel_id
     try:
         pol = config.set_channel_policy(channel_id, updates)
         return f"policy for {channel_id} updated (live): {pol}"

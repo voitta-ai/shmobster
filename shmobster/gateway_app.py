@@ -102,15 +102,17 @@ def for_signal(text):
     return text
 
 
-def send(channel, markdown, reply_to=None, key=None):
+def send(channel, markdown, reply_to=None, key=None, raw=None):
     """Post a Markdown reply as final text, split to Signal's limit. Returns
     "ok", "retry" (may pass) or "rejected" (the gateway refused it for good).
     The first piece quotes `reply_to`, so a reply in a shared group stays this
     agent's: the gateway routes the answer to a quote back to whoever sent the
     quoted message. With `key`, each piece is idempotent, so posting the same
-    thing again does not repeat the pieces that already went out."""
+    thing again does not repeat the pieces that already went out. With `raw`,
+    a (text, styles) pair is sent exactly as given: no Markdown is read."""
     retval = "ok"
-    for i, parts in enumerate(gateway_text.parts(for_signal(markdown))):
+    pieces = gateway_text.raw_parts(*raw) if raw else gateway_text.parts(for_signal(markdown))
+    for i, parts in enumerate(pieces):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
             body["reply_to"] = reply_to
@@ -126,6 +128,17 @@ def send(channel, markdown, reply_to=None, key=None):
         except Exception as exc:  # noqa: BLE001
             logging.warning("gateway: send to %s failed: %s", channel, type(exc).__name__)
             retval = "retry"
+    return retval
+
+
+def _verbatim(before, body, after=""):
+    """Text with `body` exactly as given and styled monospace: a command on a card
+    must read as it will run, so nothing in it is taken for Markdown (#386 review)."""
+    head = f"{before}\n" if before else ""
+    text = f"{head}{body}\n{after}" if after else f"{head}{body}"
+    styles = ([{"start": gateway_text.units(head), "length": gateway_text.units(body), "style": "MONOSPACE"}]
+              if body else [])
+    retval = (text, styles)
     return retval
 
 
@@ -236,6 +249,18 @@ def _first_time(message_id):
     return True
 
 
+def _approval(data):
+    """(approved, request id, channel, user, surface) when the message is a trusted
+    user's `approve <id>` / `deny <id>`, else None."""
+    medium = data.get("channel", "gateway")
+    user = f"{medium}:{(data.get('sender') or {}).get('id')}"
+    m = _APPROVAL.match(_unaddressed(_text(data)))
+    if not (m and admin_tools.is_trusted(user)):
+        return None
+    retval = (m.group(1).lower() == "approve", m.group(2), channel_of(data), user, GatewaySurface(medium))
+    return retval
+
+
 def _turn(data):
     channel = channel_of(data)
     medium = data.get("channel", "gateway")
@@ -244,11 +269,6 @@ def _turn(data):
     _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
     text = _text(data)
-    m = _APPROVAL.match(_unaddressed(text))
-    if m and admin_tools.is_trusted(user):
-        _approvals_pool.submit(_guarded, _resolve_text, m.group(1).lower() == "approve", m.group(2),
-                               channel, user, surface)
-        return
     try:
         _call("POST", f"/v1/messages/{data['message_id']}/reactions", {"emoji": "\U0001F440"})
     except Exception:  # noqa: BLE001
@@ -260,7 +280,7 @@ def _turn(data):
     except Exception as exc:  # one clear message, scrubbed (#72)
         logging.exception("gateway: handler failed")
         reply = redact.scrub(f"shmobster error: {exc}")
-    send(channel, reply, reply_to=data["message_id"])
+    send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)
 
@@ -280,7 +300,7 @@ def _resolve_text(approved, req_id, channel, user, surface):
         result = redact.scrub(run(req_id, req, ctx))
     finally:
         approvals.release(req_id)
-    send(channel, f"```\n{result[:_CARD_COMMAND_MAX * 2]}\n```")
+    send(channel, None, raw=_verbatim("", result[:_CARD_COMMAND_MAX * 2]))
     _resume(channel, req_id, req, approved, result, user, surface)
 
 
@@ -317,9 +337,8 @@ def _post_pending(channel, surface):
         # A refusal and a question must not look alike (#172)
         head = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]{reason}"
                 if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]{reason}")
-        card = (f"{head}\n```\n{cmd}\n```\n"
-                f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\".")
-        outcome = send(channel, card, key=f"card:{req_id}")
+        outcome = send(channel, None, key=f"card:{req_id}", raw=_verbatim(
+            head, cmd, f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\"."))
         if outcome != "ok":
             _card_failed(channel, req_id, surface, rejected=outcome == "rejected")
     for key, prop in proposals.claim_unsurfaced(channel):
@@ -345,12 +364,32 @@ def _card_failed(channel, req_id, surface, rejected=False):
                 outcome["approved"], outcome["result"], outcome["user_id"], surface)
 
 
+_STARTED = "gateway_started"   # message ids whose turn began, kept across restarts
+_STARTED_MAX = 500
+
+
+def _begin(mid, started):
+    """Record that this message's turn is starting, before anything runs. A turn
+    that began is never run again after a restart -- not even one that ended the
+    process -- while one still waiting in the queue is (#386 review)."""
+    started.append(mid)
+    del started[:-_STARTED_MAX]
+    state.put(_STARTED, list(started))
+
+
+def _run(fn, mid, started, *args):
+    _begin(mid, started)
+    _guarded(fn, *args)
+
+
 def _loop():
     """Poll, hand each message to a worker, and ack (persist the cursor) only
-    up to the oldest message whose turn has not finished: a restart re-reads
-    whatever was in flight, as the gateway's at-least-once contract expects,
-    rather than dropping it (#336 review)."""
+    up to the oldest message whose turn has not finished, so a restart re-reads
+    what was still queued. Turns that had started are skipped on that re-read
+    (`_STARTED`): at most once for anything that may have acted, at least once
+    for the rest."""
     acked = fetched = state.get(_CURSOR) or "now"
+    started = list(state.get(_STARTED) or [])
     inflight = []                         # [(event id, future or None)], in order
     while True:
         try:
@@ -370,8 +409,12 @@ def _loop():
                 data, fut = e["data"], None
                 mid = data.get("message_id")
                 if (e.get("type") == "ai.voitta.message.received.v1" and isinstance(mid, str)
-                        and _first_time(mid)):
-                    fut = _pool.submit(_guarded, _turn, data)
+                        and mid not in started and _first_time(mid)):
+                    approval = _approval(data)
+                    if approval:                  # its own lane: never behind long turns
+                        fut = _approvals_pool.submit(_run, _resolve_text, mid, started, *approval)
+                    else:
+                        fut = _pool.submit(_run, _turn, mid, started, data)
                 if isinstance(e.get("id"), str):
                     inflight.append((e["id"], fut))
             if isinstance(body.get("next"), str):
@@ -426,8 +469,11 @@ def _slack_escape(text):
 
 def mirror_in(slack_channel, question, answer):
     """A Slack turn, copied into every gateway conversation linked to it."""
+    labels = [label for label, conv in config.GATEWAY_CONVERSATIONS.items()
+              if conv.get("mirror") and conv.get("link") == slack_channel]
+    if not labels:
+        return
     question = redact.scrub(re.sub(r"<@\w+>", "", question or "").strip())
-    for label, conv in config.GATEWAY_CONVERSATIONS.items():
-        if conv.get("mirror") and conv.get("link") == slack_channel:
-            send(f"gateway:{label}", f"{_MIRRORED} from Slack: _someone asked:_ {question}")
-            send(f"gateway:{label}", f"{_MIRRORED} from Slack: {answer}")
+    for label in labels:
+        send(f"gateway:{label}", f"{_MIRRORED} from Slack: _someone asked:_ {question}")
+        send(f"gateway:{label}", f"{_MIRRORED} from Slack: {answer}")

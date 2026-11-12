@@ -186,7 +186,7 @@ CHANNEL_NAMES = {c["id"]: c.get("name", c["id"]) for c in _channels}
 # {link, mirror}: `link` is a Slack channel id whose policy the conversation
 # shares, and `mirror` copies each question and final answer between the two.
 # No `url`, no second ingest.
-_gateway = _cfg.get("gateway", {})
+_gateway = _cfg.get("gateway") or {}
 GATEWAY_URL = _gateway.get("url", "")
 GATEWAY_TOKEN = _gateway.get("token", "")
 GATEWAY_CONSUMER = _gateway.get("consumer", "shmobster")  # this agent's consumer name there

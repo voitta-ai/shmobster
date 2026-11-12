@@ -155,6 +155,13 @@ def split(text, styles, limit=LIMIT):
     return retval
 
 
+def raw_parts(text, styles, limit=LIMIT):
+    """Text sent exactly as given (styles in UTF-16 units), split like a reply."""
+    retval = [[{"type": "text", "text": chunk, **({"styles": st} if st else {})}]
+              for chunk, st in split(text, styles, limit)]
+    return retval
+
+
 def parts(markdown, limit=LIMIT):
     """A reply as gateway messages: one list of parts per message to send."""
     text, styles = render(markdown)

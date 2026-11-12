@@ -79,5 +79,16 @@
   "warn_tool_steps": 40,
   "budget_park_sec": 3600,
   "watchdog_timeout_sec": 120,
-  "trusted_users": []
+  "trusted_users": [],
+  "gateway": {
+    "url": "",
+    "token": "${SHMOBSTER_GATEWAY_TOKEN}",
+    "consumer": "shmobster",
+    "conversations": {
+      "team": {
+        "link": "C0123456789",
+        "mirror": false
+      }
+    }
+  }
 }

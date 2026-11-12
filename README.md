@@ -86,6 +86,7 @@ license:     MIT
   - [Config & run](#config--run)
   - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
   - [Running multiple instances](#running-multiple-instances)
+  - [Signal, through voitta-gateway (#336)](#signal-through-voitta-gateway-336)
 - [How it decides what to run](#how-it-decides-what-to-run)
   - [Trust model](#trust-model)
   - [Approving mutating commands (#48)](#approving-mutating-commands-48)
@@ -969,6 +970,49 @@ name; name each instance via `agent.label` (or let it auto-derive from the app).
   `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
 - **Two instances on the *same* machine** additionally need distinct launchd
   Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+### Signal, through voitta-gateway (#336)
+
+Signal reaches the agent through voitta-gateway. The gateway holds the one
+signal-cli process for the account, shared with other agents, and passes on
+only the messages addressed to this one.
+
+**Setup.**
+- In `gateway.yaml`:
+  - give this agent a consumer with `names` and a `label`;
+  - list each group it serves under `conversations`, with this consumer in
+    its `consumers`.
+- In `shmobster-config.json`:
+
+```json
+"gateway": {
+  "url": "http://127.0.0.1:8080",
+  "token": "${SHMOBSTER_GATEWAY_TOKEN}",
+  "consumer": "shmobster",
+  "conversations": {"team": {"link": "C0123456789", "mirror": false}}
+}
+```
+
+**How it behaves.**
+- **Turns.** A message addressed to the agent is a turn, answered in the same
+  conversation. The agent quotes the message, so a follow-up that quotes the
+  answer comes back to this agent. Long answers are split to Signal's limit,
+  and Markdown becomes Signal's bold, italic, strikethrough and monospace.
+- **Policy.** A conversation with a `link` shares that Slack channel's policy.
+  Any other conversation, a DM included, falls back to `default_policy`.
+- **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
+  People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
+  the profile name they chose, since anyone can call themselves anything.
+- **Approvals are text.** A card names the request id. If a trusted user's
+  whole message is `approve <id>` or `deny <id>`, it resolves the request the
+  way a button click does on Slack, and the task carries on (#169). The
+  model's approve tool still works in a normal turn.
+- **Mirroring** is off by default. With `mirror: true`, the question and the
+  final answer of each turn are copied to the linked side, in both
+  directions. Cards stay where they were posted, so each request is answered
+  in the one place it can be resolved.
+- **Restarts.** The poll position is kept in the state file, so messages that
+  arrive during a restart are answered once it is back.
 
 ## How it decides what to run
 

@@ -38,6 +38,8 @@ for _var in (
     # referenced by the example policy file's per-channel env (#104)
     "VERCEL_TOKEN",
     "HEROKU_API_KEY",
+    # the example gateway token (#336)
+    "SHMOBSTER_GATEWAY_TOKEN",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 

@@ -181,6 +181,17 @@ _channels = _slack.get("channels", [])
 CHANNELS = {c["id"] for c in _channels}
 CHANNEL_NAMES = {c["id"]: c.get("name", c["id"]) for c in _channels}
 
+# voitta-gateway (#336): Signal, through the gateway, as a second ingest beside
+# Slack. `conversations` maps the gateway's conversation labels to
+# {link, mirror}: `link` is a Slack channel id whose policy the conversation
+# shares, and `mirror` copies each question and final answer between the two.
+# No `url`, no second ingest.
+_gateway = _cfg.get("gateway") or {}
+GATEWAY_URL = _gateway.get("url", "")
+GATEWAY_TOKEN = _gateway.get("token", "")
+GATEWAY_CONSUMER = _gateway.get("consumer", "shmobster")  # this agent's consumer name there
+GATEWAY_CONVERSATIONS = _gateway.get("conversations", {})
+
 AGENT_LABEL = _agent.get("label", "")  # empty -> auto-derive from Slack (#8)
 BOT_USER_ID = ""  # resolved at startup (auth.test) so the agent recognizes itself
 WORKSPACE = _agent.get("workspace", "./workspace")

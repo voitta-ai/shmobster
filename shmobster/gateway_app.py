@@ -40,12 +40,17 @@ _THREAD = "main"            # Signal has no threads: a conversation is one threa
 _CURSOR = "gateway_cursor"  # the poll position, persisted on every page (state.py)
 _HISTORY = 25
 _CARD_TRIES = 3
-# Most of a long command fits on a card; the rest is cut. Signal has no
-# separate place to put it, like the thread reply Slack gets.
-_CARD_COMMAND_MAX = 1500
+# A command is shown whole: what is not on the card is not what the approver
+# approved (#336 review). Past this, head and tail, with a warning to read it
+# on the host before approving.
+_CARD_COMMAND_MAX = 20000
 _APPROVAL = re.compile(r"^\s*(approve|deny)\s+\[?([\w-]+)\]?\s*[.!]?\s*$", re.IGNORECASE)
 
 _pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gateway-turn")
+# Approvals get their own lane, so `approve <id>` never waits behind long turns.
+_approvals_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="gateway-approve")
+_CONVERSATIONS = {}         # channel -> gateway conversation_id, for history on resume
+_MIRRORED = identity.MIRRORED   # marks a mirrored post, so history never reads it as the agent's own
 _SEEN = {}
 _SEEN_LOCK = threading.Lock()
 _slack_post = None          # set by start(): posts a mirrored line into a Slack channel
@@ -79,24 +84,48 @@ def _target(channel):
     return retval
 
 
-def send(channel, markdown, reply_to=None):
-    """Post a Markdown reply as final text, split to Signal's limit. Whether
-    every piece was accepted. The first piece quotes `reply_to`, so a reply in
-    a shared group stays this agent's: the gateway routes the answer to a
-    quote back to whoever sent the quoted message."""
-    retval = True
-    for i, parts in enumerate(gateway_text.parts(markdown or "")):
+_MARKER = re.compile(r"^:robot_face: \[agent[^\]]*\]\s*")
+_SLACK_MENTION = re.compile(r"<[@!][A-Za-z0-9|^]+>")
+_SHORTCODES = {":warning:": "\u26a0\ufe0f", ":no_entry:": "\u26d4", ":hourglass:": "\u23f3",
+               ":information_source:": "\u2139\ufe0f", ":white_check_mark:": "\u2705",
+               ":lock:": "\U0001F512", ":robot_face:": "\U0001F916"}
+
+
+def for_signal(text):
+    """Slack-isms out: the agent marker (the gateway prefixes its label), Slack
+    member ids, which mean nothing here and are not Signal members' business,
+    and the shortcodes Signal would show literally."""
+    text = _MARKER.sub("", text or "")
+    text = _SLACK_MENTION.sub("someone on Slack", text)
+    for code, emoji in _SHORTCODES.items():
+        text = text.replace(code, emoji)
+    return text
+
+
+def send(channel, markdown, reply_to=None, key=None):
+    """Post a Markdown reply as final text, split to Signal's limit. Returns
+    "ok", "retry" (may pass) or "rejected" (the gateway refused it for good).
+    The first piece quotes `reply_to`, so a reply in a shared group stays this
+    agent's: the gateway routes the answer to a quote back to whoever sent the
+    quoted message. With `key`, each piece is idempotent, so posting the same
+    thing again does not repeat the pieces that already went out."""
+    retval = "ok"
+    for i, parts in enumerate(gateway_text.parts(for_signal(markdown))):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
             body["reply_to"] = reply_to
+        if key:
+            body["idempotency_key"] = f"{key}:{i}"
         try:
             _call("POST", "/v1/messages", body)
         except urllib.error.HTTPError as exc:
             logging.warning("gateway: send to %s refused: %s %s", channel, exc.code, _error_code(exc))
-            retval = False
+            if exc.code < 500 and exc.code != 429:
+                return "rejected"
+            retval = "retry"
         except Exception as exc:  # noqa: BLE001
             logging.warning("gateway: send to %s failed: %s", channel, type(exc).__name__)
-            retval = False
+            retval = "retry"
     return retval
 
 
@@ -132,7 +161,7 @@ class GatewaySurface(Surface):
         return retval
 
     def post(self, channel, thread_ts, text, blocks=None):
-        retval = send(channel, text)
+        retval = send(channel, text) == "ok"
         return retval
 
 
@@ -152,7 +181,7 @@ def _text(data):
     return retval
 
 
-def _history(conversation_id, current):
+def _history(conversation_id, current, medium="signal"):
     """The conversation so far, labelled by speaker, as slack_app does for a
     thread. Best-effort: no history is a turn without context, not a failure."""
     try:
@@ -165,16 +194,36 @@ def _history(conversation_id, current):
         if m.get("message_id") == current:
             continue
         sender = m.get("sender") or {}
+        text = _text(m)
         if sender.get("kind") == "self":
             mine = sender.get("consumer") in (None, config.GATEWAY_CONSUMER)
             who = f"{config.AGENT_LABEL or 'me'} (me)" if mine else f"{sender.get('consumer')} (another agent)"
+            if mine and _MIRRORED in text:
+                who = "mirrored from Slack, not my words"
         else:
-            who = sender.get("name") or "user"
-        text = _text(m)
+            # By handle and trust, never the profile name the sender chose (#336 review)
+            user = f"{medium}:{sender.get('id')}"
+            who = identity.handle(user) + (" (trusted)" if admin_tools.is_trusted(user) else "")
         if text:
             lines.append(f"[{who}] {text}")
     retval = "\n".join(lines) or None
     return retval
+
+
+def _unaddressed(text):
+    """The text without how it was addressed: Signal's U+FFFC for an
+    @mention, or the agent's name, so "@Ada approve <id>" is an approval."""
+    names = [n for n in (config.AGENT_LABEL,) if n]
+    lead = r"^[\s\ufffc,:]*(?:@?(?:" + "|".join(re.escape(n) for n in names) + r")\b[\s,:]*)?" if names else r"^[\s\ufffc,:]*"
+    retval = re.sub(lead, "", text, flags=re.IGNORECASE)
+    return retval
+
+
+def _guarded(fn, *args):
+    try:
+        fn(*args)
+    except Exception:
+        logging.exception("gateway: %s failed", getattr(fn, "__name__", "task"))
 
 
 def _first_time(message_id):
@@ -192,13 +241,13 @@ def _turn(data):
     medium = data.get("channel", "gateway")
     sender = data.get("sender") or {}
     user = f"{medium}:{sender.get('id')}"
-    if sender.get("name"):
-        identity.NAMES[user] = sender["name"]
+    _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
     text = _text(data)
-    m = _APPROVAL.match(text)
+    m = _APPROVAL.match(_unaddressed(text))
     if m and admin_tools.is_trusted(user):
-        _resolve_text(m.group(1).lower() == "approve", m.group(2), channel, user, surface)
+        _approvals_pool.submit(_guarded, _resolve_text, m.group(1).lower() == "approve", m.group(2),
+                               channel, user, surface)
         return
     try:
         _call("POST", f"/v1/messages/{data['message_id']}/reactions", {"emoji": "\U0001F440"})
@@ -213,7 +262,7 @@ def _turn(data):
         reply = redact.scrub(f"shmobster error: {exc}")
     send(channel, reply, reply_to=data["message_id"])
     _post_pending(channel, surface)
-    mirror_out(channel, identity.mention(user), text, reply)
+    mirror_out(channel, identity.handle(user), text, reply)
 
 
 def _resolve_text(approved, req_id, channel, user, surface):
@@ -239,8 +288,10 @@ def _resume(channel, req_id, req, approved, result, user, surface):
     """Carry the turn on after a request resolved (#169); handler.resume decides
     whether this is the moment."""
     try:
+        cid = _CONVERSATIONS.get(channel)
         reply = handler.resume(req_id, approved, req.get("command", ""), result,
-                               thread_context=None, channel=channel, thread_ts=_THREAD,
+                               thread_context=_history(cid, None) if cid else None,
+                               channel=channel, thread_ts=_THREAD,
                                user_id=user, surface=surface, requester=req.get("requester"))
         if reply is None:
             waiting = approvals.pending_in(channel, _THREAD)
@@ -260,23 +311,29 @@ def _post_pending(channel, surface):
     for req_id, req in approvals.claim_unsurfaced(channel, _THREAD):
         cmd = redact.scrub(req["command"])
         if len(cmd) > _CARD_COMMAND_MAX:
-            cmd = cmd[:_CARD_COMMAND_MAX] + " ... (cut)"
-        reason = f"\n{req['reason']}" if req.get("reason") else ""
-        card = (f"Needs approval [{req_id}]:\n```\n{cmd}\n```{reason}\n"
+            cmd = (f"{cmd[:_CARD_COMMAND_MAX // 2]}\n... ({len(cmd) - _CARD_COMMAND_MAX} characters not shown: "
+                   f"read the whole command on the host before approving) ...\n{cmd[-_CARD_COMMAND_MAX // 2:]}")
+        reason = f" ({redact.scrub(req['reason'])})" if req.get("reason") else ""
+        # A refusal and a question must not look alike (#172)
+        head = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]{reason}"
+                if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]{reason}")
+        card = (f"{head}\n```\n{cmd}\n```\n"
                 f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\".")
-        if not send(channel, card):
-            _card_failed(channel, req_id, surface)
+        outcome = send(channel, card, key=f"card:{req_id}")
+        if outcome != "ok":
+            _card_failed(channel, req_id, surface, rejected=outcome == "rejected")
     for key, prop in proposals.claim_unsurfaced(channel):
         card = redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}\n"
                             f"A trusted user can ask me to open it ({key}) or decline it.")
-        if not send(channel, card):
+        if send(channel, card, key=f"proposal:{key}") != "ok":
             proposals.unsurface(key)
 
 
-def _card_failed(channel, req_id, surface):
-    """A card did not post: retry on the next turn, up to _CARD_TRIES; then
-    withdraw it, as slack_app does (#356), so it cannot hold the thread."""
-    if approvals.unsurface(req_id) < _CARD_TRIES:
+def _card_failed(channel, req_id, surface, rejected=False):
+    """A card did not post: retry on the next turn when the failure may pass,
+    up to _CARD_TRIES; withdraw it when the gateway refused it or the retries
+    ran out, as slack_app does (#356), so it cannot hold the thread."""
+    if not rejected and approvals.unsurface(req_id) < _CARD_TRIES:
         return
     if approvals.withdraw(req_id) is None:
         return
@@ -288,31 +345,40 @@ def _card_failed(channel, req_id, surface):
                 outcome["approved"], outcome["result"], outcome["user_id"], surface)
 
 
-def _safe_turn(data):
-    try:
-        _turn(data)
-    except Exception:
-        logging.exception("gateway: turn failed")
-
-
 def _loop():
-    cursor = state.get(_CURSOR) or "now"
+    """Poll, hand each message to a worker, and ack (persist the cursor) only
+    up to the oldest message whose turn has not finished: a restart re-reads
+    whatever was in flight, as the gateway's at-least-once contract expects,
+    rather than dropping it (#336 review)."""
+    acked = fetched = state.get(_CURSOR) or "now"
+    inflight = []                         # [(event id, future or None)], in order
     while True:
         try:
-            q = urllib.parse.urlencode({"after": cursor, "wait": 25, "types": "message.received"})
+            while inflight and (inflight[0][1] is None or inflight[0][1].done()):
+                acked = inflight.pop(0)[0]
+            if not inflight and fetched != acked:
+                acked = fetched
+            if acked != state.get(_CURSOR):
+                state.put(_CURSOR, acked)     # persisting the cursor is the ack (gateway README)
+            q = urllib.parse.urlencode({"after": fetched, "wait": 25, "types": "message.received"})
             body = _call("GET", f"/v1/events/poll?{q}", timeout=40)
-        except Exception as exc:  # noqa: BLE001
+            if not isinstance(body, dict):
+                raise ValueError("poll answered with something other than an object")
+            for e in body.get("events") or []:
+                if not isinstance(e, dict) or not isinstance(e.get("data"), dict):
+                    continue
+                data, fut = e["data"], None
+                mid = data.get("message_id")
+                if (e.get("type") == "ai.voitta.message.received.v1" and isinstance(mid, str)
+                        and _first_time(mid)):
+                    fut = _pool.submit(_guarded, _turn, data)
+                if isinstance(e.get("id"), str):
+                    inflight.append((e["id"], fut))
+            if isinstance(body.get("next"), str):
+                fetched = body["next"]
+        except Exception as exc:  # noqa: BLE001 -- this thread must not die (#66: deaf but alive)
             logging.warning("gateway: poll failed (%s); retrying", type(exc).__name__)
             time.sleep(5)
-            continue
-        for e in body.get("events") or []:
-            data = e.get("data") or {}
-            if e.get("type") == "ai.voitta.message.received.v1" and _first_time(data.get("message_id")):
-                _pool.submit(_safe_turn, data)
-        nxt = body.get("next")
-        if nxt and nxt != cursor:
-            cursor = nxt
-            state.put(_CURSOR, cursor)        # persisting `next` is the ack (gateway README)
 
 
 def start(slack_post=None):
@@ -328,7 +394,7 @@ def start(slack_post=None):
 
 def announce(text):
     """Post into every listed gateway conversation; how many accepted it."""
-    retval = sum(1 for label in config.GATEWAY_CONVERSATIONS if send(f"gateway:{label}", text))
+    retval = sum(1 for label in config.GATEWAY_CONVERSATIONS if send(f"gateway:{label}", text) == "ok")
     return retval
 
 
@@ -343,17 +409,25 @@ def mirror_out(channel, who, question, answer):
     conv = config.GATEWAY_CONVERSATIONS.get(label) or {}
     if not (conv.get("mirror") and conv.get("link") and _slack_post):
         return
+    medium = channel.partition(":")[0].title()
     try:
-        _slack_post(conv["link"], f"_{who} asked on {channel.partition(':')[0].title()}:_ {question}")
-        _slack_post(conv["link"], answer)
+        # Untrusted text into Slack under the agent's own bot: escaped, so it cannot
+        # @channel or disguise a link, and marked, so history never reads it as mine.
+        _slack_post(conv["link"], f"{_MIRRORED} from {medium}: _{who} asked:_ {_slack_escape(redact.scrub(question))}")
+        _slack_post(conv["link"], f"{_MIRRORED} from {medium}: {answer}")
     except Exception:
         logging.exception("gateway: could not mirror into %s", conv["link"])
 
 
+def _slack_escape(text):
+    retval = (text or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return retval
+
+
 def mirror_in(slack_channel, question, answer):
     """A Slack turn, copied into every gateway conversation linked to it."""
-    question = re.sub(r"<@\w+>", "", question or "").strip()
+    question = redact.scrub(re.sub(r"<@\w+>", "", question or "").strip())
     for label, conv in config.GATEWAY_CONVERSATIONS.items():
         if conv.get("mirror") and conv.get("link") == slack_channel:
-            send(f"gateway:{label}", f"_Asked on Slack:_ {question}")
-            send(f"gateway:{label}", answer)
+            send(f"gateway:{label}", f"{_MIRRORED} from Slack: _someone asked:_ {question}")
+            send(f"gateway:{label}", f"{_MIRRORED} from Slack: {answer}")

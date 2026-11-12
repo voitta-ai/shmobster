@@ -30,13 +30,12 @@ def size(text):
 _INLINE = re.compile(
     r"`(?P<code>[^`\n]+)`"
     r"|\*\*(?P<bold>.+?)\*\*"
-    r"|__(?P<bold2>.+?)__"
     r"|~~(?P<strike>.+?)~~"
     r"|(?<![\w*])\*(?![\s*])(?P<italic>.+?)(?<![\s*])\*(?![\w*])"
-    r"|(?<![\w_])_(?![\s_])(?P<italic2>.+?)(?<![\s_])_(?![\w_])"
+    r"|(?<![\w_])_(?![\s_])(?P<italic2>[^_]+?)(?<![\s_])_(?![\w_])"
     r"|\[(?P<ltext>[^\]\n]+)\]\((?P<url>[^)\s]+)\)"
 )
-_STYLE = {"bold": "BOLD", "bold2": "BOLD", "strike": "STRIKETHROUGH", "italic": "ITALIC", "italic2": "ITALIC"}
+_STYLE = {"bold": "BOLD", "strike": "STRIKETHROUGH", "italic": "ITALIC", "italic2": "ITALIC"}
 _FENCE = re.compile(r"^\s*```")
 _HEADING = re.compile(r"^#{1,6}\s+(.*)$")
 _BULLET = re.compile(r"^(\s*)[-*+]\s+(?=\S)")

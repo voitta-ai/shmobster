@@ -40,9 +40,7 @@ _THREAD = "main"            # Signal has no threads: a conversation is one threa
 _CURSOR = "gateway_cursor"  # the poll position, persisted on every page (state.py)
 _HISTORY = 25
 _CARD_TRIES = 3
-# A command is shown whole: what is not on the card is not what the approver
-# approved (#336 review). Past this, head and tail, with a warning to read it
-# on the host before approving.
+# Only for command output now; cards are bounded by _card_command below.
 _CARD_COMMAND_MAX = 20000
 _APPROVAL = re.compile(r"^\s*(approve|deny)\s+\[?([\w-]+)\]?\s*[.!]?\s*$", re.IGNORECASE)
 
@@ -129,6 +127,39 @@ def send(channel, markdown, reply_to=None, key=None, raw=None):
             logging.warning("gateway: send to %s failed: %s", channel, type(exc).__name__)
             retval = "retry"
     return retval
+
+
+_CARD_BUDGET = 1500   # bytes of command on a card: with its head and tail lines, one message
+
+
+def _card_command(cmd):
+    """The command as the card shows it, always within one Signal message. Split
+    across messages, the cut points would hide whether a newline or a space stood
+    there, and two different commands could show the same card (#386 review). Too
+    long for one message: its head and tail exactly as written, and in between a
+    line no command contains, saying how much is not shown."""
+    if gateway_text.size(cmd) <= _CARD_BUDGET:
+        return cmd
+    half = _CARD_BUDGET // 2 - 100
+    head, tail = _bytes_prefix(cmd, half), _bytes_suffix(cmd, half)
+    hidden = gateway_text.size(cmd) - gateway_text.size(head) - gateway_text.size(tail)
+    retval = (f"{head}\n\u2702\ufe0f [{hidden} bytes of this command are not shown here: read the whole "
+              f"command on the host before approving]\n{tail}")
+    return retval
+
+
+def _bytes_prefix(text, limit):
+    out, used = [], 0
+    for ch in text:
+        used += gateway_text.size(ch)
+        if used > limit:
+            break
+        out.append(ch)
+    return "".join(out)
+
+
+def _bytes_suffix(text, limit):
+    return _bytes_prefix(text[::-1], limit)[::-1]
 
 
 def _verbatim(before, body, after=""):
@@ -329,16 +360,15 @@ def _resume(channel, req_id, req, approved, result, user, surface):
 def _post_pending(channel, surface):
     """Cards for what the turn parked, as text a trusted user answers in text."""
     for req_id, req in approvals.claim_unsurfaced(channel, _THREAD):
-        cmd = redact.scrub(req["command"])
-        if len(cmd) > _CARD_COMMAND_MAX:
-            cmd = (f"{cmd[:_CARD_COMMAND_MAX // 2]}\n... ({len(cmd) - _CARD_COMMAND_MAX} characters not shown: "
-                   f"read the whole command on the host before approving) ...\n{cmd[-_CARD_COMMAND_MAX // 2:]}")
+        cmd = _card_command(redact.scrub(req["command"]))
         reason = f" ({redact.scrub(req['reason'])})" if req.get("reason") else ""
         # A refusal and a question must not look alike (#172)
         head = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]{reason}"
                 if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]{reason}")
-        outcome = send(channel, None, key=f"card:{req_id}", raw=_verbatim(
-            head, cmd, f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\"."))
+        card = _verbatim(head, cmd, f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\".")
+        if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a reason long enough to push it over
+            card = _verbatim(head[:200], cmd, f"Reply \"approve {req_id}\" or \"deny {req_id}\".")
+        outcome = send(channel, None, key=f"card:{req_id}", raw=card)
         if outcome != "ok":
             _card_failed(channel, req_id, surface, rejected=outcome == "rejected")
     for key, prop in proposals.claim_unsurfaced(channel):
@@ -368,13 +398,17 @@ _STARTED = "gateway_started"   # message ids whose turn began, kept across resta
 _STARTED_MAX = 500
 
 
+_STARTED_LOCK = threading.Lock()
+
+
 def _begin(mid, started):
     """Record that this message's turn is starting, before anything runs. A turn
     that began is never run again after a restart -- not even one that ended the
     process -- while one still waiting in the queue is (#386 review)."""
-    started.append(mid)
-    del started[:-_STARTED_MAX]
-    state.put(_STARTED, list(started))
+    with _STARTED_LOCK:                   # append and save together: no older copy saved last
+        started.append(mid)
+        del started[:-_STARTED_MAX]
+        state.put(_STARTED, list(started))
 
 
 def _run(fn, mid, started, *args):

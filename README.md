@@ -1001,6 +1001,8 @@ only the messages addressed to this one.
 - **Policy.** A conversation with a `link` shares that Slack channel's policy.
   Any other conversation, a DM included, falls back to `default_policy`.
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
+  People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
+  the profile name they chose, since anyone can call themselves anything.
 - **Approvals are text.** A card names the request id. If a trusted user's
   whole message is `approve <id>` or `deny <id>`, it resolves the request the
   way a button click does on Slack, and the task carries on (#169). The

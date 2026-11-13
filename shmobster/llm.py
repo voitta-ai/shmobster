@@ -44,7 +44,9 @@ fixed vendor-side (access enabled, credit added) with no config edit to notice;
 growing, because a rung that really is gone should not be re-dialled hourly."""
 import datetime
 import logging
+import math
 import re
+import threading
 import time
 
 import litellm
@@ -123,7 +125,7 @@ _LIVE_404 = re.compile(r"no endpoints found that support", re.IGNORECASE)
 # Codex's quoted-model shape: "The '<model>' model is not supported when using
 # Codex with a ChatGPT account."
 _DEAD_400 = re.compile(
-    r"model_not_found|does not exist|decommissioned"
+    r"model_not_found|model[^.\n]{0,80}does not exist|decommissioned"
     r"|the '[^'\n]{1,120}' model is not supported when using codex",
     re.IGNORECASE)
 
@@ -133,10 +135,22 @@ _DEAD_400 = re.compile(
 _SUGGESTED_SLUG = re.compile(r"use this slug instead:\s*([A-Za-z0-9][A-Za-z0-9._:/-]{0,119})")
 
 
+# Every read-modify-write of the dead-rung records, so two turns finishing
+# together neither both announce a rung nor drop a fresh record (#358 review).
+# Reentrant: kill and claim_dead_notices read through _dead_records.
+_DEAD_LOCK = threading.RLock()
+
+
 def _dead_records():
     """Every dead-rung record that still applies, in force or not: recorded
     against the model the rung is configured with now, and not yet past its
     history window. Pruned on read; a park running out is logged once."""
+    with _DEAD_LOCK:
+        retval = _dead_records_locked()
+    return retval
+
+
+def _dead_records_locked():
     raw = state.get(_DEAD_KEY) or {}
     now = time.time()
     models = {v.get("name"): v.get("model") for v in config.WATERFALL}
@@ -387,7 +401,8 @@ def dead_reason(exc):
 
 
 def _hours(sec):
-    retval = f"{sec // 3600}h"
+    """A park length for people, rounded up: "45m", "2h"."""
+    retval = f"{math.ceil(sec / 60)}m" if sec < 3600 else f"{math.ceil(sec / 3600)}h"
     return retval
 
 
@@ -413,6 +428,12 @@ def kill(exc, deployment=""):
                       "rung it is, so not parking it", deployment or "unknown rung", reason, hint)
         retval = None
         return retval
+    with _DEAD_LOCK:
+        retval = _kill_locked(name, reason, suggest, hint)
+    return retval
+
+
+def _kill_locked(name, reason, suggest, hint):
     records = dict(_dead_records())
     prior = records.get(name)
     now = time.time()
@@ -441,14 +462,21 @@ def kill(exc, deployment=""):
 
 
 def claim_dead_notices():
-    """Channel lines for dead rungs not yet announced, marked announced.
+    """Markdown lines for dead rungs not yet announced, marked announced.
 
-    The handler appends them to the next reply, and the Slack ingest to its
-    error reply when every rung failed, so the notice reaches whoever is in the
-    channel without a new transport. Once per park: the flag lives in the state
-    file, so a restart neither repeats nor loses one. The line names the rung,
-    never its model string, which for some providers carries a cloud account
-    id; the model is in the ERROR log line."""
+    The Slack ingest posts them in the thread of the turn that just ended, so
+    the notice reaches an operator without a new transport -- Slack only: a
+    Signal group on a shared account is no place for an operator notice. Once
+    per park: the flag lives in the state file, so a restart neither repeats
+    nor loses one. The line names the rung, never its model string, which for
+    some providers carries a cloud account id; the model is in the ERROR log
+    line."""
+    with _DEAD_LOCK:
+        retval = _claim_locked()
+    return retval
+
+
+def _claim_locked():
     records = dict(_dead_records())
     now = time.time()
     lines = []
@@ -456,11 +484,13 @@ def claim_dead_notices():
         if rec.get("told"):
             continue
         records[name] = dict(rec, told=True)
-        if rec["until"] > now:
-            action = f"Skipping it for {_hours(int(rec['until'] - now + 59))}"
-        else:
+        if not config.BUDGET_PARK_SEC:
             action = "Parking is off, so it is still being tried"
-        line = (f":rotating_light: LLM rung *{name}* is dead: {rec.get('reason')}. "
+        elif rec["until"] > now:
+            action = f"Skipping it for {_hours(rec['until'] - now)}"
+        else:
+            action = "Its park has run out, so it is being tried again"
+        line = (f"\U0001F6A8 LLM rung **{name}** is dead: {rec.get('reason')}. "
                 f"{action}; fix or remove it in the waterfall config.")
         if rec.get("suggest"):
             line += f" The vendor suggests `{rec['suggest']}`."

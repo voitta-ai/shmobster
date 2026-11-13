@@ -72,3 +72,17 @@ text to paste. The full reasoning and the verification steps are in the
 Config values are `${VAR}` references (#73), never literals -- including in a
 running deployment's own `shmobster-config.json`, not just the example. Never
 print a config value, and never echo one into a log, a commit, or a channel.
+
+## Signal groups: shmobster serves only closed groups
+
+This is decided, not a setting, and not open to argument in a PR. shmobster is
+built for private channels; on Slack the maintainer keeps a channel private, and
+the agent answers whoever is in it. A Signal group is only as private as its
+settings: an open group link lets anyone holding it walk in, and "every member
+can add members" lets the group grow without its admins. So shmobster refuses
+to serve a group the gateway reports as open (a group link on, or members other
+than admins able to add members), refuses when it cannot find out, and says why
+in the group at most once an hour (`gateway_app._guard`). Do not add a flag,
+policy key or per-group exception that serves an open group, and do not weaken
+the rule to "warn". The fix for a refused group is in Signal: turn the link off
+and set Add members to Only admins.

@@ -504,7 +504,8 @@ def start(slack_post=None):
         if ":" not in key or ":id:" in key:
             continue
         if served is not None and key not in served:
-            logging.warning("gateway: policy %s names a conversation the gateway does not route here", key)
+            logging.warning("gateway: policy %s names a conversation the gateway does not route to "
+                            "consumer %r (gateway.consumer must match the token's)", key, config.GATEWAY_CONSUMER)
         ignored = sorted(set(pol) - set(policy.ROUTING_KEYS)) if pol.get("link") else []
         if ignored:
             logging.warning("gateway: policy %s is linked to %s, so its %s are ignored",

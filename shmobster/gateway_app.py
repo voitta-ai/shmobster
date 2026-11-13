@@ -497,13 +497,30 @@ def start(slack_post=None):
         return False
     _slack_post = slack_post
     threading.Thread(target=_loop, name="gateway-poll", daemon=True).start()
-    logging.info("gateway: polling for %d listed conversation(s)", len(config.GATEWAY_CONVERSATIONS))
+    served = conversations()
+    if served is not None:
+        logging.info("gateway: serving %d listed conversation(s)", len(served))
+        for key in sorted(config.CHANNEL_POLICIES):
+            if ":" in key and ":id:" not in key and key not in served:
+                logging.warning("gateway: policy %s names a conversation the gateway does not route here", key)
     return True
+
+
+def conversations():
+    """This agent's listed group conversations, as channel ids (`<medium>:<label>`),
+    from the gateway, which owns them; None when it could not be asked."""
+    try:
+        body = _call("GET", "/v1/conversations")
+        retval = [f"{c['channel']}:{c['label']}" for c in body.get("conversations") or []]
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("gateway: could not list conversations (%s)", type(exc).__name__)
+        retval = None
+    return retval
 
 
 def announce(text):
     """Post into every listed gateway conversation; how many accepted it."""
-    retval = sum(1 for label in config.GATEWAY_CONVERSATIONS if send(f"gateway:{label}", text) == "ok")
+    retval = sum(1 for channel in conversations() or [] if send(channel, text) == "ok")
     return retval
 
 
@@ -514,8 +531,7 @@ def announce(text):
 
 def mirror_out(channel, who, question, answer):
     """A gateway turn, copied into the Slack channel its conversation links to."""
-    label = channel.partition(":")[2]
-    conv = config.GATEWAY_CONVERSATIONS.get(label) or {}
+    conv = config.CHANNEL_POLICIES.get(channel) or {}
     if not (conv.get("mirror") and conv.get("link") and _slack_post):
         return
     medium = channel.partition(":")[0].title()
@@ -535,11 +551,11 @@ def _slack_escape(text):
 
 def mirror_in(slack_channel, question, answer):
     """A Slack turn, copied into every gateway conversation linked to it."""
-    labels = [label for label, conv in config.GATEWAY_CONVERSATIONS.items()
-              if conv.get("mirror") and conv.get("link") == slack_channel]
-    if not labels:
+    targets = [channel for channel, conv in config.CHANNEL_POLICIES.items()
+               if ":" in channel and conv.get("mirror") and conv.get("link") == slack_channel]
+    if not targets:
         return
     question = redact.scrub(re.sub(r"<@\w+>", "", question or "").strip())
-    for label in labels:
-        send(f"gateway:{label}", f"{_MIRRORED} from Slack: _someone asked:_ {question}")
-        send(f"gateway:{label}", f"{_MIRRORED} from Slack: {answer}")
+    for channel in targets:
+        send(channel, f"{_MIRRORED} from Slack: _someone asked:_ {question}")
+        send(channel, f"{_MIRRORED} from Slack: {answer}")

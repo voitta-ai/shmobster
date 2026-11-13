@@ -22,10 +22,11 @@ def resolve(channel):
 
 
 def linked(channel):
-    """The Slack channel id a gateway conversation (`<channel>:<label>`) is
-    linked to, or None."""
-    label = str(channel or "").partition(":")[2]
-    retval = (config.GATEWAY_CONVERSATIONS.get(label) or {}).get("link") if label else None
+    """The Slack channel id a gateway conversation (`<medium>:<label>`) is
+    linked to by its policy entry's `link`, or None. Slack ids have no colon,
+    so a Slack channel never links."""
+    channel = str(channel or "")
+    retval = (config.CHANNEL_POLICIES.get(channel) or {}).get("link") if ":" in channel else None
     return retval
 
 

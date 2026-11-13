@@ -120,7 +120,7 @@ def send(channel, markdown, reply_to=None, key=None, raw=None):
     thing again does not repeat the pieces that already went out. With `raw`,
     a (text, styles) pair is sent exactly as given: no Markdown is read."""
     retval = "ok"
-    pieces = gateway_text.raw_parts(*raw) if raw else gateway_text.parts(for_signal(unsigned(markdown)))
+    pieces = gateway_text.raw_parts(*raw) if raw else gateway_text.parts(unsigned(for_signal(markdown)))   # after the marker is gone
     for i, parts in enumerate(pieces):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
@@ -325,13 +325,15 @@ def _first_time(message_id):
     return True
 
 
-_HELP = re.compile(r"^\s*/help\s+@?\S+\s*$", re.IGNORECASE)
+_HELP = re.compile(r"^\s*/help\s+@?(\S+)\s*$", re.IGNORECASE)
 
 
 def _help(data):
-    """The channel when the message is `/help <name>`. The gateway hands this
-    agent only the one naming it, and answers a bare /help itself."""
-    retval = channel_of(data) if _HELP.match(_text(data)) else None
+    """The channel when the message is `/help <this agent>`. Any other `/help x`
+    goes to the model: a gateway that is older or not shared passes those on."""
+    m = _HELP.match(_text(data))
+    me = {n.lower() for n in (config.AGENT_LABEL, config.GATEWAY_CONSUMER) if n}
+    retval = channel_of(data) if m and m.group(1).lower() in me else None
     return retval
 
 
@@ -341,16 +343,17 @@ def _describe(channel, mid):
     me = config.AGENT_LABEL or "this agent"
     pol = policy.resolve(channel)
     repos = ", ".join(pol.get("github_repos") or []) or "any repository its GitHub access reaches"
-    asks = ("runs git, gh and file commands here without asking" if pol.get("unattended")
-            else "asks first, with an approval card, before running anything that changes something")
+    # No paths: anyone the gateway lets in can ask, trusted or not.
+    asks = ("runs some git, gh and file commands here without asking" if pol.get("unattended")
+            else "asks first, with an approval card, before most commands that change something")
     lines = [
         "An assistant that answers questions and runs commands for this team.",   # the gateway signs it
         f"Reach it: start a message with \"{me.lower()}\", mention this account, or quote one of its messages.",
-        f"Here it works in `{policy.cwd_for(pol)}` with GitHub repositories: {repos}. It {asks}.",
+        f"Here its GitHub repositories are: {repos}. It {asks}.",
         "A card names a request id; a trusted person replies `approve <id>` or `deny <id>`.",
         "/help lists every agent on this account.",
     ]
-    send(channel, "\n".join(lines), reply_to=mid, key=f"reply:{mid}")
+    send(channel, redact.scrub("\n".join(lines)), reply_to=mid, key=f"reply:{mid}")
 
 
 def _approval(data):
@@ -526,7 +529,7 @@ def _loop():
                     if approval:                  # its own lane: never behind long turns
                         fut = _approvals_pool.submit(_run, _resolve_text, mid, started, *approval)
                     elif _help(data):             # no model: the same lane, it is as quick
-                        fut = _approvals_pool.submit(_run, _describe, _help(data), mid)
+                        fut = _approvals_pool.submit(_run, _describe, mid, started, _help(data), mid)
                     else:
                         fut = _pool.submit(_run, _turn, mid, started, data)
                 if isinstance(e.get("id"), str):

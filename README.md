@@ -1022,10 +1022,10 @@ only the messages addressed to this one.
   profile name (`account_name`, optional). The agent is told so, sees an @mention of the
   account as `@<its label>`, and its replies are signed with its label by the gateway, so a
   signature the model writes itself is dropped.
-- **`/help`.** The gateway answers a bare `/help` with the agents on the account. `/help <label>`
-  reaches the agent, which answers without the model: what it is, how to reach it, and its
-  policy in that conversation (working directory, GitHub repositories, whether it asks before
-  changing anything). Release announcements on Signal end with a line saying the same.
+- **`/help`.** A shared gateway answers a bare `/help` with the agents on the account.
+  `/help <label>` reaches the agent, which answers without the model: what it is, how to reach
+  it, and its GitHub repositories and whether it asks before changing anything there. No paths:
+  anyone the gateway lets in can ask. Any other `/help ...` is a normal turn. Release announcements on Signal end with a line saying the same.
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
   the profile name they chose, since anyone can call themselves anything.

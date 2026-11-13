@@ -13,8 +13,8 @@ Dated records of individual sessions live in `docs/handoff/`; the most recent
 is `docs/handoff/2026-09-17.md`, which carries the credential-scrub state and
 the corrections that session made to its own earlier claims.
 
-Current state: **v0.40.0 is cut; the live box is on v0.8.0 until someone
-upgrades it** -- and that upgrade is now eighteen versions and one inverted
+Current state: **v0.40.1 is cut; the live box is on v0.8.0 until someone
+upgrades it** -- and that upgrade is now thirty-nine versions and one inverted
 instruction behind, so read `docs/release-notes/v0.9.0.md` before doing it. The
 exec path is YOLT (its own rules only, #148) -> egress allow-list (#149) ->
 grant layer (#117) -> seatbelt sandbox (#116) -> approval card (#48). A

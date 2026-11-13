@@ -20,7 +20,7 @@ _SYSTEM = None
 # By class name, so classes that move between litellm modules still match; a
 # bad request, a context overflow or a bad key fails the same way every time.
 _TRANSIENT = {"RateLimitError", "RouterRateLimitError", "Timeout", "APITimeoutError",
-              "ServiceUnavailableError", "InternalServerError", "APIConnectionError"}
+              "ServiceUnavailableError", "InternalServerError", "BadGatewayError", "APIConnectionError"}
 
 
 def failure_line(exc):

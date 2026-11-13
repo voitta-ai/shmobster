@@ -454,14 +454,19 @@ def _turn(event, say, client, logger):
         logger.exception("handler failed: channel=%s thread=%s", channel, thread_ts)
         reply = handler.failure_line(exc)
     say(thread_ts=thread_ts, **_reply_payload(reply))
-    # A rung found dead during this or an earlier turn (#353), told once, as its
-    # own post so a mirror never carries it, and on Slack only: an operator
-    # notice does not belong in a Signal group on a shared account.
-    for notice in llm.claim_dead_notices():
-        say(thread_ts=thread_ts, **_reply_payload(notice))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
     _post_pending(client, channel, thread_ts)
+    # A rung found dead during this or an earlier turn (#353), told once, as its
+    # own post so a mirror never carries it. Only in a trusted user's turn: an
+    # operator notice belongs to an operator, not a client channel, a stranger's
+    # DM or a Signal group. Until then it waits in the state file.
+    if admin_tools.is_trusted(asker):
+        try:
+            for notice in llm.claim_dead_notices():
+                say(thread_ts=thread_ts, **_reply_payload(notice))
+        except Exception:  # noqa: BLE001 -- the ERROR log line already has it
+            logging.exception("could not post a dead-rung notice")
     # The question and the answer, into linked gateway conversations that
     # mirror this channel (#336). Off unless configured.
     gateway_app.mirror_in(channel, event.get("text", ""), reply)

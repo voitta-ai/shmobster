@@ -125,7 +125,7 @@ _LIVE_404 = re.compile(r"no endpoints found that support", re.IGNORECASE)
 # Codex's quoted-model shape: "The '<model>' model is not supported when using
 # Codex with a ChatGPT account."
 _DEAD_400 = re.compile(
-    r"model_not_found|model[^.\n]{0,80}does not exist|decommissioned"
+    r"model_not_found|\bthe model\b[^.\n]{0,80}?does not exist|decommissioned"
     r"|the '[^'\n]{1,120}' model is not supported when using codex",
     re.IGNORECASE)
 

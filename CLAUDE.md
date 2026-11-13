@@ -24,7 +24,12 @@ does:
   parked in this thread" rule and returns None when the answer is yes -- do not
   re-implement that check, and do pass the thread id to
   `approvals.claim_unsurfaced(channel, thread_ts)` when surfacing cards, or it
-  has nothing to reason about.
+  has nothing to reason about. When a card fails for a reason that may pass,
+  `approvals.unsurface(req_id)` retries it next turn; when the surface rejects
+  the card itself, call `approvals.withdraw(req_id)`, say so in the thread, and
+  resume from `approvals.take_deferred(channel, thread_ts)` if it returns an
+  outcome. A parked request no human can see still counts as parked, and holds
+  the thread's resume forever.
 - **Skill proposals (#129)** -- after a turn, render `proposals.claim_unsurfaced(channel)`
   the way you render `approvals.claim_unsurfaced`: a card or a line naming the id,
   and a way for a trusted user to answer by id (`propose_skill` / `decline_skill`).

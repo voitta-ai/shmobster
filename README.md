@@ -1703,10 +1703,9 @@ says the model or endpoint is gone (a retired model, a dropped free tier), or a
 400 that says the model itself is refused (`model_not_found`, a model that
 "does not exist", "decommissioned", or a subscription plan that does not serve
 it). These are parked, logged at ERROR, and announced once in the thread of the
-next Slack turn a trusted user starts, after its reply (including the error
-reply when every rung failed), with the vendor's suggested replacement when it
-names one. Client channels, other people's DMs and Signal conversations never
-get the notice: it is for the operator.
+next Slack turn a trusted user starts (wherever that turn is), after its reply,
+with the vendor's suggested replacement when it names one. A turn started by
+anyone else never gets the notice, nor does Signal: it is for the operator.
 
     waterfall: DEAD RUNG orfree (openrouter/acme/model-x:free): the vendor says this model or endpoint does not exist for this account (404); the vendor suggests model 'acme/model-x'; skipping it for 1h -- fix or remove it in the waterfall config
 

@@ -989,6 +989,7 @@ only the messages addressed to this one.
   "url": "http://127.0.0.1:8080",
   "token": "${SHMOBSTER_GATEWAY_TOKEN}",
   "consumer": "shmobster",
+  "account_name": "Team Agents",
   "conversations": {"team": {"link": "C0123456789", "mirror": false}}
 }
 ```
@@ -1000,6 +1001,9 @@ only the messages addressed to this one.
   and Markdown becomes Signal's bold, italic, strikethrough and monospace.
 - **Policy.** A conversation with a `link` shares that Slack channel's policy.
   Any other conversation, a DM included, falls back to `default_policy`.
+- **One account, several agents.** Signal shows every agent on the account under its one
+  profile name (`account_name`, optional). The agent is told so, sees an @mention of the
+  account as `@<its label>`, and its replies are signed with its label by the gateway.
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
   the profile name they chose, since anyone can call themselves anything.

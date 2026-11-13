@@ -190,6 +190,7 @@ _gateway = _cfg.get("gateway") or {}
 GATEWAY_URL = _gateway.get("url", "")
 GATEWAY_TOKEN = _gateway.get("token", "")
 GATEWAY_CONSUMER = _gateway.get("consumer", "shmobster")  # this agent's consumer name there
+GATEWAY_ACCOUNT_NAME = _gateway.get("account_name", "")   # the shared account's profile name, if known
 GATEWAY_CONVERSATIONS = _gateway.get("conversations", {})
 
 AGENT_LABEL = _agent.get("label", "")  # empty -> auto-derive from Slack (#8)

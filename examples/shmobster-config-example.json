@@ -84,6 +84,7 @@
     "url": "",
     "token": "${SHMOBSTER_GATEWAY_TOKEN}",
     "consumer": "shmobster",
+    "account_name": "",
     "conversations": {
       "team": {
         "link": "C0123456789",

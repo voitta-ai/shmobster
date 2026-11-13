@@ -1579,6 +1579,8 @@ class _Walker:
             # A word this cannot read could be the output flag.
             retval = ((False, f"git {sub}: an argument is not a literal")
                       if None in rest else (True, f"git {sub}: read-only"))
+        elif sub is None:                 # `git -C <dir>` alone: nothing to vouch for
+            retval = (False, "git: no subcommand")
         else:
             retval = (False, f"git {sub}: not a local write")
         return retval

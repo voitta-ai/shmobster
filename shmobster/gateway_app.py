@@ -384,9 +384,9 @@ def _turn(data):
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=_THREAD,
                                user_id=user, surface=surface)
-    except Exception as exc:  # one clear message, scrubbed (#72)
-        logging.exception("gateway: handler failed")
-        reply = redact.scrub(f"shmobster error: {exc}")
+    except Exception as exc:  # one short line; the exception goes to the log only (#352)
+        logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
+        reply = handler.failure_line(exc)
     send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)

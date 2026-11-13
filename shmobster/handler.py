@@ -16,6 +16,24 @@ _NO_SURFACE = Surface()
 _SYSTEM = None
 
 
+# Model errors that pass on their own: worth "try again in a few minutes".
+# By class name, so classes that move between litellm modules still match; a
+# bad request, a context overflow or a bad key fails the same way every time.
+_TRANSIENT = {"RateLimitError", "RouterRateLimitError", "Timeout", "APITimeoutError",
+              "ServiceUnavailableError", "InternalServerError", "APIConnectionError"}
+
+
+def failure_line(exc):
+    """The one line a failed turn posts, on every surface. Never the exception
+    text (#352): a router failure is the whole multi-provider dump, which nobody
+    in the conversation can act on and the operator reads in the log."""
+    if (type(exc).__module__.split(".")[0] in ("litellm", "openai")
+            and type(exc).__name__ in _TRANSIENT):
+        return ("\u26a0\ufe0f No language model is available right now, so I could not "
+                "answer. Please try again in a few minutes; the details are in my log.")
+    return "\u26a0\ufe0f Something went wrong and I could not finish this. The details are in my log."
+
+
 def _system_prompt():
     global _SYSTEM
     if _SYSTEM is None:

@@ -29,6 +29,7 @@ leaves a trace and one that does not.
 """
 import logging
 import os
+import posixpath
 import subprocess
 
 
@@ -44,23 +45,72 @@ _MAX_TOTAL = 16000
 _REV = "HEAD"
 
 
+def _git(directory, *args):
+    """stdout bytes of a git command in `directory`, or None."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", directory, *args],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    retval = proc.stdout if proc.returncode == 0 else None
+    return retval
+
+
+def _safe(path):
+    retval = bool(path) and not path.startswith("/") and ".." not in path.split("/")
+    return retval
+
+
+def _entry(directory, path):
+    """(mode, type, sha) of `path` in the HEAD tree, or None.
+
+    `--full-tree`, because `git show HEAD:<path>` reads from the repository
+    root and a channel's cwd can be a subdirectory of its repo; without it the
+    two calls would look at different files. And only an entry whose path IS
+    the one asked for: `ls-tree` on a directory lists its children, and the
+    first child must not stand in for the directory."""
+    out = _git(directory, "ls-tree", "-z", "--full-tree", _REV, "--", path) if _safe(path) else None
+    head, _, name = (out or b"").split(b"\0", 1)[0].partition(b"\t")
+    fields = head.decode("ascii", "replace").split(" ")
+    retval = tuple(fields) if len(fields) == 3 and name == path.encode() else None
+    return retval
+
+
+def _resolve(directory, path):
+    """The in-repo path whose blob holds `path`'s text at HEAD, or None (#379).
+
+    A committed symlink is a blob whose content is the link TEXT, so
+    `git show HEAD:CLAUDE.md` on `CLAUDE.md -> AGENTS.md` returns the nine
+    characters "AGENTS.md". Repos that keep one instruction file under both
+    names do exactly this. Follow one level, to a relative target inside the
+    repo, by the same rule a named path has to pass; a link to a link, or out
+    of the tree, is not followed."""
+    entry = _entry(directory, path)
+    if not entry or entry[1] != "blob":
+        return None
+    if entry[0] != "120000":
+        return path
+    raw = _git(directory, "cat-file", "blob", entry[2])
+    target = raw.decode("utf-8", "replace") if raw else ""
+    if not _safe(target):
+        return None
+    target = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+    entry = _entry(directory, target)
+    retval = target if entry and entry[1] == "blob" and entry[0] != "120000" else None
+    return retval
+
+
 def _read(directory, path):
     """One file's contents at HEAD, or None.
 
     `--` separates the pathspec from revisions so a file named like a ref
     cannot be read as one, and a path outside the repo simply fails: `git show`
     resolves against the repository root, not the filesystem."""
-    if not path or path.startswith("/") or ".." in path.split("/"):
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", directory, "show", f"{_REV}:{path}"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
+    out = _git(directory, "show", f"{_REV}:{path}") if _safe(path) else None
+    if out is None:
         return None
     # Bytes, decoded here rather than by subprocess: git will hand back
     # whatever is in the blob, and a document that is not valid UTF-8 would
@@ -68,7 +118,7 @@ def _read(directory, path):
     # call, so one bad commit would take the channel down until someone
     # changed it (Codex adversarial review, #261). Replacement characters in a
     # prompt are survivable; a channel that cannot answer is not.
-    retval = proc.stdout.decode("utf-8", "replace")
+    retval = out.decode("utf-8", "replace")
     return retval
 
 
@@ -93,8 +143,14 @@ def files(policy):
     # round -- and it is what happened here before review (#261).
     named = [p for p in (policy.get("project_docs") or [])]
     wanted = named + [p for p in DEFAULT_PATHS if p not in named]
-    retval, total, omitted = [], 0, []
+    retval, total, omitted, seen = [], 0, [], set()
     for path in wanted:
+        # Through a symlink to the file it names, and each file once: a repo
+        # with CLAUDE.md -> AGENTS.md would otherwise spend the budget twice.
+        path = _resolve(directory, path)
+        if not path or path in seen:
+            continue
+        seen.add(path)
         body = _read(directory, path)
         if not body or not body.strip():
             continue

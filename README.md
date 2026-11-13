@@ -50,7 +50,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt, pinned at v2.8.0   # a clone, not a package: exec classifier + secret_redact; boot refuses < 2.0.1
+  - voitta-ai/voitta-yolt, pinned at v2.17.0   # a clone, not a package: exec classifier + secret_redact; boot refuses < 2.0.1
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -86,6 +86,7 @@ license:     MIT
   - [Config & run](#config--run)
   - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
   - [Running multiple instances](#running-multiple-instances)
+  - [Signal, through voitta-gateway (#336)](#signal-through-voitta-gateway-336)
 - [How it decides what to run](#how-it-decides-what-to-run)
   - [Trust model](#trust-model)
   - [Approving mutating commands (#48)](#approving-mutating-commands-48)
@@ -899,7 +900,7 @@ and any private catalog) -- so the code that actually runs after a restart is
 whatever those checkouts hold, and a release note that says "needs yolt >=
 X" means their `git pull`, not this repo's. In that order:
 
-    git -C /path/to/voitta-yolt fetch --tags && git -C /path/to/voitta-yolt checkout --detach v2.8.0   # yolt_gate.YOLT_PIN
+    git -C /path/to/voitta-yolt fetch --tags && git -C /path/to/voitta-yolt checkout --detach v2.17.0   # yolt_gate.YOLT_PIN
     git -C /path/to/skillz pull            # and each other skills.paths entry
     git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
     git pull && .venv/bin/pip install --require-hashes -r requirements.txt
@@ -969,6 +970,75 @@ name; name each instance via `agent.label` (or let it auto-derive from the app).
   `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
 - **Two instances on the *same* machine** additionally need distinct launchd
   Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+### Signal, through voitta-gateway (#336)
+
+Signal reaches the agent through voitta-gateway. The gateway holds the one
+signal-cli process for the account, shared with other agents, and passes on
+only the messages addressed to this one.
+
+**Setup.**
+- In `gateway.yaml`:
+  - give this agent a consumer with `names` and a `label`;
+  - list each group it serves under `conversations`, with this consumer in
+    its `consumers`. That list is the only one: the agent asks the gateway
+    which groups it serves (`GET /v1/conversations`) at boot and for each
+    announcement.
+- In `shmobster-config.json`:
+
+```json
+"gateway": {
+  "url": "http://127.0.0.1:8080",
+  "token": "${SHMOBSTER_GATEWAY_TOKEN}",
+  "consumer": "shmobster",
+  "account_name": "Team Agents"
+}
+```
+
+- In `channel_policies`, a group is `signal:<its gateway label>`. Give it a
+  policy of its own, or `link` it to a Slack channel to share that channel's
+  policy; `mirror` lives here too:
+
+```json
+"signal:team": {"link": "C0123456789", "mirror": false}
+```
+
+  A policy for a label the gateway does not route to this agent is a warning
+  at boot (when the gateway answers then). The old `gateway.conversations`
+  stops the boot when `url` is set: move its entries here. `token` is this
+  consumer's own, not an admin token: the agent announces into every group the
+  gateway lists for it.
+
+**How it behaves.**
+- **Turns.** A message addressed to the agent is a turn, answered in the same
+  conversation. The agent quotes the message, so a follow-up that quotes the
+  answer comes back to this agent. Long answers are split to Signal's limit,
+  and Markdown becomes Signal's bold, italic, strikethrough and monospace.
+- **Policy.** A conversation's own entry applies; one with a `link` shares that
+  Slack channel's policy (any other keys in it are ignored, with a boot
+  warning). A conversation with no entry, or an entry holding only `mirror`,
+  falls back to `default_policy`, a DM included.
+- **One account, several agents.** Signal shows every agent on the account under its one
+  profile name (`account_name`, optional). The agent is told so, sees an @mention of the
+  account as `@<its label>`, and its replies are signed with its label by the gateway, so a
+  signature the model writes itself is dropped.
+- **`/help`.** A shared gateway answers a bare `/help` with the agents on the account.
+  `/help <label>` reaches the agent, which answers without the model: what it is, how to reach
+  it, and its GitHub repositories and whether it asks before changing anything there. No paths:
+  anyone the gateway lets in can ask. Any other `/help ...` is a normal turn. Release announcements on Signal end with a line saying the same.
+- **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
+  People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
+  the profile name they chose, since anyone can call themselves anything.
+- **Approvals are text.** A card names the request id. If a trusted user's
+  whole message is `approve <id>` or `deny <id>`, it resolves the request the
+  way a button click does on Slack, and the task carries on (#169). The
+  model's approve tool still works in a normal turn.
+- **Mirroring** is off by default. With `mirror: true`, the question and the
+  final answer of each turn are copied to the linked side, in both
+  directions. Cards stay where they were posted, so each request is answered
+  in the one place it can be resolved.
+- **Restarts.** The poll position is kept in the state file, so messages that
+  arrive during a restart are answered once it is back.
 
 ## How it decides what to run
 

@@ -1016,8 +1016,8 @@ only the messages addressed to this one.
   and Markdown becomes Signal's bold, italic, strikethrough and monospace.
 - **Policy.** A conversation's own entry applies; one with a `link` shares that
   Slack channel's policy (any other keys in it are ignored, with a boot
-  warning). A conversation with no entry, or an entry holding only `link` and
-  `mirror`, falls back to `default_policy`, a DM included.
+  warning). A conversation with no entry, or an entry holding only `mirror`,
+  falls back to `default_policy`, a DM included.
 - **One account, several agents.** Signal shows every agent on the account under its one
   profile name (`account_name`, optional). The agent is told so, sees an @mention of the
   account as `@<its label>`, and its replies are signed with its label by the gateway, so a

@@ -64,6 +64,7 @@ def _thread_context(client, channel, thread_ts, cur_ts):
 # parked requests they serve -- a restart drops both together.
 _TASK_FILES = {}
 _TASK_FILES_MAX = 200
+_TASK_FILES_PER_THREAD = 10
 _FILE_REF_KEYS = ("name", "mimetype", "url_private_download", "url_private")
 
 
@@ -85,8 +86,9 @@ def _remember_files(channel, thread_ts, files):
         if not busy:
             held = []
         seen = {r.get("url_private_download") or r.get("url_private") for r in held}
-        _TASK_FILES[key] = held + [r for r in refs
-                                   if (r.get("url_private_download") or r.get("url_private")) not in seen]
+        merged = held + [r for r in refs
+                         if (r.get("url_private_download") or r.get("url_private")) not in seen]
+        _TASK_FILES[key] = merged[-_TASK_FILES_PER_THREAD:]   # one resume reads them all
         if len(_TASK_FILES) > _TASK_FILES_MAX:
             del _TASK_FILES[next(iter(_TASK_FILES))]
     elif not busy:

@@ -10,7 +10,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_sdk.errors import SlackApiError
 
-from . import admin_tools, announce, approvals, attachments, build, config, diag, gateway_app, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, diag, gateway_app, gitcfg, handler, identity, learning, llm, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
 from .surface import SlackSurface
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
@@ -509,6 +509,16 @@ def _turn(event, say, client, logger):
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
     _post_pending(client, channel, thread_ts)
+    # A rung found dead during this or an earlier turn (#353), told once, as its
+    # own post so a mirror never carries it. Only in a trusted user's turn: an
+    # operator notice belongs to an operator, not a client channel, a stranger's
+    # DM or a Signal group. Until then it waits in the state file.
+    if admin_tools.is_trusted(asker):
+        try:
+            for notice in llm.claim_dead_notices():
+                say(thread_ts=thread_ts, **_reply_payload(notice))
+        except Exception:  # noqa: BLE001 -- the ERROR log line already has it
+            logging.exception("could not post a dead-rung notice")
     # The question and the answer, into linked gateway conversations that
     # mirror this channel (#336). Off unless configured.
     gateway_app.mirror_in(channel, event.get("text", ""), reply)

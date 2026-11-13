@@ -498,12 +498,13 @@ def _turn(event, say, client, logger):
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, surface=SlackSurface(client), attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
-        # Both paths are scrubbed: a provider exception can carry the request it
-        # failed on, api_key and Authorization header included (#72). The log
-        # side is covered by redact.install_logging(), which scrubs the rendered
-        # traceback too.
-        logger.exception("handler failed")
-        reply = redact.scrub(f":warning: shmobster error: {exc}")
+        # The exception goes to the log only (#352). A router failure's text is
+        # the whole multi-provider dump -- deployment hashes, fallback groups,
+        # vendor JSON with account ids -- which nobody in the channel can act on
+        # and the operator reads in the log anyway. The log side is scrubbed by
+        # redact.install_logging(), the traceback included (#72).
+        logger.exception("handler failed: channel=%s thread=%s", channel, thread_ts)
+        reply = handler.failure_line(exc)
     say(thread_ts=thread_ts, **_reply_payload(reply))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
@@ -631,7 +632,7 @@ def main():
         delivered = 0
         for channel in config.CHANNELS:
             try:
-                app.client.chat_postMessage(channel=channel, text=text)
+                app.client.chat_postMessage(channel=channel, **_reply_payload(text))   # Markdown (#397)
                 delivered += 1
             except Exception:
                 logging.exception(

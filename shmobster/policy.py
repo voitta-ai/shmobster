@@ -16,10 +16,11 @@ from . import config, spine
 def resolve(channel):
     # A gateway conversation linked to a Slack channel shares that channel's
     # policy (#336): one capability envelope, set in one place.
-    # `link` and `mirror` are routing, not envelope: an entry holding only them
-    # has no policy of its own and falls back to default_policy, as an absent one
-    # does. Read truthily, `{"mirror": false}` would be an empty envelope -- no
-    # github_repos bound at all -- which is wider than the default.
+    # `link` and `mirror` are routing, not envelope. A `link` is followed first,
+    # to the linked channel's policy; an entry left with nothing else (mirror
+    # only) has no policy of its own and falls back to default_policy, as an
+    # absent one does. Read truthily, `{"mirror": false}` would be an empty
+    # envelope -- no github_repos bound at all -- which is wider than the default.
     channel = linked(channel) or channel
     own = {k: v for k, v in (config.CHANNEL_POLICIES.get(channel) or {}).items() if k not in ROUTING_KEYS}
     retval = own or config.DEFAULT_POLICY

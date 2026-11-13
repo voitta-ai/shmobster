@@ -331,7 +331,7 @@ _HELP = re.compile(r"^\s*/help\s+@?(\S+)\s*$", re.IGNORECASE)
 def _help(data):
     """The channel when the message is `/help <this agent>`. Any other `/help x`
     goes to the model: a gateway that is older or not shared passes those on."""
-    m = _HELP.match(_text(data))
+    m = _HELP.match(_unaddressed(_text(data)))      # "@Ada /help ada" too
     me = {n.lower() for n in (config.AGENT_LABEL, config.GATEWAY_CONSUMER) if n}
     retval = channel_of(data) if m and m.group(1).lower() in me else None
     return retval
@@ -585,6 +585,8 @@ def conversations(timeout=30):
 
 def announce(text):
     """Post into every listed gateway conversation; how many accepted it."""
+    if not config.GATEWAY_URL:                      # no gateway: nothing to ask, nothing to log
+        return 0
     me = config.AGENT_LABEL or "an agent"
     text += (f"\n\n_I'm {me}, one of the agents on this account. Start a message with "
              f"\"{me.lower()}\" or mention the account; /help lists who's here._")

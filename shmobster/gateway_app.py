@@ -197,10 +197,16 @@ class GatewaySurface(Surface):
         return retval
 
     def self_line(self):
+        account = f" (its profile name is {config.GATEWAY_ACCOUNT_NAME})" if config.GATEWAY_ACCOUNT_NAME else ""
+        me = config.AGENT_LABEL or "you"
         retval = (
-            f"On {self.medium.title()} you share one account with other agents; the gateway "
-            "hands you only the messages addressed to you, by quote, by your name, or "
-            "by the conversation's default. A message you are reading is for you."
+            f"On {self.medium.title()} you share one account with other agents{account}. People "
+            f"reach you by @mentioning the account (you see that as @{me}), by saying your name, "
+            "or by quoting one of your messages; the gateway hands you only the messages "
+            f"addressed to you, so a message you are reading is for you. Your replies there are "
+            f"signed \"{me}:\" for you -- do not sign them yourself, and if someone asks who "
+            f"\"{config.GATEWAY_ACCOUNT_NAME or 'the account'}\" is, it is the shared account, "
+            f"and you are {me} on it."
         )
         return retval
 
@@ -209,12 +215,32 @@ class GatewaySurface(Surface):
         return retval
 
 
+_MARK = "\ufffc"
+
+
+def _mentioned(text, mentions):
+    """Signal puts each @mention on one U+FFFC. A mention of this account reads as
+    @<agent label> -- the account's profile name is shared by every agent on it, and
+    the model knows itself by its label -- and anyone else as @someone."""
+    units = text.encode("utf-16-le")
+    for m in sorted(mentions, key=lambda m: m.get("start") or 0, reverse=True):
+        at = m.get("start")
+        if not isinstance(at, int) or units[2 * at:2 * at + 2] != _MARK.encode("utf-16-le"):
+            continue
+        name = f"@{config.AGENT_LABEL or 'me'}" if m.get("self") else "@someone"
+        units = units[:2 * at] + name.encode("utf-16-le") + units[2 * at + 2:]
+    retval = units.decode("utf-16-le").replace(_MARK, "@someone")
+    return retval
+
+
 def _text(data):
     """The message as text: text parts, and voice notes by their transcript."""
     pieces, unread = [], []
+    mentions = data.get("mentions") or []
     for p in data.get("parts") or []:
         if p.get("type") == "text":
-            pieces.append(p.get("text", ""))
+            pieces.append(_mentioned(p.get("text", ""), mentions))
+            mentions = []                         # offsets are into the message's one text part
         elif p.get("transcript"):
             pieces.append(f"[voice note] {p['transcript']}")
         elif p.get("type") == "file":

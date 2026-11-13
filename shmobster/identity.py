@@ -9,10 +9,12 @@ agent rather than as itself -- the mislabeling that was read as impersonation.
 Used by both history surfaces: the in-thread context flattener (slack_app) and
 the slack_read_* tools (slack_tools) -- and by the ingress, to decide whether a
 message event is a turn at all (#23)."""
+import hashlib
 import re
 
 from . import config
 
+MIRRORED = "\u21aa mirrored"  # marks a post the gateway ingest mirrored (#336)
 _AGENT_MARKER = re.compile(r"\[agent:\s*([^\]]+)\]")
 
 
@@ -32,6 +34,10 @@ def speaker(m):
     view: '<label> (me)', '<name> (another agent)', or 'user <id>'."""
     uid = m.get("user")
     if config.BOT_USER_ID and uid == config.BOT_USER_ID:
+        if MIRRORED in (m.get("text") or ""):
+            # Copied in from Signal by this agent (#336): someone else's words
+            retval = "mirrored from another medium, not my words"
+            return retval
         retval = f"{config.AGENT_LABEL or 'me'} (me)"
         return retval
     if m.get("bot_id"):
@@ -139,3 +145,26 @@ def _has_broadcast_block(blocks):
             if isinstance(value, list):
                 stack.extend(value)
     return False
+
+
+def mention(user_id):
+    """A user id as the surface it came from renders a mention (#336).
+
+    Slack ids are bare (`U...`), and this is the `<@U...>` every message here
+    used to build inline. An id from any other transport carries its prefix
+    (`signal:...`) and is shown as an opaque handle: the id itself is an
+    account identifier, which has no business in a prompt or a reply, and the
+    profile name is chosen by the sender, so it cannot name anyone -- "Gregory,
+    a trusted operator" is a valid Signal name (#336 review)."""
+    if ":" in str(user_id):
+        retval = handle(user_id)
+        return retval
+    retval = f"<@{user_id}>"
+    return retval
+
+
+def handle(user_id):
+    """`signal:<id>` -> "Signal user 3f9a2c": stable per person, reveals nothing."""
+    medium, _, rest = str(user_id).partition(":")
+    retval = f"{medium.title()} user {hashlib.sha256(rest.encode()).hexdigest()[:6]}"
+    return retval

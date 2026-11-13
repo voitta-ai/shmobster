@@ -56,6 +56,47 @@ _LANG = tree_sitter.Language(tree_sitter_bash.language())
 # reads it; when it does not, an unattended git subcommand that contacts a
 # remote resolves that remote's configured URL instead (#253).
 _URL_IN_TEXT = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://")
+# `git config` that only reads, as an allowlist: a lookup or listing, with the
+# scope and display options. A value, --unset, --add, --edit and the rest all
+# write, and every option outside this set is refused rather than judged.
+_GIT_CONFIG_SCOPE = frozenset((
+    "--global", "--local", "--system", "--worktree", "--show-origin",
+    "--show-scope", "--name-only", "--null", "-z", "--includes", "--no-includes",
+    "--bool", "--int", "--path",
+))
+_GIT_CONFIG_GETS = frozenset(("--get", "--get-all", "--get-regexp"))
+
+
+def _git_config_refusal(rest):
+    """Why this `git config` is not a read, or None."""
+    if None in rest:
+        return "git config: an argument is not a literal"
+    words = list(rest)
+    mode = None
+    if words[:1] in (["get"], ["list"]):  # git 2.46+ subcommand form
+        mode = words.pop(0)
+    positionals = []
+    for w in words:
+        if w in _GIT_CONFIG_GETS or w in ("--list", "-l"):
+            mode = mode or w
+        elif w in _GIT_CONFIG_SCOPE or w.startswith("--type="):
+            continue
+        elif w.startswith("-"):
+            return f"git config: option {w}"
+        else:
+            positionals.append(w)
+    if mode in ("list", "--list", "-l"):
+        ok = not positionals
+    elif mode is not None:
+        ok = 1 <= len(positionals) <= 2
+    else:
+        ok = len(positionals) == 1
+    retval = None if ok else "git config: only a lookup or a listing is a read"
+    return retval
+_GIT_NET_RISKY = frozenset((
+    "--repo", "--upload-pack", "--receive-pack", "--exec", "--config",
+    "--template", "--reference", "--separate-git-dir",
+))
 _GIT_NET_SUBS_LOCAL = frozenset(("clone", "fetch", "pull", "push", "ls-remote", "submodule"))
 
 # Filesystem writes the sandbox confines to the tree.
@@ -130,16 +171,20 @@ _UNATTENDED_GH_NOUNS = frozenset((
 # all four mutate. Reproducing that set would re-import the holes #148 closed.
 #
 # The bar for entry is that no flag turns the command into a write. That is why
-# `sort` (-o), `uniq` (output positional), `date` (-s), `hostname` (sets it),
-# `find` (-delete, -exec) and `xargs` (runs its argument) are absent, and why
+# `sort` (-o), `uniq` (output positional), `date` (-s; flag-checked below), `hostname` (sets it),
+# `find` (-delete, -exec), `rg` (runs a preprocessor) and `xargs` (runs its
+# argument) are absent, and why
 # `awk` is absent despite reading: its program can call system() (it is checked
 # against an allowlist in FLAG_CHECKED_READS instead), and `tree` is
 # absent because -o writes its output to a file. `sed` is in FS_VERBS already,
 # as the writer -i makes it.
 READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
-    "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep", "rg",
-    "jq", "id", "uname", "printenv", "ps",
+    "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
+    "jq", "id", "whoami", "uname", "printenv", "ps",
+    # Print-only builtins and a pause. `printf` is absent: its numeric
+    # conversions are not a plain print.
+    "echo", "pwd", "true", "sleep",
 ))
 
 # Reads that stay reads unless a named flag turns them into something else
@@ -173,7 +218,7 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date"))
 
 
 def _find_refusal(texts):
@@ -182,23 +227,57 @@ def _find_refusal(texts):
     return retval
 
 
-def _sort_refusal(texts):
-    """`sort` writes only through -o/--output, and every spelling of it.
+# The ripgrep options that run a named program. `--pretty` shares a prefix and
+# prints.
+_RG_RUNS = frozenset(("--pre", "--hostname-bin"))
 
-    The attached and bundled forms are the point: `sort -o out f`, `sort -oout`
-    and `sort -uo out` all redirect the result into a file, and only the first
-    is caught by comparing against "-o". So any single-dash cluster containing
-    an `o` is refused -- `-u`, `-n`, `-r` and the rest survive, and a cluster
-    that merely looks unfamiliar is refused rather than guessed at."""
-    retval = None
-    for t in texts:
-        if t == "--output" or t.startswith("--output="):
-            retval = f"sort: flag {t.split('=')[0]}"
-            break
-        if t.startswith("-") and not t.startswith("--") and "o" in t[1:]:
-            retval = f"sort: flag {t} redirects the result into a file"
-            break
+
+def _rg_refusal(texts):
+    hit = next((t for t in texts if t.split("=")[0] in _RG_RUNS), None)
+    # -z / --search-zip runs decompressors found on PATH. A short cluster is
+    # refused whenever it holds a z, attached values included.
+    zipped = next((t for t in texts if t == "--search-zip"
+                   or t.startswith("-") and not t.startswith("--") and "z" in t), None)
+    retval = (f"rg: flag {hit.split('=')[0]}" if hit
+              else f"rg: {zipped} searches compressed files" if zipped else None)
     return retval
+
+
+# `sort` as an allowlist. Its writers and program runners differ between
+# implementations, and long options can be abbreviated, so a deny list has to
+# know every spelling of every one. These are the ordering and field options;
+# anything else cards.
+_SORT_FLAGS = frozenset("bcCdfghiMmnRrsuV")
+_SORT_VALUE_FLAGS = frozenset("kt")
+_SORT_LONG = frozenset((
+    "--check", "--dictionary-order", "--field-separator", "--general-numeric-sort",
+    "--human-numeric-sort", "--ignore-case", "--ignore-leading-blanks",
+    "--ignore-nonprinting", "--key", "--merge", "--month-sort", "--numeric-sort",
+    "--random-sort", "--reverse", "--stable", "--unique", "--version-sort",
+))
+_SORT_LONG_VALUE = frozenset(("--key", "--field-separator"))
+
+
+def _sort_refusal(texts):
+    """`sort` with only ordering and field options, and any files."""
+    i = 0
+    while i < len(texts):
+        t = texts[i]
+        i += 1
+        if t.startswith("--"):
+            if t.split("=")[0] not in _SORT_LONG:
+                return f"sort: option {t.split('=')[0]}"
+            if t in _SORT_LONG_VALUE:
+                i += 1
+        elif t.startswith("-") and len(t) > 1:
+            for k, ch in enumerate(t[1:], 1):
+                if ch in _SORT_VALUE_FLAGS:
+                    if k == len(t) - 1:
+                        i += 1  # its value is the next word
+                    break
+                if ch not in _SORT_FLAGS:
+                    return f"sort: option -{ch}"
+    return None
 
 
 # awk is a language, so it is checked against an allowlist of what its program
@@ -305,10 +384,76 @@ def _awk_refusal(texts):
     return retval
 
 
-_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal}
+# `date` prints a time unless it is asked to set one, and what counts as asking
+# differs by implementation. BSD getopt stops at the first non-option and BSD
+# then treats a following word as the time to set, where GNU permutes; a `+`
+# word is the format only in BSD's first position; and without `-j`, BSD's `-f`
+# exists only to parse a time to set. So this reads the strictest common shape:
+# allowlisted options first, nothing dash-shaped after them, and then either
+# `-j` among those options (parse, never set) or at most one `+format`. The
+# conversions an agent reaches for -- `date -u -r 1770068151`, `date -d @1770068151`,
+# `date -j -f %s 1770068151 +%F` -- used to card.
+_DATE_FLAGS = frozenset("uRjn")
+_DATE_VALUE_FLAGS = frozenset("rdvfz")
+_DATE_LONG = frozenset((
+    "--utc", "--universal", "--rfc-email", "--rfc-2822", "--iso-8601",
+    "--rfc-3339", "--debug", "--help", "--version", "--date", "--reference",
+    "--file",
+))
+_DATE_LONG_VALUE = frozenset(("--date", "--reference", "--file"))
+
+
+def _date_refusal(texts):
+    """`date` whose words read the same to BSD and GNU, and print on both."""
+    no_set = False
+    parses_input = False
+    i = 0
+    while i < len(texts) and texts[i].startswith("-") and len(texts[i]) > 1:
+        t = texts[i]
+        i += 1
+        if t.startswith("--"):
+            if t.split("=")[0] not in _DATE_LONG:
+                return f"date: option {t}"
+            if t in _DATE_LONG_VALUE:
+                i += 1
+            continue
+        for k, ch in enumerate(t[1:], 1):
+            if ch == "j":
+                no_set = True
+            if ch in _DATE_FLAGS:
+                continue
+            if ch == "I":
+                break  # -I[FMT]: the rest of the word is its argument
+            if ch in _DATE_VALUE_FLAGS:
+                parses_input = parses_input or ch == "f"
+                if k == len(t) - 1:
+                    i += 1  # its value is the next word
+                break
+            return f"date: option -{ch}"
+    rest = texts[i:]
+    if any(t.startswith("-") and len(t) > 1 for t in rest):
+        return "date: an option after a positional reads differently on BSD and GNU"
+    if no_set:
+        return None
+    if parses_input:
+        return "date: -f without -j sets the clock"
+    setting = rest[1:] if rest[:1] and rest[0].startswith("+") else rest
+    if setting:
+        return f"date: {setting[0]} would set the clock"
+    return None
+
+
+_FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
+                 "rg": _rg_refusal, "date": _date_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
-_VERSION_ONLY = frozenset(("python", "python3"))
+# Each interpreter's own spelling of the version flag: `node -v` is version,
+# `python -v` is verbose, so the flags are per interpreter.
+_VERSION_ONLY = {
+    "python": ("--version", "-V"),
+    "python3": ("--version", "-V"),
+    "node": ("--version", "-v"),
+}
 
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
@@ -450,8 +595,10 @@ GIT_READ = frozenset((
     # `merge-base` has no writing form: --is-ancestor, --fork-point, --octopus,
     # --independent and -a only change what it answers. Its absence cost a card
     # for `git merge-base --is-ancestor A B`, and took every other segment of
-    # the command with it.
-    "merge-base", "for-each-ref",
+    # the command with it. `rev-list` is the same question counted (`--count
+    # A..B`); it takes revision options only, and the diff family's `--output`
+    # is refused for every subcommand below anyway.
+    "merge-base", "for-each-ref", "rev-list",
 ))
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways
@@ -616,6 +763,9 @@ _CONTAINERS = frozenset(("program", "list", "pipeline"))
 _SKIP = frozenset(("&&", "||", ";", "|", "&", "\n", ";;", "comment"))
 
 _DEV_OK = frozenset(("/dev/null", "/dev/stdout", "/dev/stderr"))
+_TEXT_SCOPED = frozenset(("git", "gh", "aws", "npm"))
+_SYSTEM_BIN = frozenset(("", "/bin", "/usr/bin", "/sbin", "/usr/sbin",
+                         "/usr/local/bin", "/opt/homebrew/bin"))
 
 # `<` is the only redirect operator that does not write. Anything else, and
 # anything unrecognized, counts as a write -- the fail-closed direction.
@@ -655,6 +805,15 @@ def _fd_dup(node):
     return retval
 
 
+def _stdout_write(node):
+    """True for a `>` or `>>` file redirect of standard output."""
+    ops = [c.type for c in node.children]
+    fds = [c for c in node.children if c.type == "file_descriptor"]
+    retval = (any(op in (">", ">>") for op in ops)
+              and all(c.text in (b"1",) for c in fds))
+    return retval
+
+
 def _reads_only(node):
     retval = any(c.type in _READ_REDIRECT for c in node.children)
     return retval
@@ -689,6 +848,108 @@ def _unquote(text):
     return retval
 
 
+def _literal_word(node, src):
+    """The word bash ends up with, when that takes no shell rules beyond quote
+    removal to work out, else None. A check has to read what the command gets
+    rather than what the source looks like, so quoted pieces are joined, and
+    anything with a glob, a brace or an escape is not read at all. The escaped
+    parentheses and `!` of a `find` expression are the one exception."""
+    text = _text(node, src)
+    retval = None
+    if node.type == "raw_string":
+        retval = text[1:-1]
+    elif node.type in ("word", "number"):
+        if text in ("\\(", "\\)", "\\!"):
+            retval = text[1:]
+        elif not any(ch in text for ch in "\\{*?["):
+            retval = text
+    elif (node.type == "string" and "\\" not in text
+          and all(c.type in ('"', "string_content") for c in node.children)):
+        retval = text[1:-1]
+    elif node.type == "concatenation" and _contiguous(node):
+        parts = [_literal_word(c, src) for c in node.children]
+        retval = "".join(parts) if all(p is not None for p in parts) else None
+    return retval
+
+
+def _contiguous(node):
+    """True when the parts of a word touch: nothing, not even a line
+    continuation, sits between them."""
+    kids = node.children
+    retval = all(a.end_byte == b.start_byte for a, b in zip(kids, kids[1:]))
+    return retval
+
+
+def _glob_text(node, src):
+    """A word as written, globs and all, when quote removal is the only other
+    rule it needs; else None."""
+    text = _text(node, src)
+    retval = None
+    if node.type in ("word", "number"):
+        retval = text if "\\" not in text else None
+    elif node.type == "concatenation" and _contiguous(node):
+        parts = [_glob_text(c, src) for c in node.children]
+        retval = "".join(parts) if all(p is not None for p in parts) else None
+    else:
+        retval = _literal_word(node, src)
+    return retval
+
+
+def _arg_word(node, src):
+    """An argument as the command gets it, for checks that compare it with
+    option names; None when that cannot be read. A glob is kept as written
+    when it starts with a literal character other than a dash: every word it
+    can expand to starts with that character, so none of them is an option."""
+    retval = _literal_word(node, src)
+    if retval is None:
+        text = _glob_text(node, src)
+        if text and text[0] not in "-*?[{":
+            retval = text
+    return retval
+
+
+def _is_device(target, tracked=None):
+    """True for a path under /dev, however it is spelled, including relative to
+    the tracked directory."""
+    t = os.path.normpath(_resolve(target, tracked) or target)
+    t = "/" + t.lstrip("/") if t.startswith("/") else t
+    retval = t == "/dev" or t.startswith("/dev/")
+    return retval
+
+
+# A heredoc is granted only in the shapes where bash and tree-sitter provably
+# agree on where it ends and what its text does: a plain delimiter or a wholly
+# quoted one, and a closing line that is the delimiter and nothing else. In an
+# unquoted body, anything the parser does not model is refused from the raw
+# bytes, because a node that is not in the tree cannot be walked.
+_HEREDOC_OPEN = frozenset(("<<", "<<-", "heredoc_start", "heredoc_body", "heredoc_end"))
+_HEREDOC_DELIM = re.compile(r"""[A-Za-z0-9_]+|'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+\"""")
+_HEREDOC_UNSAFE = (b"`", b"$(", b"\\\n")
+
+
+def _heredoc_refusal(c, src):
+    """Why this heredoc's extent or body cannot be trusted, or None."""
+    kinds = {k.type: k for k in c.children}
+    start = kinds.get("heredoc_start")
+    end = kinds.get("heredoc_end")
+    if start is None or end is None:
+        return "heredoc without an opening or closing delimiter"
+    raw = _text(start, src)
+    if not _HEREDOC_DELIM.fullmatch(raw):
+        return "heredoc delimiter is not plain or wholly quoted"
+    delim = _unquote(raw).encode()
+    clean = (lambda ln: ln.lstrip(b"\t")) if "<<-" in kinds else (lambda ln: ln)
+    last = src.rfind(b"\n", 0, end.start_byte) + 1
+    if clean(src[last:end.end_byte]) != delim or src[end.end_byte:end.end_byte + 1] not in (b"", b"\n"):
+        return "heredoc closing line is not its delimiter"
+    body = src[src.find(b"\n", start.end_byte) + 1:last]
+    if any(clean(ln) == delim for ln in body.split(b"\n")):
+        return "heredoc delimiter appears inside its body"
+    if raw == _unquote(raw) and any(tok in body for tok in _HEREDOC_UNSAFE):
+        return "command substitution in a heredoc or herestring"
+    return None
+
+
 def _resolve(target, tracked):
     """A literal path against the tracked directory, or None."""
     retval = None
@@ -721,6 +982,8 @@ class _Walker:
         # granted for something other than a read (#327); `check` refuses both.
         self.vercel_seen = False
         self.other_effect = False
+        # Raised while walking a single command whose stdin is a heredoc.
+        self.heredoc_stdin = False
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -753,6 +1016,11 @@ class _Walker:
         its command, and bash writes the file either way, so the two parse
         shapes have to reach the same verdict or the rule is decoration (#213).
         """
+        # Words after the target belong to the command, whatever node the
+        # parser hangs them on, and nothing here reads them as arguments.
+        dests = c.children_by_field_name("destination")
+        if len(dests) > 1 or (dests and any(k.type in _CLOSE_OPS for k in c.children)):
+            return ("words after a redirect target are not grantable", None)
         # No path, nothing to judge: not a device, not in the tree, not a
         # write. Checked before the destination is read at all, because for
         # `2>&1` the "destination" is the number 1.
@@ -761,8 +1029,16 @@ class _Walker:
         dest = c.children[-1] if c.children else None
         if dest is None or not _static(dest):
             return ("redirect target is not a literal", None)
-        target = _unquote(_text(dest, self.src))
-        if target.startswith("/dev/") and target not in _DEV_OK:
+        target = _literal_word(dest, self.src)
+        if target is None:
+            return ("redirect target is not a plain literal", None)
+        # `~+` and `~-` expand to directories `cd` chose, so only the home form
+        # can be read from here.
+        if target.startswith("~") and target != "~" and not target.startswith("~/"):
+            return ("redirect target is not a plain literal", None)
+        if self.tracked is None and not os.path.isabs(os.path.expanduser(target)):
+            return ("redirect target is relative to a directory this cannot read", None)
+        if _is_device(target, self.tracked) and target not in _DEV_OK:
             return (f"redirect to device {target}", None)
         # A read verb stops being a read when its output lands in a file
         # (#177). YOLT cannot tell us this -- `cat x`, `cat x > out.txt` and
@@ -772,12 +1048,42 @@ class _Walker:
         retval = (None, not _reads_only(c) and target not in _DEV_OK)
         return retval
 
+    def stdin_redirect(self, c):
+        """One heredoc or herestring judged: (refusal, writes_a_file, trailing).
+
+        Their text is expanded by bash exactly as an argument is, so it answers
+        to the same rule as an argument. What follows a heredoc's opening word
+        on its line hangs under this node: a redirect answers to
+        `redirect_write`, and the rest of a pipeline or list is returned for
+        the caller to walk after the command it follows, in source order."""
+        trailing = []
+        if not _no_substitution(c):
+            return ("command substitution in a heredoc or herestring", None, trailing)
+        writes = False
+        if c.type == "heredoc_redirect":
+            refusal = _heredoc_refusal(c, self.src)
+            if refusal is not None:
+                return (refusal, None, trailing)
+            for part in c.children:
+                if part.type == "file_redirect":
+                    refusal, redirect_writes = self.redirect_write(part)
+                    if refusal is not None:
+                        return (refusal, None, trailing)
+                    writes = writes or redirect_writes
+                elif part.type in ("command", "pipeline", "list", "redirected_statement"):
+                    trailing.append(part)
+                elif part.type not in _HEREDOC_OPEN and part.type not in ("|", "&&", "||"):
+                    return (f"{part.type} after a heredoc is not grantable", None, trailing)
+        return (None, writes, trailing)
+
     def redirected(self, node):
         """A command, pipeline or list with redirects. The body is judged as
         usual; the redirect is an in-tree write the sandbox confines, unless
         it names a device other than the three harmless ones."""
         body = None
         writes = False
+        trailing = []
+        redirects = []
         for c in node.children:
             if c.type in ("command", "pipeline", "list"):
                 body = c
@@ -786,14 +1092,36 @@ class _Walker:
                 if refusal is not None:
                     return (False, refusal)
                 writes = writes or redirect_writes
+                redirects.append(c)
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
-                continue
+                refusal, redirect_writes, more = self.stdin_redirect(c)
+                if refusal is not None:
+                    return (False, refusal)
+                writes = writes or redirect_writes
+                trailing.extend(more)
             else:
                 return (False, f"{c.type} under a redirect is not grantable")
         if body is None:
             return (False, "redirect without a command")
         before = len(self.reasons)
         saved = self.writes_file
+        saved_heredoc = self.heredoc_stdin
+        # `cat > f <<EOF` is how an agent writes a file. The heredoc was judged
+        # above, so a lone `cat` reading it is the same write `tee f` is.
+        # Only when the heredoc is the sole stdin and stdout is what lands in
+        # the file: bash takes the last stdin redirect, so a `<` beside it
+        # would make this a file copy (#177), and a stderr redirect writes
+        # nothing of cat's output.
+        # A redirect written after the heredoc's opening word hangs under the
+        # heredoc node, so its children count too.
+        kids = list(node.children) + list(body.children)
+        kids += [k for c in node.children if c.type == "heredoc_redirect" for k in c.children]
+        self.heredoc_stdin = (
+            body.type == "command"
+            and sum(c.type == "heredoc_redirect" for c in kids) == 1
+            and not any(c.type == "herestring_redirect" or c.type == "file_redirect" and _reads_only(c)
+                        for c in kids)
+            and any(c.type == "file_redirect" and _stdout_write(c) for c in kids))
         self.writes_file = self.writes_file or writes
         if writes:
             # A redirect writes before a later segment runs, which is the same
@@ -802,8 +1130,20 @@ class _Walker:
             self.other_effect = True
         retval = self.walk(body)
         self.writes_file = saved
+        self.heredoc_stdin = saved_heredoc
+        if retval[0]:
+            # A redirect after a list opens its file once the list's `cd`s
+            # have run, so the directory is judged again where it now stands.
+            for c in redirects:
+                refusal, _ = self.redirect_write(c)
+                if refusal is not None:
+                    return (False, refusal)
         if retval[0] and len(self.reasons) > before:
             self.reasons[-1] += " > redirect"
+        for part in trailing:
+            if not retval[0]:
+                break
+            retval = self.walk(part)
         return retval
 
     def argv(self, node):
@@ -815,7 +1155,12 @@ class _Walker:
             if c.type == "command_name":
                 if not _static(c):
                     return (None, [])
-                verb = os.path.basename(_unquote(_text(c, self.src)))
+                # A path outside the system's own directories is some other
+                # program that shares a name with a verb, so it keeps its path
+                # and matches nothing here.
+                verb = _unquote(_text(c, self.src))
+                if os.path.dirname(verb) in _SYSTEM_BIN:
+                    verb = os.path.basename(verb)
             elif c.type == "variable_assignment":
                 return (None, [])
             elif c.type == "heredoc_body":
@@ -857,6 +1202,21 @@ class _Walker:
                 if refusal is not None:
                     return (False, refusal)
                 self.writes_file = self.writes_file or writes
+            elif c.type in ("heredoc_redirect", "herestring_redirect"):
+                refusal, writes, more = self.stdin_redirect(c)
+                if refusal is not None:
+                    return (False, refusal)
+                if more:
+                    return (False, "a statement after a heredoc here is not grantable")
+                self.writes_file = self.writes_file or writes
+            elif c.type == "heredoc_body" and not _no_substitution(c):
+                return (False, "command substitution in a heredoc or herestring")
+        # Two parser words with only line continuations between them are one
+        # word to bash, and every check below would read it as two.
+        for a, b in zip(node.children, node.children[1:]):
+            gap = self.src[a.end_byte:b.start_byte]
+            if gap and not gap.replace(b"\\\n", b""):
+                return (False, "a line continuation joins two words")
         verb, args = self.argv(node)
         if verb is None:
             return (False, "command with a prefix or a non-literal name")
@@ -866,6 +1226,16 @@ class _Walker:
         # segments that fall through to it, so the check is unconditional.
         if not all(_no_substitution(a) for a in args):
             return (False, f"{verb}: command substitution in arguments")
+        # Scope checks for these (`_check_github`, `_check_aws`) read
+        # the command's text, so an option has to be spelled the way the
+        # command receives it, or the check and the command see two commands.
+        # Its value may be quoted as usual.
+        if verb in _TEXT_SCOPED:
+            for a in args:
+                word = _literal_word(a, self.src)
+                name = (word or "").split("=")[0]
+                if name.startswith("-") and not _text(a, self.src).startswith(name):
+                    return (False, f"{verb}: option {name} is quoted or escaped")
         if verb == "cd":
             retval = self.cd(args)
         elif self.unattended and verb in UNATTENDED_VERBS:
@@ -885,6 +1255,8 @@ class _Walker:
             retval = (True, f"{verb}: unattended channel") if allowed else (False, why)
         elif verb in FS_VERBS:
             retval = (True, f"{verb}: in-tree write")
+        elif verb == "cat" and self.writes_file and self.heredoc_stdin and not args:
+            retval = (True, "cat: heredoc into an in-tree file")
         elif verb == "git":
             retval = self.git(args)
         elif verb == "gh":
@@ -900,8 +1272,14 @@ class _Walker:
         elif verb in READ_VERBS and not self.writes_file:
             retval = (True, f"{verb}: read-only")
         elif (verb in _VERSION_ONLY and not self.writes_file and len(args) == 1
-              and _text(args[0], self.src) in ("--version", "-V")):
+              and _text(args[0], self.src) in _VERSION_ONLY[verb]):
             retval = (True, f"{verb} --version: read-only")
+        elif (verb == "node" and not self.writes_file and len(args) == 2
+              and _text(args[0], self.src) in ("--check", "-c")
+              and (_literal_word(args[1], self.src) or "-")[0] != "-"):
+            # Parses the one file and exits; no other option, so nothing is
+            # preloaded and nothing runs.
+            retval = (True, "node --check: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
         else:
@@ -916,7 +1294,7 @@ class _Walker:
         shadowed = (f"{verb} reads, but this segment redirects output to a file"
                     if retval is None and (verb in READ_VERBS or verb in FLAG_CHECKED_READS)
                     else None)
-        if retval is None or (retval[0] is False and verb == "git"):
+        if retval is None:
             # The directory this segment would run in, never the agent
             # process's (#182): 2.0.x's deny predicates read it, and a
             # `cd` to a target we could not resolve falls back to the
@@ -924,16 +1302,10 @@ class _Walker:
             decision, reason = yolt_gate.classify(
                 text, cwd=self.tracked or self.start_dir,
             )
-            if decision == "safe":
-                # "Read-only" is about this machine, and a fetch is read-only
-                # here while being an effect out there (#149). Without this the
-                # layer that exists to vouch for local writes would vouch for
-                # `touch f && curl https://elsewhere/...`, one segment at a
-                # time, and hand back the grant the egress check just refused.
-                allowed, why = policy_mod.check_egress(text, self.policy)
-                retval = (True, f"{verb}: read-only") if allowed else (False, why)
-            elif retval is None:
-                retval = (False, shadowed or reason)
+            # Asked for the reason a card shows. This layer vouches by its own
+            # rules, so a segment none of them covers parks.
+            if retval is None:
+                retval = (False, shadowed or (f"no grant rule: {verb}" if decision == "safe" else reason))
         if retval[0]:
             self.reasons.append(retval[1])
             # A vercel grant reads .vercel/project.json now; a write elsewhere
@@ -964,7 +1336,14 @@ class _Walker:
             # or concatenated word, or a bare word with an escape, it does.
             retval = (False, "awk: an argument is not a plain word or single-quoted string")
             return retval
-        texts = [_unquote(_text(a, self.src)) for a in args]
+        # The deny lists compare words, so they have to be the words the
+        # command gets, not their spelling in the source. `date` counts its
+        # positionals, so a glob that could become several words is refused.
+        reader = _literal_word if verb == "date" else _arg_word
+        texts = [reader(a, self.src) for a in args]
+        if any(t is None for t in texts):
+            retval = (False, f"{verb}: an argument takes shell rules to read")
+            return retval
         why = _FLAG_REFUSAL[verb](texts)
         retval = (False, why) if why else (True, f"{verb}: read-only")
         return retval
@@ -991,8 +1370,12 @@ class _Walker:
         texts = []
         for a in args:
             raw = _text(a, self.src)
-            if _static(a):
-                texts.append(_unquote(raw))
+            word = _literal_word(a, self.src) if _static(a) else None
+            if word is not None:
+                texts.append(word)
+            elif _static(a):
+                retval = (False, f"{verb}: an argument takes shell rules to read")
+                return retval
             elif _quoted_non_flag(raw):
                 # The case this grant exists for: `-H "X-Api-Key: $TOKEN"`,
                 # where the credential comes from the channel's `env` and never
@@ -1035,7 +1418,12 @@ class _Walker:
         if not args:
             self.tracked = os.path.expanduser("~")
         elif len(args) == 1 and _static(args[0]):
-            self.tracked = _resolve(_unquote(_text(args[0], self.src)), self.tracked)
+            word = _literal_word(args[0], self.src)
+            # `~-` and `~+` are the previous and current directory, which a
+            # literal reading would take for a relative path.
+            known = word is not None and not (word.startswith("~") and word != "~"
+                                              and not word.startswith("~/"))
+            self.tracked = _resolve(word, self.tracked) if known else None
         else:
             self.tracked = None
         retval = (True, "cd")
@@ -1067,6 +1455,7 @@ class _Walker:
 
     def git(self, args):
         directory = self.tracked
+        self._git_globbed = False
         sub = None
         rest = []
         config_override = False
@@ -1077,9 +1466,12 @@ class _Walker:
         # a config).
         while i < len(args):
             a = args[i]
-            t = _text(a, self.src) if _static(a) else None
+            t = _literal_word(a, self.src) if _static(a) else None
             if sub is not None:
-                rest.append(t)
+                # A pathspec may glob; the word is still never an option.
+                globbed = t is None and _static(a) and _arg_word(a, self.src) is not None
+                rest.append(_arg_word(a, self.src) if globbed else t)
+                self._git_globbed = self._git_globbed or globbed
                 i += 1
                 continue
             if t is None:
@@ -1166,6 +1558,13 @@ class _Walker:
                 retval = (True, "git remote: listing")
             else:
                 retval = (False, "git remote: only the bare listing is read-only")
+        elif sub == "config" and not self.writes_file:
+            # Read strictly: a lookup and a set differ only in how many words
+            # follow, so a word that could expand into two cannot be judged.
+            strict = [_literal_word(a, self.src) if _static(a) else None
+                      for a in args[len(args) - len(rest):]]
+            why = _git_config_refusal(strict)
+            retval = (False, why) if why else (True, "git config: read")
         elif sub == "worktree" and not self.writes_file and not writes_flag:
             # `git worktree list` reads the same administrative file `git
             # worktree add` writes, and `add`, `remove`, `move`, `prune`,
@@ -1177,7 +1576,9 @@ class _Walker:
             else:
                 retval = (False, "git worktree: only `list` is read-only")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
-            retval = (True, f"git {sub}: read-only")
+            # A word this cannot read could be the output flag.
+            retval = ((False, f"git {sub}: an argument is not a literal")
+                      if None in rest else (True, f"git {sub}: read-only"))
         else:
             retval = (False, f"git {sub}: not a local write")
         return retval
@@ -1201,7 +1602,15 @@ class _Walker:
         if sub not in _GIT_NET_SUBS_LOCAL:
             retval = (True, f"git {sub}: unattended channel")
             return retval
-        name = next((r for r in rest if r and not r.startswith("-")), "origin")
+        if None in rest or self._git_globbed:
+            return (False, f"git {sub}: an argument is not a literal")
+        # Options that pick the destination themselves, or name a program to
+        # run for the transport. The remote read below would be the wrong one.
+        risky = next((r for r in rest if r.split("=")[0] in _GIT_NET_RISKY
+                      or (sub == "clone" and r in ("-u", "-c"))), None)
+        if risky:
+            return (False, f"git {sub}: option {risky.split('=')[0]}")
+        name = next((r for r in rest if not r.startswith("-")), "origin")
         url = self.probe.remote_url(directory, name)
         if not url:
             retval = (False, f"git {sub}: remote {name!r} does not resolve to a URL here")
@@ -1223,7 +1632,7 @@ class _Walker:
         retval = []
         skip = False
         for a in args:
-            t = _text(a, self.src) if _static(a) else None
+            t = _literal_word(a, self.src) if _static(a) else None
             if t is None:
                 return None
             if skip:

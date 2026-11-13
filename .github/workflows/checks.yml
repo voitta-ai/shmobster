@@ -4,15 +4,22 @@ on:
   pull_request:
   push:
     branches: [master]
+  # Advisories are published against versions that have not changed, so the
+  # audit also runs on its own clock rather than only when someone pushes.
+  schedule:
+    - cron: '17 13 * * *'
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -30,8 +37,19 @@ jobs:
       # transitively -- aiohttp, through litellm and slack-sdk -- so nothing in
       # this repo chose its version and nothing would have noticed it aging
       # (#152). This is what notices.
-      - name: pip-audit
+      #
+      # In this required job it runs only when the change touches the lock.
+      # An advisory published upstream against a version nobody changed is not
+      # a defect of the PR in front of it, and gating on it held every open PR
+      # until a separate deps PR merged. The `audit` job below still reports
+      # it on every push, every PR and every day.
+      - name: pip-audit (when the lock changes)
+        if: github.event_name == 'pull_request'
         run: |
+          if ! git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q '^requirements'; then
+            echo "requirements unchanged; the audit job reports advisories"
+            exit 0
+          fi
           pip install pip-audit
           # --strict so a package pip-audit cannot resolve fails the build
           # instead of being skipped. Without it the gate is quietly narrower
@@ -61,3 +79,21 @@ jobs:
         run: |
           bash scripts/check-sensitive-terms.sh \
             shmobster/ examples/ deploy/ docs/ workspace/ README.md selfcheck.py
+
+  # Advisory report, not a merge gate (see the pip-audit step above). A
+  # failure here means a pinned dependency needs a bump PR.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: pip-audit
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install pip-audit
+          pip-audit --strict

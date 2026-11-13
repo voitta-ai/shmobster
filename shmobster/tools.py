@@ -22,7 +22,7 @@ import logging
 import os
 import subprocess
 
-from . import approvals, config, cost as cost_mod, gitcfg, grant, mcp, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
+from . import approvals, config, cost as cost_mod, gitcfg, grant, identity, mcp, policy as policy_mod, redact, sandbox, skills, trajectory, web, yolt_gate
 
 RUN_SHELL = {
     "type": "function",
@@ -118,7 +118,7 @@ def _asker_tag(user_id):
     thread transcript excludes the current message -- so "tag the person who
     asked" was an instruction the model could only guess at (Codex adversarial
     review)."""
-    retval = f"<@{user_id}>" if user_id else "the person who asked"
+    retval = identity.mention(user_id) if user_id else "the person who asked"
     return retval
 
 
@@ -126,98 +126,90 @@ def _trusted_tags():
     """The trusted users, as Slack mentions, for the approver half of a park
     message (#256). Built here from config rather than imported from
     admin_tools, which imports this module -- one helper is not worth a cycle."""
-    retval = " ".join(f"<@{u}>" for u in config.TRUSTED_USERS) or "the trusted users"
+    retval = " ".join(identity.mention(u) for u in config.TRUSTED_USERS) or "the trusted users"
     return retval
 
 
 def run_shell(command, policy, channel=None, user_id=None, thread_ts=None):
     decision, reason = yolt_gate.classify(command, cwd=policy_mod.cwd_for(policy))
-    # Read-only to YOLT is not the same as harmless: `curl`/`wget` leave the
-    # box, and a fetch to a host this channel was not given is a mutation of
-    # the world even when it reads nothing here (#149). Demote it to mutating
-    # and let the rest of this function do what it does with a mutation -- the
-    # grant layer will not vouch for a fetch, so it parks for a card.
-    if decision == "safe":
-        allowed, why = policy_mod.check_egress(command, policy)
-        if not allowed:
-            decision, reason = "unsafe", why
-    if decision != "safe":
-        # A refusal is not a question (#172). voitta-yolt 2.0.0 upgrades an
-        # already-unsafe verdict to "deny" when a git-state predicate refuses
-        # outright -- it has looked at the repository and said no. The grant
-        # layer decides on the verb, so without this an `rm` or `tee` the
-        # classifier refused would come back "in-tree write" and run with no
-        # card, vouched for by the layer that never asked why it was refused.
-        # The better-informed gate wins; the human still gets the last word,
-        # through a card that says what it is.
-        # ...except in an unattended channel (#253), which does not keep the
-        # deny short-circuit either. 2.0.x's deny predicates are about the
-        # state of the repository the channel works in -- a commit that would
-        # sweep in someone else's work, and the like -- which is exactly the
-        # "you might make a mess of your own workspace" case this mode exists
-        # to stop asking about. The grant layer still has to vouch for the
-        # verb, and repo scope, egress and the sandbox are unchanged.
-        refused = decision == "deny" and not policy.get("unattended")
-        granted, why = (False, reason) if refused else grant.check(
-            command, policy, channel, thread_ts)
-        if granted:
-            logging.info(
-                "run_shell: granted in %s (%s): %s",
-                channel, repr(redact.scrub(why)), repr(redact.scrub(command)),
-            )
-            retval = execute(command, policy)
-            return retval
-        # The card says why the GRANT LAYER refused, not why YOLT declined to
-        # call the whole command safe (#264). Those differ, and the difference
-        # misleads: for `git log && git merge-base ...` the classifier reports
-        # about the verb it stopped at, so a card read `git log: no rule` for a
-        # command whose `git log` the grant layer grants outright. The agent
-        # explaining that card to its approver invented a rule to fit it --
-        # "git reads have no standing rule in the main checkout, only
-        # worktrees" -- which is not true of this codebase.
-        #
-        # `why` is the right value in both branches: on a classifier refusal it
-        # IS `reason`, set three lines up, and otherwise it is the grant
-        # layer's own account of the segment it would not vouch for.
-        req_id = approvals.add(command, channel, why, refused=refused, requester=user_id,
-                               thread_ts=thread_ts)
-        # The whole id, nonce and all (#109). It is what a human types back, and
-        # a shortened one would mean a different request after the next restart
-        # while reading identically on the card they typed it from.
-        # What happens next, stated exactly (#169). The old wording -- "it will
-        # run on approval" -- was true and incomplete: the command ran, its
-        # output landed on the card, and nothing resumed the turn, so every
-        # reply that promised "approve and I'll give you the answer" was a
-        # promise the system did not keep (#134). It keeps it now, and the
-        # instruction is to stop rather than to wait, because the turn ends
-        # here either way.
-        headline = "REFUSED by the classifier" if refused else "NOT RUN -- pending approval"
-        retval = (
-            f"{headline} [{req_id}] ({reason}): {command}\n"
-            + ("Say plainly that the classifier refused this one outright rather than "
-               "merely asking, and why. A trusted user can still override it, but do "
-               "not present that as routine.\n" if refused else "")
-            # Two readers, two needs (#256). One reply used to serve neither:
-            # the person who asked got a command line and an id they cannot use,
-            # and the trusted user who CAN act got no more than that -- so
-            # approving meant scrolling the thread to work out what the command
-            # was for. Both are addressed by name, because a request nobody is
-            # tagged on is a request nobody owns.
-            + "Your reply has two readers. Serve both, in this order:\n"
-            "1. `tl;dr:` one line for the person who asked -- what you were "
-            "trying to do and that it is now waiting on an approval. No "
-            "command, no flags, no id: they asked for an outcome.\n"
-            f"2. `for the approver:` what a trusted user needs to say yes "
-            f"without reading the thread back -- the exact command, what it "
-            f"will change, why it parked ({reason}), and the id {req_id} to "
-            f"quote (approve_command), or the card's button. Tag both, by id: "
-            f"{_asker_tag(user_id)} and {_trusted_tags()}.\n"
-            "Nobody should need a follow-up question to act. Do not retry the "
-            "command. End your turn now: once it is approved and runs, you are "
-            "continued automatically with its output and can finish from there."
+    # Every command goes through the grant layer, which vouches for it by its
+    # own rules or parks it. The classifier's verdict is kept for the refusals
+    # below and for the reason a card shows.
+    #
+    # A refusal is not a question (#172). voitta-yolt 2.0.0 upgrades an
+    # already-unsafe verdict to "deny" when a git-state predicate refuses
+    # outright -- it has looked at the repository and said no. The grant
+    # layer decides on the verb, so without this an `rm` or `tee` the
+    # classifier refused would come back "in-tree write" and run with no
+    # card, vouched for by the layer that never asked why it was refused.
+    # The better-informed gate wins; the human still gets the last word,
+    # through a card that says what it is.
+    # ...except in an unattended channel (#253), which does not keep the
+    # deny short-circuit either. 2.0.x's deny predicates are about the
+    # state of the repository the channel works in -- a commit that would
+    # sweep in someone else's work, and the like -- which is exactly the
+    # "you might make a mess of your own workspace" case this mode exists
+    # to stop asking about. The grant layer still has to vouch for the
+    # verb, and repo scope, egress and the sandbox are unchanged.
+    refused = decision == "deny" and not policy.get("unattended")
+    granted, why = (False, reason) if refused else grant.check(
+        command, policy, channel, thread_ts)
+    if granted:
+        logging.info(
+            "run_shell: granted in %s (%s): %s",
+            channel, repr(redact.scrub(why)), repr(redact.scrub(command)),
         )
+        retval = execute(command, policy)
         return retval
-    retval = execute(command, policy)
+    # The card says why the GRANT LAYER refused, not why YOLT declined to
+    # call the whole command safe (#264). Those differ, and the difference
+    # misleads: for `git log && git merge-base ...` the classifier reports
+    # about the verb it stopped at, so a card read `git log: no rule` for a
+    # command whose `git log` the grant layer grants outright. The agent
+    # explaining that card to its approver invented a rule to fit it --
+    # "git reads have no standing rule in the main checkout, only
+    # worktrees" -- which is not true of this codebase.
+    #
+    # `why` is the right value in both branches: on a classifier refusal it
+    # IS `reason`, set three lines up, and otherwise it is the grant
+    # layer's own account of the segment it would not vouch for.
+    req_id = approvals.add(command, channel, why, refused=refused, requester=user_id,
+                           thread_ts=thread_ts)
+    # The whole id, nonce and all (#109). It is what a human types back, and
+    # a shortened one would mean a different request after the next restart
+    # while reading identically on the card they typed it from.
+    # What happens next, stated exactly (#169). The old wording -- "it will
+    # run on approval" -- was true and incomplete: the command ran, its
+    # output landed on the card, and nothing resumed the turn, so every
+    # reply that promised "approve and I'll give you the answer" was a
+    # promise the system did not keep (#134). It keeps it now, and the
+    # instruction is to stop rather than to wait, because the turn ends
+    # here either way.
+    headline = "REFUSED by the classifier" if refused else "NOT RUN -- pending approval"
+    retval = (
+        f"{headline} [{req_id}] ({why}): {command}\n"
+        + ("Say plainly that the classifier refused this one outright rather than "
+           "merely asking, and why. A trusted user can still override it, but do "
+           "not present that as routine.\n" if refused else "")
+        # Two readers, two needs (#256). One reply used to serve neither:
+        # the person who asked got a command line and an id they cannot use,
+        # and the trusted user who CAN act got no more than that -- so
+        # approving meant scrolling the thread to work out what the command
+        # was for. Both are addressed by name, because a request nobody is
+        # tagged on is a request nobody owns.
+        + "Your reply has two readers. Serve both, in this order:\n"
+        "1. `tl;dr:` one line for the person who asked -- what you were "
+        "trying to do and that it is now waiting on an approval. No "
+        "command, no flags, no id: they asked for an outcome.\n"
+        f"2. `for the approver:` what a trusted user needs to say yes "
+        f"without reading the thread back -- the exact command, what it "
+        f"will change, why it parked ({why}), and the id {req_id} to "
+        f"quote (approve_command), or the card's button. Tag both, by id: "
+        f"{_asker_tag(user_id)} and {_trusted_tags()}.\n"
+        "Nobody should need a follow-up question to act. Do not retry the "
+        "command. End your turn now: once it is approved and runs, you are "
+        "continued automatically with its output and can finish from there."
+    )
     return retval
 
 

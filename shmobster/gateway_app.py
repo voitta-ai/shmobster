@@ -100,6 +100,17 @@ def for_signal(text):
     return text
 
 
+def unsigned(text):
+    """The text without a leading "<label>:" signature. The gateway signs every
+    message with the agent's label, so one the model wrote too ("Cosima: Cosima:
+    ...") is dropped, and the agent's own lines in history are shown unsigned so
+    the model has no signature to copy."""
+    label = config.AGENT_LABEL
+    retval = re.sub(rf"^(?:\s*[*_]*{re.escape(label)}[*_]*\s*:[*_]*\s*)+", "", text or "",
+                    flags=re.IGNORECASE) if label else (text or "")
+    return retval
+
+
 def send(channel, markdown, reply_to=None, key=None, raw=None):
     """Post a Markdown reply as final text, split to Signal's limit. Returns
     "ok", "retry" (may pass) or "rejected" (the gateway refused it for good).
@@ -109,7 +120,7 @@ def send(channel, markdown, reply_to=None, key=None, raw=None):
     thing again does not repeat the pieces that already went out. With `raw`,
     a (text, styles) pair is sent exactly as given: no Markdown is read."""
     retval = "ok"
-    pieces = gateway_text.raw_parts(*raw) if raw else gateway_text.parts(for_signal(markdown))
+    pieces = gateway_text.raw_parts(*raw) if raw else gateway_text.parts(unsigned(for_signal(markdown)))   # after the marker is gone
     for i, parts in enumerate(pieces):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
@@ -206,7 +217,8 @@ class GatewaySurface(Surface):
             f"addressed to you, so a message you are reading is for you. Your replies there are "
             f"signed \"{me}:\" for you -- do not sign them yourself, and if someone asks who "
             f"\"{config.GATEWAY_ACCOUNT_NAME or 'the account'}\" is, it is the shared account, "
-            f"and you are {me} on it."
+            f"and you are {me} on it. `/help` lists the agents on the account, and "
+            f"`/help {me.lower()}` describes you."
         )
         return retval
 
@@ -267,8 +279,14 @@ def _history(conversation_id, current, medium="signal"):
         sender = m.get("sender") or {}
         text = _text(m)
         if sender.get("kind") == "self":
-            mine = sender.get("consumer") in (None, config.GATEWAY_CONSUMER)
-            who = f"{config.AGENT_LABEL or 'me'} (me)" if mine else f"{sender.get('consumer')} (another agent)"
+            consumer = sender.get("consumer")
+            mine = consumer == config.GATEWAY_CONSUMER
+            if mine:
+                who, text = f"{config.AGENT_LABEL or 'me'} (me)", unsigned(text)
+            elif consumer:
+                who = f"{consumer} (another agent)"
+            else:                         # the gateway's own reply, e.g. to /help
+                who = "the gateway (this account's notice, not an agent)"
             if mine and _MIRRORED in text:
                 who = "mirrored from Slack, not my words"
         else:
@@ -305,6 +323,37 @@ def _first_time(message_id):
         if len(_SEEN) > 500:
             del _SEEN[next(iter(_SEEN))]
     return True
+
+
+_HELP = re.compile(r"^\s*/help\s+@?(\S+)\s*$", re.IGNORECASE)
+
+
+def _help(data):
+    """The channel when the message is `/help <this agent>`. Any other `/help x`
+    goes to the model: a gateway that is older or not shared passes those on."""
+    m = _HELP.match(_text(data))
+    me = {n.lower() for n in (config.AGENT_LABEL, config.GATEWAY_CONSUMER) if n}
+    retval = channel_of(data) if m and m.group(1).lower() in me else None
+    return retval
+
+
+def _describe(channel, mid):
+    """`/help <me>`, answered without the model: what this agent is, how to reach
+    it, and what it may do in this conversation (its policy here)."""
+    me = config.AGENT_LABEL or "this agent"
+    pol = policy.resolve(channel)
+    repos = ", ".join(pol.get("github_repos") or []) or "any repository its GitHub access reaches"
+    # No paths: anyone the gateway lets in can ask, trusted or not.
+    asks = ("runs some git, gh and file commands here without asking" if pol.get("unattended")
+            else "asks first, with an approval card, before most commands that change something")
+    lines = [
+        "An assistant that answers questions and runs commands for this team.",   # the gateway signs it
+        f"Reach it: start a message with \"{me.lower()}\", mention this account, or quote one of its messages.",
+        f"Here its GitHub repositories are: {repos}. It {asks}.",
+        "A card names a request id; a trusted person replies `approve <id>` or `deny <id>`.",
+        "/help lists every agent on this account.",
+    ]
+    send(channel, redact.scrub("\n".join(lines)), reply_to=mid, key=f"reply:{mid}")
 
 
 def _approval(data):
@@ -479,6 +528,8 @@ def _loop():
                     approval = _approval(data)
                     if approval:                  # its own lane: never behind long turns
                         fut = _approvals_pool.submit(_run, _resolve_text, mid, started, *approval)
+                    elif _help(data):             # no model: the same lane, it is as quick
+                        fut = _approvals_pool.submit(_run, _describe, mid, started, _help(data), mid)
                     else:
                         fut = _pool.submit(_run, _turn, mid, started, data)
                 if isinstance(e.get("id"), str):
@@ -534,6 +585,9 @@ def conversations(timeout=30):
 
 def announce(text):
     """Post into every listed gateway conversation; how many accepted it."""
+    me = config.AGENT_LABEL or "an agent"
+    text += (f"\n\n_I'm {me}, one of the agents on this account. Start a message with "
+             f"\"{me.lower()}\" or mention the account; /help lists who's here._")
     retval = sum(1 for channel in conversations() or [] if send(channel, text) == "ok")
     return retval
 

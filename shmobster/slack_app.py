@@ -580,7 +580,7 @@ def main():
         delivered = 0
         for channel in config.CHANNELS:
             try:
-                app.client.chat_postMessage(channel=channel, text=text)
+                app.client.chat_postMessage(channel=channel, **_reply_payload(text))   # Markdown (#397)
                 delivered += 1
             except Exception:
                 logging.exception(

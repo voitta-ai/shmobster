@@ -981,7 +981,9 @@ only the messages addressed to this one.
 - In `gateway.yaml`:
   - give this agent a consumer with `names` and a `label`;
   - list each group it serves under `conversations`, with this consumer in
-    its `consumers`.
+    its `consumers`. That list is the only one: the agent asks the gateway
+    which groups it serves (`GET /v1/conversations`) at boot and for each
+    announcement.
 - In `shmobster-config.json`:
 
 ```json
@@ -989,18 +991,33 @@ only the messages addressed to this one.
   "url": "http://127.0.0.1:8080",
   "token": "${SHMOBSTER_GATEWAY_TOKEN}",
   "consumer": "shmobster",
-  "account_name": "Team Agents",
-  "conversations": {"team": {"link": "C0123456789", "mirror": false}}
+  "account_name": "Team Agents"
 }
 ```
+
+- In `channel_policies`, a group is `signal:<its gateway label>`. Give it a
+  policy of its own, or `link` it to a Slack channel to share that channel's
+  policy; `mirror` lives here too:
+
+```json
+"signal:team": {"link": "C0123456789", "mirror": false}
+```
+
+  A policy for a label the gateway does not route to this agent is a warning
+  at boot (when the gateway answers then). The old `gateway.conversations`
+  stops the boot when `url` is set: move its entries here. `token` is this
+  consumer's own, not an admin token: the agent announces into every group the
+  gateway lists for it.
 
 **How it behaves.**
 - **Turns.** A message addressed to the agent is a turn, answered in the same
   conversation. The agent quotes the message, so a follow-up that quotes the
   answer comes back to this agent. Long answers are split to Signal's limit,
   and Markdown becomes Signal's bold, italic, strikethrough and monospace.
-- **Policy.** A conversation with a `link` shares that Slack channel's policy.
-  Any other conversation, a DM included, falls back to `default_policy`.
+- **Policy.** A conversation's own entry applies; one with a `link` shares that
+  Slack channel's policy (any other keys in it are ignored, with a boot
+  warning). A conversation with no entry, or an entry holding only `link` and
+  `mirror`, falls back to `default_policy`, a DM included.
 - **One account, several agents.** Signal shows every agent on the account under its one
   profile name (`account_name`, optional). The agent is told so, sees an @mention of the
   account as `@<its label>`, and its replies are signed with its label by the gateway.

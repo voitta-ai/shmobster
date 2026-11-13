@@ -1,5 +1,9 @@
 {
   "channel_policies": {
+    "signal:team": {
+      "link": "C0123456789",
+      "mirror": false
+    },
     "C0FREEFORALL": {
       "cwd": "/path/to/home"
     },

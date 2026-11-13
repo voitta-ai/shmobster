@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import admin_tools, approvals, config, gateway_text, handler, identity, proposals, redact, state
+from . import admin_tools, approvals, config, gateway_text, handler, identity, policy, proposals, redact, state
 from .surface import Surface
 
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
@@ -497,13 +497,44 @@ def start(slack_post=None):
         return False
     _slack_post = slack_post
     threading.Thread(target=_loop, name="gateway-poll", daemon=True).start()
-    logging.info("gateway: polling for %d listed conversation(s)", len(config.GATEWAY_CONVERSATIONS))
+    served = conversations(timeout=5)       # boot waits on this; a hung gateway must not stall it
+    if served is not None:
+        logging.info("gateway: serving %d listed conversation(s)", len(served))
+    for key, pol in sorted(config.CHANNEL_POLICIES.items()):
+        if ":" not in key or ":id:" in key:
+            continue
+        if served is not None and key not in served:
+            logging.warning("gateway: policy %s names a conversation the gateway does not route to "
+                            "consumer %r (gateway.consumer must match the token's)", key, config.GATEWAY_CONSUMER)
+        ignored = sorted(set(pol) - set(policy.ROUTING_KEYS)) if pol.get("link") else []
+        if ignored:
+            logging.warning("gateway: policy %s is linked to %s, so its %s are ignored",
+                            key, pol["link"], ", ".join(ignored))
     return True
+
+
+def conversations(timeout=30):
+    """This agent's listed group conversations, as channel ids (`<medium>:<label>`),
+    from the gateway, which owns them; None when it could not be asked. Only
+    those naming this consumer, or open to all: an admin token is shown every
+    group on the account, and this agent must not announce into another's."""
+    try:
+        body = _call("GET", "/v1/conversations", timeout=timeout)
+        retval = [f"{c['channel']}:{c['label']}" for c in body.get("conversations") or []
+                  if not c.get("consumers") or config.GATEWAY_CONSUMER in c["consumers"]]
+    except urllib.error.HTTPError as exc:
+        # 404 here is a gateway older than GET /v1/conversations (voitta-gateway#16)
+        logging.warning("gateway: could not list conversations: %s %s", exc.code, _error_code(exc))
+        retval = None
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("gateway: could not list conversations (%s)", type(exc).__name__)
+        retval = None
+    return retval
 
 
 def announce(text):
     """Post into every listed gateway conversation; how many accepted it."""
-    retval = sum(1 for label in config.GATEWAY_CONVERSATIONS if send(f"gateway:{label}", text) == "ok")
+    retval = sum(1 for channel in conversations() or [] if send(channel, text) == "ok")
     return retval
 
 
@@ -514,8 +545,7 @@ def announce(text):
 
 def mirror_out(channel, who, question, answer):
     """A gateway turn, copied into the Slack channel its conversation links to."""
-    label = channel.partition(":")[2]
-    conv = config.GATEWAY_CONVERSATIONS.get(label) or {}
+    conv = config.CHANNEL_POLICIES.get(channel) or {}
     if not (conv.get("mirror") and conv.get("link") and _slack_post):
         return
     medium = channel.partition(":")[0].title()
@@ -535,11 +565,11 @@ def _slack_escape(text):
 
 def mirror_in(slack_channel, question, answer):
     """A Slack turn, copied into every gateway conversation linked to it."""
-    labels = [label for label, conv in config.GATEWAY_CONVERSATIONS.items()
-              if conv.get("mirror") and conv.get("link") == slack_channel]
-    if not labels:
+    targets = [channel for channel, conv in config.CHANNEL_POLICIES.items()
+               if ":" in channel and conv.get("mirror") and conv.get("link") == slack_channel]
+    if not targets:
         return
     question = redact.scrub(re.sub(r"<@\w+>", "", question or "").strip())
-    for label in labels:
-        send(f"gateway:{label}", f"{_MIRRORED} from Slack: _someone asked:_ {question}")
-        send(f"gateway:{label}", f"{_MIRRORED} from Slack: {answer}")
+    for channel in targets:
+        send(channel, f"{_MIRRORED} from Slack: _someone asked:_ {question}")
+        send(channel, f"{_MIRRORED} from Slack: {answer}")

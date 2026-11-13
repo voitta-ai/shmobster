@@ -182,16 +182,21 @@ CHANNELS = {c["id"] for c in _channels}
 CHANNEL_NAMES = {c["id"]: c.get("name", c["id"]) for c in _channels}
 
 # voitta-gateway (#336): Signal, through the gateway, as a second ingest beside
-# Slack. `conversations` maps the gateway's conversation labels to
-# {link, mirror}: `link` is a Slack channel id whose policy the conversation
-# shares, and `mirror` copies each question and final answer between the two.
-# No `url`, no second ingest.
+# Slack. No `url`, no second ingest. Which groups this agent is in is the
+# gateway's to say (GET /v1/conversations); what it may do in one is a policy
+# keyed `<medium>:<label>` in channel_policies, which also holds `link` and
+# `mirror` (policy.linked, gateway_app.mirror_*).
 _gateway = _cfg.get("gateway") or {}
 GATEWAY_URL = _gateway.get("url", "")
 GATEWAY_TOKEN = _gateway.get("token", "")
 GATEWAY_CONSUMER = _gateway.get("consumer", "shmobster")  # this agent's consumer name there
 GATEWAY_ACCOUNT_NAME = _gateway.get("account_name", "")   # the shared account's profile name, if known
-GATEWAY_CONVERSATIONS = _gateway.get("conversations", {})
+if _gateway.get("conversations") and GATEWAY_URL:
+    # Ignoring it would quietly drop each group's link (its policy) and mirror.
+    # With no url the key never did anything (the shipped example carried one).
+    raise SystemExit(
+        "config: gateway.conversations is gone; the gateway lists the groups. Move each "
+        "entry's link/mirror into channel_policies under \"signal:<label>\" (see README, Signal)")
 
 AGENT_LABEL = _agent.get("label", "")  # empty -> auto-derive from Slack (#8)
 BOT_USER_ID = ""  # resolved at startup (auth.test) so the agent recognizes itself

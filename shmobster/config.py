@@ -191,8 +191,9 @@ GATEWAY_URL = _gateway.get("url", "")
 GATEWAY_TOKEN = _gateway.get("token", "")
 GATEWAY_CONSUMER = _gateway.get("consumer", "shmobster")  # this agent's consumer name there
 GATEWAY_ACCOUNT_NAME = _gateway.get("account_name", "")   # the shared account's profile name, if known
-if "conversations" in _gateway:
+if _gateway.get("conversations") and GATEWAY_URL:
     # Ignoring it would quietly drop each group's link (its policy) and mirror.
+    # With no url the key never did anything (the shipped example carried one).
     raise SystemExit(
         "config: gateway.conversations is gone; the gateway lists the groups. Move each "
         "entry's link/mirror into channel_policies under \"signal:<label>\" (see README, Signal)")

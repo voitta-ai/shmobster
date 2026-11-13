@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import admin_tools, approvals, config, gateway_text, handler, identity, proposals, redact, state
+from . import admin_tools, approvals, config, gateway_text, handler, identity, policy, proposals, redact, state
 from .surface import Surface
 
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
@@ -497,21 +497,34 @@ def start(slack_post=None):
         return False
     _slack_post = slack_post
     threading.Thread(target=_loop, name="gateway-poll", daemon=True).start()
-    served = conversations()
+    served = conversations(timeout=5)       # boot waits on this; a hung gateway must not stall it
     if served is not None:
         logging.info("gateway: serving %d listed conversation(s)", len(served))
-        for key in sorted(config.CHANNEL_POLICIES):
-            if ":" in key and ":id:" not in key and key not in served:
-                logging.warning("gateway: policy %s names a conversation the gateway does not route here", key)
+    for key, pol in sorted(config.CHANNEL_POLICIES.items()):
+        if ":" not in key or ":id:" in key:
+            continue
+        if served is not None and key not in served:
+            logging.warning("gateway: policy %s names a conversation the gateway does not route here", key)
+        ignored = sorted(set(pol) - set(policy.ROUTING_KEYS)) if pol.get("link") else []
+        if ignored:
+            logging.warning("gateway: policy %s is linked to %s, so its %s are ignored",
+                            key, pol["link"], ", ".join(ignored))
     return True
 
 
-def conversations():
+def conversations(timeout=30):
     """This agent's listed group conversations, as channel ids (`<medium>:<label>`),
-    from the gateway, which owns them; None when it could not be asked."""
+    from the gateway, which owns them; None when it could not be asked. Only
+    those naming this consumer, or open to all: an admin token is shown every
+    group on the account, and this agent must not announce into another's."""
     try:
-        body = _call("GET", "/v1/conversations")
-        retval = [f"{c['channel']}:{c['label']}" for c in body.get("conversations") or []]
+        body = _call("GET", "/v1/conversations", timeout=timeout)
+        retval = [f"{c['channel']}:{c['label']}" for c in body.get("conversations") or []
+                  if not c.get("consumers") or config.GATEWAY_CONSUMER in c["consumers"]]
+    except urllib.error.HTTPError as exc:
+        # 404 here is a gateway older than GET /v1/conversations (voitta-gateway#16)
+        logging.warning("gateway: could not list conversations: %s %s", exc.code, _error_code(exc))
+        retval = None
     except Exception as exc:  # noqa: BLE001
         logging.warning("gateway: could not list conversations (%s)", type(exc).__name__)
         retval = None

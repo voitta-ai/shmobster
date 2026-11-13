@@ -1004,7 +1004,10 @@ only the messages addressed to this one.
 ```
 
   A policy for a label the gateway does not route to this agent is a warning
-  at boot. The old `gateway.conversations` stops the boot: move its entries here.
+  at boot (when the gateway answers then). The old `gateway.conversations`
+  stops the boot when `url` is set: move its entries here. `token` is this
+  consumer's own, not an admin token: the agent announces into every group the
+  gateway lists for it.
 
 **How it behaves.**
 - **Turns.** A message addressed to the agent is a turn, answered in the same
@@ -1012,8 +1015,9 @@ only the messages addressed to this one.
   answer comes back to this agent. Long answers are split to Signal's limit,
   and Markdown becomes Signal's bold, italic, strikethrough and monospace.
 - **Policy.** A conversation's own entry applies; one with a `link` shares that
-  Slack channel's policy. A conversation with no entry, a DM included, falls
-  back to `default_policy`.
+  Slack channel's policy (any other keys in it are ignored, with a boot
+  warning). A conversation with no entry, or an entry holding only `link` and
+  `mirror`, falls back to `default_policy`, a DM included.
 - **One account, several agents.** Signal shows every agent on the account under its one
   profile name (`account_name`, optional). The agent is told so, sees an @mention of the
   account as `@<its label>`, and its replies are signed with its label by the gateway.

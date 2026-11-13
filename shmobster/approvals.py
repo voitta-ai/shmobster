@@ -280,6 +280,18 @@ def end_resume(channel, thread_ts):
         _RESUMING.discard((channel, thread_ts))
 
 
+def busy(channel, thread_ts):
+    """Whether this thread has a task still under way: a request parked, being
+    run, or a resume in flight. pending_in() counts only the first, which is 0
+    for the whole run of an approved command and of the resumed turn (#367
+    review)."""
+    with _LOCK:
+        retval = (_parked(channel, thread_ts, _PENDING.values())
+                  or _parked(channel, thread_ts, _RESOLVING.values())
+                  or (channel, thread_ts) in _RESUMING)
+    return retval
+
+
 def pending_in(channel, thread_ts):
     """How many requests are still parked in this thread (#169).
 

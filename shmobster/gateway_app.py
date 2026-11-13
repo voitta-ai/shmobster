@@ -223,9 +223,10 @@ def _mentioned(text, mentions):
     @<agent label> -- the account's profile name is shared by every agent on it, and
     the model knows itself by its label -- and anyone else as @someone."""
     units = text.encode("utf-16-le")
-    for m in sorted(mentions, key=lambda m: m.get("start") or 0, reverse=True):
-        at = m.get("start")
-        if not isinstance(at, int) or units[2 * at:2 * at + 2] != _MARK.encode("utf-16-le"):
+    valid = [m for m in mentions if isinstance(m, dict) and type(m.get("start")) is int and m["start"] >= 0]
+    for m in sorted(valid, key=lambda m: m["start"], reverse=True):
+        at = m["start"]
+        if units[2 * at:2 * at + 2] != _MARK.encode("utf-16-le"):
             continue
         name = f"@{config.AGENT_LABEL or 'me'}" if m.get("self") else "@someone"
         units = units[:2 * at] + name.encode("utf-16-le") + units[2 * at + 2:]
@@ -284,7 +285,7 @@ def _unaddressed(text):
     """The text without how it was addressed: Signal's U+FFFC for an
     @mention, or the agent's name, so "@Ada approve <id>" is an approval."""
     names = [n for n in (config.AGENT_LABEL,) if n]
-    lead = r"^[\s\ufffc,:]*(?:@?(?:" + "|".join(re.escape(n) for n in names) + r")\b[\s,:]*)?" if names else r"^[\s\ufffc,:]*"
+    lead = r"^[\s\ufffc,:]*(?:@?(?:" + "|".join(re.escape(n) for n in names) + r")\b[\s,:]*)*" if names else r"^[\s\ufffc,:]*"
     retval = re.sub(lead, "", text, flags=re.IGNORECASE)
     return retval
 

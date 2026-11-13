@@ -57,6 +57,44 @@ def _thread_context(client, channel, thread_ts, cur_ts):
     return retval
 
 
+# (channel, thread_ts) -> the file refs of the mention that started the task in
+# that thread (#362). Refs only, never bytes: a resume re-fetches them through
+# attachments.to_parts, so the type and size caps and the Slack-only download
+# rule are the same ones the original turn went through. In memory, like the
+# parked requests they serve -- a restart drops both together.
+_TASK_FILES = {}
+_TASK_FILES_MAX = 200
+_TASK_FILES_PER_THREAD = 10
+_FILE_REF_KEYS = ("name", "mimetype", "url_private_download", "url_private")
+
+
+def _remember_files(channel, thread_ts, files):
+    """Record what a mention attached, for the turns that resume its task.
+
+    While the thread's task is under way (a request parked, running, or a
+    resume in flight: approvals.busy), a mention adds its files to the task's
+    and one without files changes nothing: a "how is it going?" is not a new
+    task, and clearing then would starve the resume this exists for. Once the
+    thread is idle, a mention with files starts the list afresh and one
+    without clears it, so a later, unrelated task does not inherit an old
+    file."""
+    key = (channel, thread_ts)
+    busy = approvals.busy(channel, thread_ts)
+    refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
+    if refs:
+        held = _TASK_FILES.pop(key, None) or []
+        if not busy:
+            held = []
+        seen = {r.get("url_private_download") or r.get("url_private") for r in held}
+        merged = held + [r for r in refs
+                         if (r.get("url_private_download") or r.get("url_private")) not in seen]
+        _TASK_FILES[key] = merged[-_TASK_FILES_PER_THREAD:]   # one resume reads them all
+        if len(_TASK_FILES) > _TASK_FILES_MAX:
+            del _TASK_FILES[next(iter(_TASK_FILES))]
+    elif not busy:
+        _TASK_FILES.pop(key, None)
+
+
 _SEEN = {}  # message ts -> None; dedup duplicate Slack deliveries / retries
 
 # Slack's cap on all markdown blocks in one message.
@@ -342,6 +380,17 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
     nothing else; it must never look like the approval failed."""
     try:
         context = _thread_context(client, channel, thread_ts, None)
+        # The starting mention's files, read again (#362): only that one
+        # message's, and only on a resume, never the whole thread's.
+        # Fetched only when this click can resume: with other cards still
+        # parked handler.resume refuses, and the download would be for nothing.
+        parts, notes = [], []
+        if not approvals.pending_in(channel, thread_ts):
+            try:
+                parts, notes = attachments.to_parts(_TASK_FILES.get((channel, thread_ts)))
+            except Exception:  # noqa: BLE001 -- a bad download must not cost the resume
+                logging.exception("resume: could not re-read the task's files")
+                notes = ["the files this task started with could not be read again"]
         reply = handler.resume(
             req_id, approved, req.get("command", ""), result,
             thread_context=context, channel=channel, thread_ts=thread_ts,
@@ -350,6 +399,7 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             # same identity a typed approval would.
             user_id=user_id, surface=SlackSurface(client),
             requester=req.get("requester"),
+            attachments=parts, attachment_notes=notes,
         )
         if reply is None:
             # Two different silences used to look alike here, and only one of
@@ -433,7 +483,9 @@ def _turn(event, say, client, logger):
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
     # Attachments ride in event["files"], not in the text (#68). Only this
     # message's -- files in thread *history* stay unread for now, since every
-    # reply would re-download them.
+    # reply would re-download them. The refs are kept so a resume after an
+    # approval card gets this message's files back (#362).
+    _remember_files(channel, thread_ts, event.get("files"))
     parts, notes = attachments.to_parts(event.get("files"))
     text = event.get("text", "")
     if notes:

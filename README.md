@@ -1700,11 +1700,12 @@ leaves no trace.
 
 Some failures mean the rung will not work until something changes: a 404 that
 says the model or endpoint is gone (a retired model, a dropped free tier), or a
-400 that says the model itself is refused (`model_not_found`, "does not exist",
-"decommissioned", or a subscription plan that does not serve it). These are
-parked, logged at ERROR, and announced once at the end of the next reply -- or
-of the error reply, when every rung failed -- with the vendor's suggested
-replacement when it names one:
+400 that says the model itself is refused (`model_not_found`, a model that
+"does not exist", "decommissioned", or a subscription plan that does not serve
+it). These are parked, logged at ERROR, and announced once in the thread of the
+next Slack turn, after its reply (including the error reply when every rung
+failed), with the vendor's suggested replacement when it names one. Signal
+conversations never get the notice: it is for the operator.
 
     waterfall: DEAD RUNG orfree (openrouter/acme/model-x:free): the vendor says this model or endpoint does not exist for this account (404); the vendor suggests model 'acme/model-x'; skipping it for 1h -- fix or remove it in the waterfall config
 
@@ -2098,7 +2099,7 @@ or `~/.config/skillz/sensitive-terms.txt`, one term per line. `git push
 An instance announces itself in its channels the first time it boots on a new
 version:
 
-> :sparkles: upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
+> ✨ upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
 
 The trigger is a *version change*, not a boot -- the watchdog and launchd restart
 this process often, and none of that is worth a message. The last announced
@@ -2107,7 +2108,7 @@ version lives in `shmobster-state.json` (gitignored, path from `SHMOBSTER_STATE`
 An instance with **no** recorded version announces too, without claiming where it
 came from:
 
-> :sparkles: now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
+> ✨ now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
 
 That case is a deployment installed before the state file existed *or* a brand
 new one -- indistinguishable from inside the process. Staying quiet would skip

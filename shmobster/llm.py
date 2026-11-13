@@ -34,8 +34,8 @@ free tier, or refuses for this plan will not work again until someone edits the
 config. litellm cools a 404 for 60s and a 400 not at all, and when a later rung
 covers the failure nothing raises -- so these sat unnoticed for days, until
 every rung died at once and the agent went silent. A dead rung is parked like a
-budget-exhausted one, logged at ERROR, and announced once in the next reply
-(`claim_dead_notices`). The park is keyed to the rung's configured model, so
+budget-exhausted one, logged at ERROR, and announced once on Slack, after the
+next turn's reply (`claim_dead_notices`). The park is keyed to the rung's configured model, so
 fixing the config un-parks it at once. It starts short and doubles on each
 repeat (`_DEAD_PARK_FIRST` up to `_DEAD_PARK_MAX`), rather than lasting until
 restart: the watchdog restarts this process routinely, which would re-learn

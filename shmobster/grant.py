@@ -301,6 +301,10 @@ _AWK_REFUSED_NAMES = frozenset((
     "and", "asort", "asorti", "bindtextdomain", "compl", "dcgettext",
     "dcngettext", "gensub", "isarray", "lshift", "mktime", "or", "patsplit",
     "rshift", "strftime", "strtonum", "systime", "typeof", "xor",
+    # Not builtins that do I/O themselves, but assigning to them chooses the
+    # files awk opens after BEGIN: `ARGV[ARGC++]="/inet/tcp/0/host/80"` builds
+    # a gawk socket at run time, out of reach of the operand check.
+    "ARGV", "ARGC",
 ))
 _AWK_CHARS = frozenset("{}();,$+-*/%^!=<~?:[]&|. \t\n\r_0123456789")
 
@@ -366,9 +370,9 @@ def _awk_program_refusal(prog):
     return None
 
 
-def _awk_refusal(texts):
-    """`awk [-F sep] [-v var=val] 'program' [file | var=val ...]` whose program
-    passes `_awk_program_refusal`; anything else is refused."""
+def _awk_program_index(texts):
+    """Where the program is in `awk [-F sep] [-v var=val] 'program' ...`, or
+    why there is none: an option outside those two refuses."""
     i = 0
     while i < len(texts) and texts[i].startswith("-") and texts[i] != "-":
         t = texts[i]
@@ -378,9 +382,15 @@ def _awk_refusal(texts):
             i += 1
         else:
             return f"awk: option {t}"
-    if i >= len(texts):
-        return "awk: no program"
-    retval = _awk_program_refusal(texts[i])
+    retval = i if i < len(texts) else "awk: no program"
+    return retval
+
+
+def _awk_refusal(texts):
+    """`awk [-F sep] [-v var=val] 'program' [file | var=val ...]` whose program
+    passes `_awk_program_refusal`; anything else is refused."""
+    at = _awk_program_index(texts)
+    retval = at if isinstance(at, str) else _awk_program_refusal(texts[at])
     return retval
 
 
@@ -454,6 +464,39 @@ _VERSION_ONLY = {
     "python3": ("--version", "-V"),
     "node": ("--version", "-v"),
 }
+
+
+# A formula name, or `user/tap/name`. A name with any other `/` or a `:` is a
+# path or a URL to Homebrew's Formulary, which evaluates the .rb it points at
+# or downloads it once the forbid-packages-from-paths default is lifted
+# (HOMEBREW_DEVELOPER, a brew.env file), so those are not names here; nor is a
+# bottle file name, which the bottle loader opens the same way.
+_BREW_NAME_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+._-]*")
+
+
+def _brew_name(word):
+    """True for a formula name that can only be looked up, never loaded from
+    a path or a URL."""
+    parts = (word or "").split("/")
+    retval = (len(parts) in (1, 3)
+              and all(_BREW_NAME_PART.fullmatch(p) for p in parts)
+              and ".." not in word and not word.endswith((".rb", ".tar.gz"))
+              # A bottle file: its loader evaluates the formula inside it.
+              and ".bottle." not in word)
+    return retval
+
+
+def _brew_versions(args, src):
+    """`brew list --versions [formula ...]` (#374). It prints installed
+    versions; a name that is not installed can make brew fetch its formula
+    API index from Homebrew's own host, and nothing else. An allowlist of one
+    shape: every other subcommand or option, and a name outside
+    `_brew_name`, is not this."""
+    words = [_literal_word(a, src) for a in args]
+    retval = (words[:2] == ["list", "--versions"]
+              and all(_brew_name(w) for w in words[2:]))
+    return retval
+
 
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
@@ -1280,6 +1323,8 @@ class _Walker:
             # Parses the one file and exits; no other option, so nothing is
             # preloaded and nothing runs.
             retval = (True, "node --check: read-only")
+        elif verb == "brew" and not self.writes_file and _brew_versions(args, self.src):
+            retval = (True, "brew list --versions: read-only")
         elif verb in FLAG_CHECKED_READS and not self.writes_file:
             retval = self.flag_checked(verb, args)
         else:
@@ -1327,15 +1372,6 @@ class _Walker:
         if not all(_static(a) for a in args):
             retval = (False, f"{verb}: an argument is not a literal, so its flags cannot be read")
             return retval
-        if verb == "awk" and not all(
-                a.type == "raw_string"
-                or a.type in ("word", "number") and "\\" not in _text(a, self.src)
-                for a in args):
-            # The program is code: its text must be exactly the word awk gets.
-            # Inside single quotes the shell changes nothing; a double-quoted
-            # or concatenated word, or a bare word with an escape, it does.
-            retval = (False, "awk: an argument is not a plain word or single-quoted string")
-            return retval
         # The deny lists compare words, so they have to be the words the
         # command gets, not their spelling in the source. `date` counts its
         # positionals, so a glob that could become several words is refused.
@@ -1344,8 +1380,43 @@ class _Walker:
         if any(t is None for t in texts):
             retval = (False, f"{verb}: an argument takes shell rules to read")
             return retval
+        at = _awk_program_index(texts) if verb == "awk" else None
+        if isinstance(at, int):
+            why = self.awk_words(args, texts, at)
+            if why:
+                retval = (False, why)
+                return retval
         why = _FLAG_REFUSAL[verb](texts)
         retval = (False, why) if why else (True, f"{verb}: read-only")
+        return retval
+
+    def awk_words(self, args, texts, at):
+        """Why awk's words are not ones whose program this layer can read, or
+        None. `at` is where the program is.
+
+        The options are data -- a separator, a variable -- so they are read
+        with the same quote removal as every other flag-checked word:
+        `-F'","'` is the word `-F","` (#374). Not a glob, though: one that
+        became two words would move the program onto a file name.
+
+        The program is code, and its text must be exactly the word awk gets.
+        Inside single quotes the shell changes nothing; a double-quoted or
+        concatenated word, or a bare word, it can. The operands after it keep
+        the rule every awk word had before #374: a plain word or a
+        single-quoted string. And none of them may name gawk's network files:
+        gawk opens `/inet/tcp/0/host/port` (and `/inet4`, `/inet6`, `/p/inet`)
+        as a socket, a connection `allow_domains` never sees."""
+        retval = None
+        if any(_literal_word(a, self.src) is None for a in args[:at]):
+            retval = "awk: an option takes shell rules to read"
+        elif args[at].type != "raw_string":
+            retval = "awk: the program is not a single-quoted string"
+        elif not all(a.type == "raw_string"
+                     or a.type in ("word", "number") and "\\" not in _text(a, self.src)
+                     for a in args[at + 1:]):
+            retval = "awk: an operand is not a plain word or single-quoted string"
+        elif any(t.startswith(("/inet", "/p/inet")) for t in texts[at + 1:]):
+            retval = "awk: an operand names a gawk network file"
         return retval
 
     def fetch(self, verb, text, args):

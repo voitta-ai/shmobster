@@ -162,6 +162,30 @@ def run_shell(command, policy, channel=None, user_id=None, thread_ts=None):
         )
         retval = execute(command, policy)
         return retval
+    # An inline interpreter program in an unattended channel (#348): granted
+    # only on the condition that the whole command runs under the offline
+    # profile, so the grant and the profile are taken here together. The
+    # profile is applied once to `true` before anything is granted on it: if
+    # it cannot be built or applied, the command parks exactly as it did
+    # before this existed, rather than failing after the grant.
+    if not refused and policy.get("unattended"):
+        off_granted, off_why = grant.check_offline(command, policy, channel, thread_ts)
+        if off_granted:
+            ready, not_ready = sandbox.offline_ready(policy)
+            if ready:
+                logging.info(
+                    "run_shell: granted offline in %s (%s): %s",
+                    channel, repr(redact.scrub(off_why)), repr(redact.scrub(command)),
+                )
+                retval = execute(command, policy, offline=True)
+                return retval
+            why = f"the no-network sandbox could not be applied ({not_ready}), so an interpreter needs a card"
+        else:
+            # The same walk with one more rule, so for any other command this
+            # is the same refusal; for an interpreter it says which form parked
+            # ("a script", "an option after the program") where the first walk
+            # could only pass on the classifier's `no rule: python3`.
+            why = off_why
     # The card says why the GRANT LAYER refused, not why YOLT declined to
     # call the whole command safe (#264). Those differ, and the difference
     # misleads: for `git log && git merge-base ...` the classifier reports
@@ -259,10 +283,11 @@ def child_env(policy):
     return retval
 
 
-def execute(command, policy):
+def execute(command, policy, offline=False):
     """Run a command that has already cleared the YOLT gate or been approved.
     The channel policy is still enforced here -- approval is permission, policy
-    is scope, and both must pass."""
+    is scope, and both must pass. `offline` runs it with the network denied
+    too (#348); only the inline-interpreter grant asks for that."""
     # repr, not the bare string: a command carrying a newline would
     # otherwise write extra lines into a line-oriented log and forge
     # entries -- "run_shell: exit 0: <something that never ran>" -- in the
@@ -287,7 +312,9 @@ def execute(command, policy):
         # raises when the sandbox is unavailable; that lands in the except
         # below as "exec error" -- never a fallback to running unconfined.
         proc = subprocess.run(
-            sandbox.wrap(command, policy),
+            # Two arguments unless offline: that is the call every stub of
+            # `wrap` (selfcheck on a host without sandbox-exec) still takes.
+            sandbox.wrap(command, policy, offline=True) if offline else sandbox.wrap(command, policy),
             capture_output=True,
             text=True,
             cwd=policy_mod.cwd_for(policy),
@@ -388,9 +415,12 @@ def capabilities(policy, channel=None):
             "- runs with no approval card: THIS CHANNEL IS UNATTENDED. Every git, "
             "gh and file command runs, including destructive ones -- `rm -rf`, "
             "`git push --force`, `gh pr merge` -- as long as it stays inside the "
-            "repos and the directory above. What still parks: anything reaching a "
-            "host outside the fetchable list, an interpreter (sh, bash, python3, "
-            "node), and anything naming a repo this channel does not have."
+            "repos and the directory above. An inline program (`python3 -c`, "
+            "`node -e`, `python3 -` with a heredoc) runs too, but with the network "
+            "denied: it can read and write this tree but not reach any host. What "
+            "still parks: anything reaching a host outside the fetchable list, any "
+            "other interpreter use (a script file, sh, bash, npx), and anything "
+            "naming a repo this channel does not have."
         )
     else:
         lines.append(

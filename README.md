@@ -755,7 +755,11 @@ machine's channel layout is versioned separately from the token/key config:
     `sh`, `bash`, `python3`, `node` -- keep parking on purpose: the sandbox
     holds the filesystem and not the network, so `python3 -c` with a socket
     would be an uncarded fetch to anywhere and `allow_domains` would be
-    decorative.
+    decorative. The one exception (#348) is an inline program -- `python3 -c`,
+    `node -e`, `python3 -` fed by a heredoc -- which runs without a card under
+    a variant of the sandbox that also denies the network and network-shaped
+    local IPC; if that variant cannot be applied, it parks as before. A script
+    file, `npx`, `sh -c` and every other interpreter use still park.
 
     Policy-file only, for the reason `env_passthrough` is: a channel must not
     be able to talk itself into this. Every boot logs which channels have it,

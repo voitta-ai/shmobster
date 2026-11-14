@@ -33,9 +33,10 @@ was the operator's call, and the operator made it (#117): card.
 
 The command is walked as a bash AST (tree-sitter, already a dependency via
 YOLT), not tokenized: quoting, heredocs and continuation lines come out
-right, and a node kind this module does not model -- subshell, command
-substitution, variable assignment, for/if/while, function -- is refused
-rather than guessed at. A literal `cd` moves the tracked directory in
+right, and a node kind this module does not model -- subshell, variable
+assignment, if/while, function -- is refused rather than guessed at. A plain
+`for` loop and a `--`-guarded command substitution are modelled, as reads only
+(#373). A literal `cd` moves the tracked directory in
 source order, starting from the channel cwd; a `cd` that cannot be resolved
 statically (`cd "$DIR"`, `cd -`) makes every later `git commit` ungrantable
 rather than judged against the wrong tree. `git -C <path>` retargets one
@@ -908,6 +909,65 @@ def _arg_word(node, src):
     return retval
 
 
+# The words after which an argument is never an option (#373). Both are what
+# git's own parser honours, and `--` is what getopt does.
+_END_OF_OPTIONS = frozenset(("--", "--end-of-options"))
+
+# ...but for git only when nothing before it takes it as a value: in `git log
+# --grep -- $(...)` the `--` is the pattern, and the substitution's words are
+# options again (`--output=F` writes F). So the word just before the marker
+# must be one that cannot take a separate value: a word without a dash, an
+# option with its value attached (`--format=x`), or one of these git read flags
+# that take none. An allowlist, so an unlisted flag before `--` parks.
+_NO_VALUE_FLAGS = frozenset((
+    "--oneline", "--stat", "--name-only", "--name-status", "-p", "--patch",
+    "--all", "--cached", "--porcelain", "-z",
+))
+
+# Grants that are reads, by the reason this module gives them. A loop body and
+# a substitution must be made of these and nothing else (#373): a read run ten
+# times is still a read, and a write is not, whoever vouched for it once.
+_READ_LISTINGS = frozenset(("git branch: listing", "git remote: listing",
+                            "git worktree list: listing", "git config: read"))
+
+# A loop variable is assigned in the running shell, so its name picks what it
+# overwrites. `for PATH in /tmp/x; do ls; done` runs whatever `ls` is in
+# /tmp/x, and `IFS` re-splits every later word. Those and the proxy and GIT_*
+# variables a read follows are upper case or carry an underscore, so the names
+# accepted are the short lower-case ones people write: `f`, `file`, `d`, `i`.
+_LOOP_VAR = re.compile(r"[a-z][a-z0-9]*")
+
+
+def _frees_marker(prev):
+    """True when a `--` right after the word `prev` ends the options rather
+    than being prev's value. None, a word this layer could not read, is not."""
+    retval = prev is not None and (not prev.startswith("-") or "=" in prev
+                                   or prev in _NO_VALUE_FLAGS)
+    return retval
+
+
+def _read_grant(verb, reason):
+    """True when a granted segment was granted as a read. `vercel` is left out
+    even for its reads: its grant reads a link file that another segment could
+    rewrite, which `check` judges across the whole command (#327)."""
+    retval = verb != "vercel" and (reason.endswith(": read-only") or reason in _READ_LISTINGS)
+    return retval
+
+
+def _bare_substitution(node):
+    """The command_substitution an argument is, quoted or not, else None. Only
+    this shape: a substitution glued to other text is a word this layer would
+    have to assemble before it could say where it starts."""
+    retval = None
+    if node.type == "command_substitution":
+        retval = node
+    elif node.type == "string":
+        inner = [c for c in node.children if c.type != '"']
+        if len(inner) == 1 and inner[0].type == "command_substitution":
+            retval = inner[0]
+    return retval
+
+
 def _is_device(target, tracked=None):
     """True for a path under /dev, however it is spelled, including relative to
     the tracked directory."""
@@ -984,6 +1044,119 @@ class _Walker:
         self.other_effect = False
         # Raised while walking a single command whose stdin is a heredoc.
         self.heredoc_stdin = False
+        # Raised inside a loop body, a substitution, and the command that takes
+        # one (#373): only a read is granted there.
+        self.reads_only = False
+        # Arguments of the current segment that are `--`-guarded
+        # substitutions, by byte span; `git` steps over them.
+        self._opaque = frozenset()
+
+    def read_scope(self, fn, *args):
+        """fn(*args) with only read rules in force (#373).
+
+        An unattended channel grants `git`, `rm` and the rest on their verb
+        (#253), so the unattended branches are switched off here rather than
+        their reasons filtered afterwards: a loop or a substitution in an
+        unattended channel gets the same answer it gets in an attended one,
+        from the same read rules."""
+        saved = (self.reads_only, self.unattended, getattr(self, "_seg_text", ""))
+        self.reads_only, self.unattended = True, False
+        try:
+            retval = fn(*args)
+        finally:
+            self.reads_only, self.unattended, self._seg_text = saved
+        return retval
+
+    def loop(self, node):
+        """A plain `for x in <words>; do <reads>; done` (#373).
+
+        Each part is allowlisted rather than the known-bad ones refused: the
+        keyword is `for` (tree-sitter parses `select` into the same node), the
+        list is words this layer can read without running anything, and the
+        body is walked like any command with only the read rules in force.
+        A C-style loop and `while` are other node types and still park."""
+        kids = node.children
+        if not kids or kids[0].type != "for":
+            return (False, f"{kids[0].type if kids else 'loop'} loop is not grantable")
+        var = node.child_by_field_name("variable")
+        if var is None or not _LOOP_VAR.fullmatch(_text(var, self.src)):
+            return (False, "for: only a short lower-case loop variable is grantable")
+        if not any(c.type == "in" for c in kids):
+            # Without `in` it iterates "$@", which this layer cannot see.
+            return (False, "for: a loop without `in` is not grantable")
+        body = None
+        for c in kids[1:]:
+            if c.type in ("variable_name", "in", ";", "\n"):
+                continue
+            if c.type == "do_group":
+                body = c
+            elif node.field_name_for_child(list(kids).index(c)) == "value":
+                raw = _text(c, self.src)
+                # A quoted `$(` or backtick is inert in the list, but the
+                # guardrail is the text: nothing that looks like it runs.
+                if (not _static(c) or _glob_text(c, self.src) is None
+                        or "$(" in raw or "`" in raw):
+                    return (False, "for: the list is not literals or globs")
+            else:
+                return (False, f"for: {c.type} is not grantable")
+        if body is None:
+            return (False, "for: no body")
+        retval = (True, "")
+        for c in body.children:
+            if c.type in ("do", "done"):
+                continue
+            retval = self.read_scope(self.walk, c)
+            if not retval[0]:
+                break
+        return retval
+
+    def substitutions(self, verb, args):
+        """None when every command substitution in args can be granted, else
+        why not (#373).
+
+        A substitution's output becomes argv, and a word in it that starts
+        with a dash becomes an option -- for `git grep`, the one that runs a
+        pager. So the rule is about where the words land, not what produced
+        them: after `--` or `--end-of-options`, and only for a command that
+        reads past that point as names and nothing else. READ_VERBS qualify by
+        their own bar (no argument makes them write). `git` qualifies through
+        its read rules, which still judge every word before the `--`. The
+        flag-checked verbs do not: `find`, `awk` and `date` read their
+        positionals as an expression, a program and a clock setting, so a
+        `--` does not make the output inert there. The inner command is walked
+        with only the read rules in force. Nothing here asks the classifier."""
+        guarded = False
+        opaque = []
+        for a in args:
+            if _no_substitution(a):
+                # Whether this `--` is itself an option's value matters only
+                # to git, whose handler asks it after the subcommand; for a
+                # read verb an option is harmless by the bar it entered on.
+                guarded = guarded or (_static(a) and _literal_word(a, self.src) in _END_OF_OPTIONS)
+                continue
+            if verb not in READ_VERBS and verb != "git":
+                return "only a read verb or git takes one"
+            if not guarded:
+                return "no `--` before it, so its output could be an option"
+            inner = _bare_substitution(a)
+            if inner is None:
+                return "not a whole argument"
+            # Its output is captured into argv, so a redirect on the command
+            # taking it is not where the inner command writes.
+            saved = (self.writes_file, self.heredoc_stdin)
+            self.writes_file = self.heredoc_stdin = False
+            try:
+                for c in inner.children:
+                    if c.type in ("$(", ")", "`"):
+                        continue
+                    ok, why = self.read_scope(self.walk, c)
+                    if not ok:
+                        return f"inside it, {why}"
+            finally:
+                self.writes_file, self.heredoc_stdin = saved
+            opaque.append((a.start_byte, a.end_byte))
+        self._opaque = frozenset(opaque)
+        return None
 
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
@@ -999,6 +1172,8 @@ class _Walker:
             retval = self.segment(node)
         elif node.type == "redirected_statement":
             retval = self.redirected(node)
+        elif node.type == "for_statement":
+            retval = self.loop(node)
         elif node.type in _SKIP:
             retval = (True, "")
         else:
@@ -1085,7 +1260,7 @@ class _Walker:
         trailing = []
         redirects = []
         for c in node.children:
-            if c.type in ("command", "pipeline", "list"):
+            if c.type in ("command", "pipeline", "list", "for_statement"):
                 body = c
             elif c.type == "file_redirect":
                 refusal, redirect_writes = self.redirect_write(c)
@@ -1103,6 +1278,11 @@ class _Walker:
                 return (False, f"{c.type} under a redirect is not grantable")
         if body is None:
             return (False, "redirect without a command")
+        if writes and (self.reads_only or body.type == "for_statement"):
+            # A loop or a substitution is granted as a read (#373); a file it
+            # writes would make it something else. `2>/dev/null`, `2>&1` and
+            # `<` write nothing and stay.
+            return (False, "a redirect to a file in a loop or a substitution")
         before = len(self.reasons)
         saved = self.writes_file
         saved_heredoc = self.heredoc_stdin
@@ -1183,11 +1363,11 @@ class _Walker:
         was granted as "cat: read-only", and the difference was word order
         (#213). Found reviewing the descriptor-dup change above; it predates
         it."""
-        saved = self.writes_file
+        saved = (self.writes_file, self.reads_only, self.unattended)
         try:
             retval = self._segment(node)
         finally:
-            self.writes_file = saved
+            self.writes_file, self.reads_only, self.unattended = saved
         return retval
 
     def _segment(self, node):
@@ -1196,11 +1376,14 @@ class _Walker:
         # `git push` is granted on its subcommand and still has to name a host
         # this channel was given (#253).
         self._seg_text = text
+        self._opaque = frozenset()
         for c in node.children:
             if c.type == "file_redirect":
                 refusal, writes = self.redirect_write(c)
                 if refusal is not None:
                     return (False, refusal)
+                if writes and self.reads_only:
+                    return (False, "a redirect to a file in a loop or a substitution")
                 self.writes_file = self.writes_file or writes
             elif c.type in ("heredoc_redirect", "herestring_redirect"):
                 refusal, writes, more = self.stdin_redirect(c)
@@ -1223,9 +1406,18 @@ class _Walker:
         # Nothing granted here may carry an argument that runs something:
         # `cp $(rm -rf x) b`, `cd $(curl ... | sh)`. The allowlisted verbs
         # and `cd` are judged on the verb alone, and YOLT only sees the
-        # segments that fall through to it, so the check is unconditional.
+        # segments that fall through to it, so the check is unconditional --
+        # except for a read run inside a read, behind `--` (#373), and then
+        # the command taking it is held to the read rules as well.
         if not all(_no_substitution(a) for a in args):
-            return (False, f"{verb}: command substitution in arguments")
+            why = self.substitutions(verb, args)
+            if why is not None:
+                return (False, f"{verb}: command substitution in arguments: {why}")
+            self.reads_only, self.unattended = True, False
+        if verb == "cd" and self.reads_only:
+            # A loop body runs once per word; one tracked directory cannot
+            # follow that, and a substitution's `cd` moves nothing outside it.
+            return (False, "cd in a loop or a substitution is not grantable")
         # Scope checks for these (`_check_github`, `_check_aws`) read
         # the command's text, so an option has to be spelled the way the
         # command receives it, or the check and the command see two commands.
@@ -1306,6 +1498,10 @@ class _Walker:
             # rules, so a segment none of them covers parks.
             if retval is None:
                 retval = (False, shadowed or (f"no grant rule: {verb}" if decision == "safe" else reason))
+        if retval[0] and self.reads_only and not _read_grant(verb, retval[1]):
+            # Checked on the grant this layer gave, never on a classifier
+            # verdict, which cannot reach here as a grant anyway (#373).
+            retval = (False, f"{retval[1]}: not a read, so not in a loop or a substitution")
         if retval[0]:
             self.reasons.append(retval[1])
             # A vercel grant reads .vercel/project.json now; a write elsewhere
@@ -1464,12 +1660,25 @@ class _Walker:
         # `-c key=val` takes a value, anything else dashed is skipped. After
         # the subcommand every word is its own (`switch -c` is a branch, not
         # a config).
+        # Set once the subcommand's own options have ended (#373).
+        ended = False
         while i < len(args):
             a = args[i]
+            if (a.start_byte, a.end_byte) in self._opaque:
+                # A substitution `substitutions` accepted (#373). It must
+                # follow the subcommand's own `--`: before the subcommand, git
+                # takes `--` as the end of ITS options, and the words after it
+                # would reach the subcommand as options.
+                if not ended:
+                    return (False, "git: command substitution not after the subcommand's own `--`")
+                i += 1
+                continue
             t = _literal_word(a, self.src) if _static(a) else None
             if sub is not None:
                 # A pathspec may glob; the word is still never an option.
                 globbed = t is None and _static(a) and _arg_word(a, self.src) is not None
+                ended = ended or (t in _END_OF_OPTIONS
+                                  and _frees_marker(rest[-1] if rest else sub))
                 rest.append(_arg_word(a, self.src) if globbed else t)
                 self._git_globbed = self._git_globbed or globbed
                 i += 1

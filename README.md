@@ -518,10 +518,13 @@ One JSON config, no `.env`. Copy the example and fill it in:
   ...; done` is, when its list is literals or globs, its variable a short
   lower-case name, and nothing in it redirects into a file; C-style `for`,
   `while` and `select` park. A command substitution in an argument is, when
-  the command taking it is a read verb or a git read, a `--` or
-  `--end-of-options` comes before it, and the command inside is a read: its
-  output becomes argv, and before `--` a word in it could be an option. So
+  the command taking it is a read verb or a git read, a `--` that is no
+  option's value comes before it, and the command inside is a read: its output
+  becomes argv, and before `--` a word in it could be an option. So
   `git log -- $(git ls-files '*.py')` runs and `cat $(git ls-files)` parks.
+  `--end-of-options` does not count: `git shortlog` still reads options after
+  it. Arithmetic (`$((x))`, `$[x]`) and any `${...}` beyond a bare name park
+  everywhere, because they evaluate a variable's value as code.
 
   The classifier is invoked with `--no-user-allow` (#148), so "read-only" means
   what YOLT's own rules say. Without it, YOLT also promotes anything matching a

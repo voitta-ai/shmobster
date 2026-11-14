@@ -173,14 +173,15 @@ _UNATTENDED_GH_NOUNS = frozenset((
 #
 # The bar for entry is that no flag turns the command into a write. That is why
 # `sort` (-o), `uniq` (output positional), `date` (-s; flag-checked below), `hostname` (sets it),
-# `find` (-delete, -exec), `rg` (runs a preprocessor) and `xargs` (runs its
+# `find` (-delete, -exec), `rg` (runs a preprocessor), `file` (-C writes a
+# compiled magic file; flag-checked below) and `xargs` (runs its
 # argument) are absent, and why
 # `awk` is absent despite reading: its program can call system() (it is checked
 # against an allowlist in FLAG_CHECKED_READS instead), and `tree` is
 # absent because -o writes its output to a file. `sed` is in FS_VERBS already,
 # as the writer -i makes it.
 READ_VERBS = frozenset((
-    "cat", "ls", "head", "tail", "wc", "file", "stat", "basename", "dirname",
+    "cat", "ls", "head", "tail", "wc", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
     "jq", "id", "whoami", "uname", "printenv", "ps",
     # Print-only builtins and a pause. `printf` is absent: its numeric
@@ -219,7 +220,24 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date", "file"))
+
+
+def _file_refusal(texts):
+    """`file -C` compiles the magic files it is given into `<name>.mgc` beside
+    them -- a write, so `file` cannot be judged on its verb alone (#373
+    review). getopt_long takes any unambiguous prefix, so `--comp` is
+    `--compile` too, and a cluster such as `-Cm` carries it."""
+    for t in texts:
+        if t == "--":
+            break
+        if t.startswith("--"):
+            name = t.split("=", 1)[0]
+            if len(name) > 2 and "--compile".startswith(name):
+                return f"file: {name} writes a compiled magic file"
+        elif t.startswith("-") and "C" in t[1:]:
+            return f"file: {t} writes a compiled magic file"
+    return None
 
 
 def _find_refusal(texts):
@@ -445,7 +463,7 @@ def _date_refusal(texts):
 
 
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
-                 "rg": _rg_refusal, "date": _date_refusal}
+                 "rg": _rg_refusal, "date": _date_refusal, "file": _file_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
 # Each interpreter's own spelling of the version flag: `node -v` is version,
@@ -827,16 +845,42 @@ def _text(node, src):
 
 def _static(node):
     """True when the node contains no expansion or substitution."""
-    if node.type in ("simple_expansion", "expansion", "command_substitution", "process_substitution"):
+    if node.type in ("simple_expansion", "expansion", "command_substitution",
+                     "process_substitution", "arithmetic_expansion"):
         return False
     retval = all(_static(c) for c in node.children)
     return retval
 
 
+# The parts of `${...}` that only name a variable. Anything else in it is an
+# operator, and several of them evaluate the value as code rather than read it.
+_PLAIN_EXPANSION = frozenset(("${", "}", "variable_name", "special_variable_name"))
+
+
+def _evaluates(node):
+    """True when expanding the node can run code although no substitution is
+    written (#373 review). Arithmetic evaluates a variable's VALUE as an
+    expression, and an array subscript in it runs a substitution: with a file
+    named `a[$(touch P)]`, `for x in a*; do echo $((x)); done` runs `touch P`,
+    and so does `echo 'a[$(touch P)]'; echo $((_))` with no loop at all. The
+    same goes for `$[x]`, an offset or length (`${z:x}`), indirection
+    (`${!x}`) and `${x@P}`. So `${...}` is accepted only as a bare name -- an
+    allowlist of its parts -- and arithmetic never."""
+    if node.type == "arithmetic_expansion":
+        return True
+    if node.type == "expansion" and not all(c.type in _PLAIN_EXPANSION for c in node.children):
+        return True
+    retval = any(_evaluates(c) for c in node.children)
+    return retval
+
+
 def _no_substitution(node):
     """True when nothing under the node runs a command. `$VAR` is fine --
-    it expands, it does not execute."""
+    it expands, it does not execute. Arithmetic and parameter operators that
+    evaluate a value are not (`_evaluates`)."""
     if node.type in ("command_substitution", "process_substitution"):
+        return False
+    if _evaluates(node):
         return False
     retval = all(_no_substitution(c) for c in node.children)
     return retval
@@ -909,16 +953,20 @@ def _arg_word(node, src):
     return retval
 
 
-# The words after which an argument is never an option (#373). Both are what
-# git's own parser honours, and `--` is what getopt does.
-_END_OF_OPTIONS = frozenset(("--", "--end-of-options"))
+# The word after which an argument is never an option (#373). Only `--`:
+# `--end-of-options` ends option parsing in git's parse-options, but `git
+# shortlog --end-of-options $(echo --output=x)` still hands the words after it
+# to the revision parser as options, and writes x (#373 review). getopt does
+# not know it at all.
+_END_OF_OPTIONS = "--"
 
-# ...but for git only when nothing before it takes it as a value: in `git log
-# --grep -- $(...)` the `--` is the pattern, and the substitution's words are
-# options again (`--output=F` writes F). So the word just before the marker
-# must be one that cannot take a separate value: a word without a dash, an
-# option with its value attached (`--format=x`), or one of these git read flags
-# that take none. An allowlist, so an unlisted flag before `--` parks.
+# ...and only when nothing before it takes it as a value: in `git log --grep --
+# $(...)` or `grep -e -- $(...)` the `--` is the pattern, and the
+# substitution's words are options again (`--output=F` writes F). So the word
+# just before the marker must be one that cannot take a separate value: a word
+# without a dash, an option with its value attached (`--format=x`), or one of
+# these flags that take none. An allowlist, so an unlisted flag before `--`
+# parks -- `wc -l -- $(...)` included.
 _NO_VALUE_FLAGS = frozenset((
     "--oneline", "--stat", "--name-only", "--name-status", "-p", "--patch",
     "--all", "--cached", "--porcelain", "-z",
@@ -984,7 +1032,9 @@ def _is_device(target, tracked=None):
 # bytes, because a node that is not in the tree cannot be walked.
 _HEREDOC_OPEN = frozenset(("<<", "<<-", "heredoc_start", "heredoc_body", "heredoc_end"))
 _HEREDOC_DELIM = re.compile(r"""[A-Za-z0-9_]+|'[A-Za-z0-9_.-]+'|"[A-Za-z0-9_.-]+\"""")
-_HEREDOC_UNSAFE = (b"`", b"$(", b"\\\n")
+# `$[` is arithmetic in its old spelling, code for the same reason `$((` is
+# (`_evaluates`); `$((` is caught by `$(`.
+_HEREDOC_UNSAFE = (b"`", b"$(", b"$[", b"\\\n")
 
 
 def _heredoc_refusal(c, src):
@@ -1117,7 +1167,7 @@ class _Walker:
         A substitution's output becomes argv, and a word in it that starts
         with a dash becomes an option -- for `git grep`, the one that runs a
         pager. So the rule is about where the words land, not what produced
-        them: after `--` or `--end-of-options`, and only for a command that
+        them: after a `--` that is no option's value, and only for a command that
         reads past that point as names and nothing else. READ_VERBS qualify by
         their own bar (no argument makes them write). `git` qualifies through
         its read rules, which still judge every word before the `--`. The
@@ -1127,17 +1177,18 @@ class _Walker:
         with only the read rules in force. Nothing here asks the classifier."""
         guarded = False
         opaque = []
+        prev = ""
         for a in args:
             if _no_substitution(a):
-                # Whether this `--` is itself an option's value matters only
-                # to git, whose handler asks it after the subcommand; for a
-                # read verb an option is harmless by the bar it entered on.
-                guarded = guarded or (_static(a) and _literal_word(a, self.src) in _END_OF_OPTIONS)
+                # git asks again after its subcommand, where its own `--` is.
+                word = _literal_word(a, self.src) if _static(a) else None
+                guarded = guarded or (word == _END_OF_OPTIONS and _frees_marker(prev))
+                prev = word
                 continue
             if verb not in READ_VERBS and verb != "git":
                 return "only a read verb or git takes one"
             if not guarded:
-                return "no `--` before it, so its output could be an option"
+                return "no `--` before it that ends the options, so its output could be an option"
             inner = _bare_substitution(a)
             if inner is None:
                 return "not a whole argument"
@@ -1409,6 +1460,8 @@ class _Walker:
         # segments that fall through to it, so the check is unconditional --
         # except for a read run inside a read, behind `--` (#373), and then
         # the command taking it is held to the read rules as well.
+        if any(_evaluates(a) for a in args):
+            return (False, f"{verb}: arithmetic or a parameter operator in arguments evaluates code")
         if not all(_no_substitution(a) for a in args):
             why = self.substitutions(verb, args)
             if why is not None:
@@ -1677,7 +1730,7 @@ class _Walker:
             if sub is not None:
                 # A pathspec may glob; the word is still never an option.
                 globbed = t is None and _static(a) and _arg_word(a, self.src) is not None
-                ended = ended or (t in _END_OF_OPTIONS
+                ended = ended or (t == _END_OF_OPTIONS
                                   and _frees_marker(rest[-1] if rest else sub))
                 rest.append(_arg_word(a, self.src) if globbed else t)
                 self._git_globbed = self._git_globbed or globbed

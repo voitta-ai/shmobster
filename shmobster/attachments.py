@@ -199,19 +199,28 @@ def save_root(channel):
     """(cwd, None) where this conversation's attachments may be saved, or
     (None, reason) when they may not.
 
-    Only a conversation with a policy of its own (directly, or through its
-    `link`) gets one: every other DM and channel shares default_policy's cwd,
+    Only a conversation whose policy (directly, or through its `link`) sets a
+    `cwd` of its own gets one: every other DM and channel shares
+    default_policy's or exec.cwd's,
     so one person's file would be readable from another's turn. And never
     inside this deployment's own code, runtime files or standing prompt --
     `exec.cwd` defaults to ".", which is the live checkout -- by the same
     lists the sandbox write-denies (#147, #174, self_roots)."""
-    key = policy.linked(channel) or channel
-    if key not in config.CHANNEL_POLICIES:
-        retval = (None, "this conversation has no policy of its own, so its working "
-                        "directory may be shared with others")
-        return retval
-    cwd = policy.cwd_for(policy.resolve(channel))
-    real = os.path.realpath(cwd)
+    shared = (None, "this conversation has no working directory of its own, so it may "
+                    "be shared with others")
+    try:
+        # Its own `cwd`, not just an entry: a routing-only entry (mirror, link to
+        # one), an empty one or one without `cwd` resolves to the shared default.
+        resolved = policy.resolve(channel)
+        cwd = policy.cwd_for(resolved)
+        real = os.path.realpath(cwd)
+        common = {os.path.realpath(policy.cwd_for(config.DEFAULT_POLICY)),
+                  os.path.realpath(os.path.expanduser(os.path.expandvars(config.EXEC_CWD)))}
+    except Exception:  # noqa: BLE001 -- fail closed: no save, said as a note
+        logging.exception("attachments: could not resolve this conversation's working directory")
+        return shared
+    if not resolved.get("cwd") or real in common:
+        return shared
     try:
         # Inside a self root (the checkout, venv, runtime files), or AT the
         # directory holding a config, policy or spine file. Only "at" for the

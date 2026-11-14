@@ -375,9 +375,10 @@ directory carries its own `*` `.gitignore`, so it is never committed and the
 repo's own `.gitignore` is left alone. Nothing prunes it; delete it by hand when
 it grows.
 
-Nothing is saved for a conversation without a policy of its own (directly or
-through its `link`): those all share `default_policy`'s cwd, so one person's
-file would be readable from another's turn. Nothing is saved when the cwd is
+Nothing is saved for a conversation without a working directory of its own:
+its policy (directly or through its `link`) must set `cwd`, and that must not be
+`default_policy`'s or `exec.cwd`. Every other conversation shares those, so one
+person's file would be readable from another's turn. Nothing is saved when the cwd is
 inside shmobster's own checkout, venv or runtime files, or is the directory
 holding its config, policies or workspace spine -- `exec.cwd` defaults to `.`,
 the deployment itself. In those cases, and when a save fails, the turn tells

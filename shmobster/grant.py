@@ -301,6 +301,10 @@ _AWK_REFUSED_NAMES = frozenset((
     "and", "asort", "asorti", "bindtextdomain", "compl", "dcgettext",
     "dcngettext", "gensub", "isarray", "lshift", "mktime", "or", "patsplit",
     "rshift", "strftime", "strtonum", "systime", "typeof", "xor",
+    # Not builtins that do I/O themselves, but assigning to them chooses the
+    # files awk opens after BEGIN: `ARGV[ARGC++]="/inet/tcp/0/host/80"` builds
+    # a gawk socket at run time, out of reach of the operand check.
+    "ARGV", "ARGC",
 ))
 _AWK_CHARS = frozenset("{}();,$+-*/%^!=<~?:[]&|. \t\n\r_0123456789")
 
@@ -465,7 +469,8 @@ _VERSION_ONLY = {
 # A formula name, or `user/tap/name`. A name with any other `/` or a `:` is a
 # path or a URL to Homebrew's Formulary, which evaluates the .rb it points at
 # or downloads it once the forbid-packages-from-paths default is lifted
-# (HOMEBREW_DEVELOPER, a brew.env file), so those are not names here.
+# (HOMEBREW_DEVELOPER, a brew.env file), so those are not names here; nor is a
+# bottle file name, which the bottle loader opens the same way.
 _BREW_NAME_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+._-]*")
 
 
@@ -475,7 +480,9 @@ def _brew_name(word):
     parts = (word or "").split("/")
     retval = (len(parts) in (1, 3)
               and all(_BREW_NAME_PART.fullmatch(p) for p in parts)
-              and ".." not in word and not word.endswith(".rb"))
+              and ".." not in word and not word.endswith((".rb", ".tar.gz"))
+              # A bottle file: its loader evaluates the formula inside it.
+              and ".bottle." not in word)
     return retval
 
 

@@ -641,10 +641,11 @@ def _how_to_answer(channel, req_id):
     nowhere there; in a DM every message does."""
     if _group(channel) is None:
         retval = f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\"."
+    elif not config.AGENT_LABEL:          # no name to say: quoting is the only way in
+        retval = f"A trusted user quotes this card with \"approve {req_id}\" or \"deny {req_id}\"."
     else:
-        me = (config.AGENT_LABEL or "agent").lower()
         retval = (f"A trusted user quotes this card with \"approve {req_id}\" or \"deny {req_id}\", "
-                  f"or writes \"{me} approve {req_id}\".")
+                  f"or writes \"{config.AGENT_LABEL.lower()} approve {req_id}\".")
     return retval
 
 
@@ -660,7 +661,7 @@ def _post_pending(channel, surface):
         if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a reason long enough to push it over:
             short = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]"
                      if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]")
-            card = _verbatim(short, cmd, f"Reply \"approve {req_id}\" or \"deny {req_id}\".")   # one message
+            card = _verbatim(short, cmd, _how_to_answer(channel, req_id))   # one message
         if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a card is never split (#386 review)
             _card_failed(channel, req_id, surface, rejected=True)
             continue

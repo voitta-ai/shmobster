@@ -635,6 +635,19 @@ def _resume(channel, req_id, req, approved, result, user, surface):
         logging.exception("gateway: could not resume after [%s]", req_id)
 
 
+def _how_to_answer(channel, req_id):
+    """The card's last line. In a group a reply reaches this agent only if it
+    names it or quotes one of its messages, so a bare "approve <id>" goes
+    nowhere there; in a DM every message does."""
+    if _group(channel) is None:
+        retval = f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\"."
+    else:
+        me = (config.AGENT_LABEL or "agent").lower()
+        retval = (f"A trusted user quotes this card with \"approve {req_id}\" or \"deny {req_id}\", "
+                  f"or writes \"{me} approve {req_id}\".")
+    return retval
+
+
 def _post_pending(channel, surface):
     """Cards for what the turn parked, as text a trusted user answers in text."""
     for req_id, req in approvals.claim_unsurfaced(channel, _THREAD):
@@ -643,7 +656,7 @@ def _post_pending(channel, surface):
         # A refusal and a question must not look alike (#172)
         head = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]{reason}"
                 if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]{reason}")
-        card = _verbatim(head, cmd, f"A trusted user replies \"approve {req_id}\" or \"deny {req_id}\".")
+        card = _verbatim(head, cmd, _how_to_answer(channel, req_id))
         if gateway_text.size(card[0]) > gateway_text.LIMIT:      # a reason long enough to push it over:
             short = (f"\u26d4 REFUSED by the classifier -- approve only if you are sure [{req_id}]"
                      if req.get("refused") else f"\U0001F512 Needs approval [{req_id}]")

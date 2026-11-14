@@ -227,10 +227,13 @@ def _file_refusal(texts):
     """`file -C` compiles the magic files it is given into `<name>.mgc` beside
     them -- a write, so `file` cannot be judged on its verb alone (#373
     review). getopt_long takes any unambiguous prefix, so `--comp` is
-    `--compile` too, and a cluster such as `-Cm` carries it."""
+    `--compile` too, and a cluster such as `-Cm` carries it.
+
+    Every word is scanned, `--` or not: in `file -m -- -C` the `--` is the
+    value of `-m` and `-C` is still an option, and telling the two apart means
+    knowing every flag that takes a value. Scanning all of argv only parks a
+    file literally named like the flag."""
     for t in texts:
-        if t == "--":
-            break
         if t.startswith("--"):
             name = t.split("=", 1)[0]
             if len(name) > 2 and "--compile".startswith(name):

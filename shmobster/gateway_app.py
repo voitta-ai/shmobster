@@ -111,14 +111,21 @@ def unsigned(text):
     return retval
 
 
-def send(channel, markdown, reply_to=None, key=None, raw=None):
+def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
     """Post a Markdown reply as final text, split to Signal's limit. Returns
     "ok", "retry" (may pass) or "rejected" (the gateway refused it for good).
     The first piece quotes `reply_to`, so a reply in a shared group stays this
     agent's: the gateway routes the answer to a quote back to whoever sent the
     quoted message. With `key`, each piece is idempotent, so posting the same
     thing again does not repeat the pieces that already went out. With `raw`,
-    a (text, styles) pair is sent exactly as given: no Markdown is read."""
+    a (text, styles) pair is sent exactly as given: no Markdown is read.
+
+    Nothing reaches a Signal group that is not closed (CLAUDE.md), whatever the
+    path -- a reply, command output after an approval, a card, an alert -- so
+    the check is here; a withheld post reads as "rejected", which withdraws a
+    card instead of leaving it parked. Only the refusal itself is `force`d."""
+    if not force and _group(channel) is not None and not _may_post(channel):
+        return "rejected"
     retval = "ok"
     if raw:
         pieces = gateway_text.raw_parts(*raw)
@@ -321,6 +328,20 @@ def _closed(channel):
     return retval
 
 
+def _may_post(channel):
+    """Whether a post may go to this group now. A failed read is tried once more
+    before the post is withheld, so a blip does not cost a closed group its answer."""
+    why = _closed(channel)
+    if why and members(channel) is None:
+        time.sleep(1)
+        members(channel, fresh=True)
+        why = _closed(channel)
+    if why:
+        logging.warning("gateway: withheld a post to %s: %s", channel, "; ".join(why))
+    retval = not why
+    return retval
+
+
 def _guard(fn, data, *args):
     """Run `fn(*args)` for a message, unless its group is open (refused, said at
     most hourly) or it comes from another agent that has had its run of answers
@@ -338,7 +359,7 @@ def _guard(fn, data, *args):
             send(channel, "I only work in closed groups, and I can't serve this one: "
                           + "; ".join(why) + ". A group admin can turn the group link off and set "
                           "Add members to Only admins; then ask me again.",
-                 reply_to=data.get("message_id"))
+                 reply_to=data.get("message_id"), force=True)
         return
     if _group(channel) is not None:
         sender_id = (data.get("sender") or {}).get("id")
@@ -566,9 +587,6 @@ def _turn(data):
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)
-    if _closed(channel):                  # it opened while the turn ran: say nothing there
-        logging.warning("gateway: %s opened during a turn; reply and cards withheld", channel)
-        return
     send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)

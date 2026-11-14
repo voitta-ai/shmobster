@@ -1026,6 +1026,21 @@ only the messages addressed to this one.
   `/help <label>` reaches the agent, which answers without the model: what it is, how to reach
   it, and its GitHub repositories and whether it asks before changing anything there. No paths:
   anyone the gateway lets in can ask. Any other `/help ...` is a normal turn. Release announcements on Signal end with a line saying the same.
+- **Closed groups only.** shmobster serves a Signal group only while the gateway
+  reports it closed: no group link, and only admins can add members. An open
+  group, or one whose members cannot be checked, is refused, with a line in the
+  group at most once an hour saying why and how to close it. This is a fixed
+  rule, not a setting (CLAUDE.md). In the gateway, give such a group
+  `admit: members` so every member's message gets through, as a private Slack
+  channel's do.
+- **People in a group** are named by the operator's `persons` name in
+  `gateway.yaml`, else a stable handle (`Signal user 3f9a2c`) -- never the
+  profile name they chose. The agent can mention them back by writing
+  `@<that name>`, which goes out as a real Signal mention.
+- **Other agents.** A `persons` entry with `agent: true` is another agent. The
+  agent answers at most 3 of its messages in a row in a conversation; a person's
+  message to this agent there resets the count, so two agents cannot answer each
+  other forever. (DMs are not counted.)
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
   the profile name they chose, since anyone can call themselves anything.

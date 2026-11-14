@@ -387,9 +387,10 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
         parts, notes = [], []
         if not approvals.pending_in(channel, thread_ts):
             try:
+                save_under, no_save = attachments.save_root(channel)
                 parts, notes = attachments.to_parts(
                     _TASK_FILES.get((channel, thread_ts)),
-                    save_under=policy_mod.cwd_for(policy_mod.resolve(channel)))
+                    save_under=save_under, no_save=no_save)
             except Exception:  # noqa: BLE001 -- a bad download must not cost the resume
                 logging.exception("resume: could not re-read the task's files")
                 notes = ["the files this task started with could not be read again"]
@@ -489,8 +490,9 @@ def _turn(event, say, client, logger):
     # approval card gets this message's files back (#362). Each one is also
     # saved under the channel cwd and its path given to the model (#372).
     _remember_files(channel, thread_ts, event.get("files"))
+    save_under, no_save = attachments.save_root(channel)
     parts, notes = attachments.to_parts(
-        event.get("files"), save_under=policy_mod.cwd_for(policy_mod.resolve(channel)))
+        event.get("files"), save_under=save_under, no_save=no_save)
     text = event.get("text", "")
     if notes:
         text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"

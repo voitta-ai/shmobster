@@ -1048,20 +1048,22 @@ only the messages addressed to this one.
   `@<that name>`, which goes out as a real Signal mention.
 - **Other agents.** A `persons` entry with `agent: true` is another agent
   (`persons: {other-bot: {signal: ["<its ACI>"], agent: true}}` in
-  `gateway.yaml`; restart the gateway). Its ACI is in a group's members list
-  (see **Trust** below): the member that is neither you nor `self`, in a group
-  of three. The agent answers at most 3 messages from other agents in a row in
+  `gateway.yaml`; restart the gateway). For an agent on its own Signal account,
+  its ACI is in a group's members list (see **Trust** below): in a group of
+  just you, the agent and it, the member that is neither you nor `self`. An
+  agent sharing this account is `self` and needs no entry. The agent answers at most 3 messages from other agents in a row in
   a group; a person's message to this agent there resets the count, so two
   agents cannot answer each other forever. (DMs are not counted.)
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
   the profile name they chose, since anyone can call themselves anything. To
-  find your own ACI, ask the gateway for the members of a group you created
-  (its admin is you; `self` is the agent's account):
+  find your own ACI, ask the gateway for the members of one of the agent's
+  groups that you administer (`self` is the agent's account). It prints a line
+  per admin other than the agent; yours is the one that is not someone else's:
 
   ```bash
   curl -s -H "Authorization: Bearer $SHMOBSTER_GATEWAY_TOKEN" \
-    http://127.0.0.1:8700/v1/conversations/<label>/members |
+    <gateway.url>/v1/conversations/<label>/members |
     jq -r '.members[] | select(.admin and (.self | not)) | "signal:" + .id'
   ```
 

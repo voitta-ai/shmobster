@@ -462,13 +462,32 @@ _VERSION_ONLY = {
 }
 
 
+# A formula name, or `user/tap/name`. A name with any other `/` or a `:` is a
+# path or a URL to Homebrew's Formulary, which evaluates the .rb it points at
+# or downloads it once the forbid-packages-from-paths default is lifted
+# (HOMEBREW_DEVELOPER, a brew.env file), so those are not names here.
+_BREW_NAME_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9@+._-]*")
+
+
+def _brew_name(word):
+    """True for a formula name that can only be looked up, never loaded from
+    a path or a URL."""
+    parts = (word or "").split("/")
+    retval = (len(parts) in (1, 3)
+              and all(_BREW_NAME_PART.fullmatch(p) for p in parts)
+              and ".." not in word and not word.endswith(".rb"))
+    return retval
+
+
 def _brew_versions(args, src):
-    """`brew list --versions [formula ...]`, which only prints what is
-    installed (#374). An allowlist of one shape: every other subcommand or
-    option, and a name that takes shell rules to read, is not this."""
+    """`brew list --versions [formula ...]` (#374). It prints installed
+    versions; a name that is not installed can make brew fetch its formula
+    API index from Homebrew's own host, and nothing else. An allowlist of one
+    shape: every other subcommand or option, and a name outside
+    `_brew_name`, is not this."""
     words = [_literal_word(a, src) for a in args]
     retval = (words[:2] == ["list", "--versions"]
-              and all(w is not None and w[:1] not in ("", "-") for w in words[2:]))
+              and all(_brew_name(w) for w in words[2:]))
     return retval
 
 
@@ -1356,7 +1375,7 @@ class _Walker:
             return retval
         at = _awk_program_index(texts) if verb == "awk" else None
         if isinstance(at, int):
-            why = self.awk_words(args, at)
+            why = self.awk_words(args, texts, at)
             if why:
                 retval = (False, why)
                 return retval
@@ -1364,7 +1383,7 @@ class _Walker:
         retval = (False, why) if why else (True, f"{verb}: read-only")
         return retval
 
-    def awk_words(self, args, at):
+    def awk_words(self, args, texts, at):
         """Why awk's words are not ones whose program this layer can read, or
         None. `at` is where the program is.
 
@@ -1377,7 +1396,9 @@ class _Walker:
         Inside single quotes the shell changes nothing; a double-quoted or
         concatenated word, or a bare word, it can. The operands after it keep
         the rule every awk word had before #374: a plain word or a
-        single-quoted string."""
+        single-quoted string. And none of them may name gawk's network files:
+        gawk opens `/inet/tcp/0/host/port` (and `/inet4`, `/inet6`, `/p/inet`)
+        as a socket, a connection `allow_domains` never sees."""
         retval = None
         if any(_literal_word(a, self.src) is None for a in args[:at]):
             retval = "awk: an option takes shell rules to read"
@@ -1387,6 +1408,8 @@ class _Walker:
                      or a.type in ("word", "number") and "\\" not in _text(a, self.src)
                      for a in args[at + 1:]):
             retval = "awk: an operand is not a plain word or single-quoted string"
+        elif any(t.startswith(("/inet", "/p/inet")) for t in texts[at + 1:]):
+            retval = "awk: an operand names a gawk network file"
         return retval
 
     def fetch(self, verb, text, args):

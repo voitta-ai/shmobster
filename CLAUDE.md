@@ -85,4 +85,7 @@ than admins able to add members), refuses when it cannot find out, and says why
 in the group at most once an hour (`gateway_app._guard`). Do not add a flag,
 policy key or per-group exception that serves an open group, and do not weaken
 the rule to "warn". The fix for a refused group is in Signal: turn the link off
-and set Add members to Only admins.
+and set Add members to Only admins. Every post to a group goes through
+`gateway_app.send`, which withholds it while the group is not closed; an
+approval card withheld that way is withdrawn for good, and nothing resumes a
+task because of it.

@@ -113,7 +113,8 @@ def unsigned(text):
 
 def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
     """Post a Markdown reply as final text, split to Signal's limit. Returns
-    "ok", "retry" (may pass) or "rejected" (the gateway refused it for good).
+    "ok", "retry" (may pass), "rejected" (the gateway refused it for good) or
+    "withheld" (the group is not closed; see below).
     The first piece quotes `reply_to`, so a reply in a shared group stays this
     agent's: the gateway routes the answer to a quote back to whoever sent the
     quoted message. With `key`, each piece is idempotent, so posting the same
@@ -122,10 +123,11 @@ def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
 
     Nothing reaches a Signal group that is not closed (CLAUDE.md), whatever the
     path -- a reply, command output after an approval, a card, an alert -- so
-    the check is here; a withheld post reads as "rejected", which withdraws a
-    card instead of leaving it parked. Only the refusal itself is `force`d."""
+    the check is here, and a withheld post returns "withheld": not a gateway
+    refusal, so nothing treats it as a reason to carry a task on. Only the
+    refusal itself is `force`d."""
     if not force and _group(channel) is not None and not _may_post(channel):
-        return "rejected"
+        return "withheld"
     retval = "ok"
     if raw:
         pieces = gateway_text.raw_parts(*raw)
@@ -650,7 +652,10 @@ def _post_pending(channel, surface):
             _card_failed(channel, req_id, surface, rejected=True)
             continue
         outcome = send(channel, None, key=f"card:{req_id}", raw=card)
-        if outcome != "ok":
+        if outcome == "withheld":         # the group is not closed: drop the request, carry nothing on
+            approvals.withdraw(req_id)
+            logging.warning("gateway: withdrew [%s]: %s is not closed", req_id, channel)
+        elif outcome != "ok":
             _card_failed(channel, req_id, surface, rejected=outcome == "rejected")
     for key, prop in proposals.claim_unsurfaced(channel):
         card = redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}\n"

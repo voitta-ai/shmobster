@@ -25,7 +25,10 @@ if [ ! -f "$HEARTBEAT" ]; then
   exit 0
 fi
 
-mtime=$(stat -f %m "$HEARTBEAT" 2>/dev/null || stat -c %Y "$HEARTBEAT" 2>/dev/null)
+# GNU first: GNU `stat -f` is --file-system, so `stat -f %m` prints the file
+# system report on stdout before failing on "%m", and that text would land in
+# $mtime. BSD `stat -c` fails with nothing on stdout, so this order is clean.
+mtime=$(stat -c %Y "$HEARTBEAT" 2>/dev/null || stat -f %m "$HEARTBEAT" 2>/dev/null)
 age=$(( now - mtime ))
 
 if [ "$age" -gt "$STALE_SEC" ]; then

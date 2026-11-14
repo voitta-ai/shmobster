@@ -1046,13 +1046,30 @@ only the messages addressed to this one.
   `gateway.yaml`, else a stable handle (`Signal user 3f9a2c`) -- never the
   profile name they chose. The agent can mention them back by writing
   `@<that name>`, which goes out as a real Signal mention.
-- **Other agents.** A `persons` entry with `agent: true` is another agent. The
-  agent answers at most 3 of its messages in a row in a conversation; a person's
-  message to this agent there resets the count, so two agents cannot answer each
-  other forever. (DMs are not counted.)
+- **Other agents.** A `persons` entry with `agent: true` is another agent
+  (`persons: {other-bot: {signal: ["<its ACI>"], agent: true}}` in
+  `gateway.yaml`; restart the gateway). For an agent on its own Signal account,
+  its ACI is in a group's members list (see **Trust** below): in a group of
+  just you, the agent and it, the member that is neither you nor `self`. An
+  agent sharing this account is `self` and needs no entry. The agent answers at most 3 messages from other agents in a row in
+  a group; a person's message to this agent there resets the count, so two
+  agents cannot answer each other forever. (DMs are not counted.)
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
-  the profile name they chose, since anyone can call themselves anything.
+  the profile name they chose, since anyone can call themselves anything. To
+  find your own ACI, ask the gateway for the members of one of the agent's
+  groups that you administer (`self` is the agent's account). It prints a line
+  per admin other than the agent; yours is the one that is not someone else's:
+
+  ```bash
+  curl -s -H "Authorization: Bearer $SHMOBSTER_GATEWAY_TOKEN" \
+    <gateway.url>/v1/conversations/<label>/members |
+    jq -r '.members[] | select(.admin and (.self | not)) | "signal:" + .id'
+  ```
+
+  Add the line it prints to `trusted_users` and restart. An ACI is an account
+  id: keep it out of channels, commits and logs, like any other id in the
+  config.
 - **Approvals are text.** A card names the request id. If a trusted user's
   whole message is `approve <id>` or `deny <id>`, it resolves the request the
   way a button click does on Slack, and the task carries on (#169). The

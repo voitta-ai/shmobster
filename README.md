@@ -367,6 +367,13 @@ though the message were text-only.
 Only files on the *mentioning* message are read. Attachments earlier in the
 thread are not, because every reply in that thread would re-download them.
 
+Each file that passes those caps is also saved, byte-identical, under the
+channel's working directory at `.attachments/<file id>/<name>`, and the turn
+names that path (#372), so the agent copies the file instead of retyping it.
+The directory carries its own `*` `.gitignore`, so it is never committed and the
+repo's own `.gitignore` is left alone. Nothing prunes it; delete it by hand when
+it grows. A file that was read but could not be saved is listed as a note.
+
 An app created before `files:read` landed in the manifest must **reinstall** to
 grant it (same flow as `reactions:write` above). Until it does, attachments come
 back as `got Slack's sign-in page instead of the file` -- Slack answers an

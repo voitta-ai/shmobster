@@ -367,6 +367,23 @@ though the message were text-only.
 Only files on the *mentioning* message are read. Attachments earlier in the
 thread are not, because every reply in that thread would re-download them.
 
+Each file that passes those caps is also saved, byte-identical, under the
+channel's working directory at `.attachments/<file id>/<name>` (files 0600,
+directories 0700), and the turn names that path relative to the working
+directory (#372), so the agent copies the file instead of retyping it. The
+directory carries its own `*` `.gitignore`, so it is never committed and the
+repo's own `.gitignore` is left alone. Nothing prunes it; delete it by hand when
+it grows.
+
+Nothing is saved for a conversation without a working directory of its own:
+its policy (directly or through its `link`) must set `cwd`, and that must not be
+`default_policy`'s or `exec.cwd`. Every other conversation shares those, so one
+person's file would be readable from another's turn. Nothing is saved when the cwd is
+inside shmobster's own checkout, venv or runtime files, or is the directory
+holding its config, policies or workspace spine -- `exec.cwd` defaults to `.`,
+the deployment itself. In those cases, and when a save fails, the turn tells
+the model the file was not saved, so it says so instead of retyping it.
+
 An app created before `files:read` landed in the manifest must **reinstall** to
 grant it (same flow as `reactions:write` above). Until it does, attachments come
 back as `got Slack's sign-in page instead of the file` -- Slack answers an

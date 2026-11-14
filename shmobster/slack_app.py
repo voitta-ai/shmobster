@@ -65,7 +65,7 @@ def _thread_context(client, channel, thread_ts, cur_ts):
 _TASK_FILES = {}
 _TASK_FILES_MAX = 200
 _TASK_FILES_PER_THREAD = 10
-_FILE_REF_KEYS = ("name", "mimetype", "url_private_download", "url_private")
+_FILE_REF_KEYS = ("id", "name", "mimetype", "url_private_download", "url_private")
 
 
 def _remember_files(channel, thread_ts, files):
@@ -387,7 +387,10 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
         parts, notes = [], []
         if not approvals.pending_in(channel, thread_ts):
             try:
-                parts, notes = attachments.to_parts(_TASK_FILES.get((channel, thread_ts)))
+                save_under, no_save = attachments.save_root(channel)
+                parts, notes = attachments.to_parts(
+                    _TASK_FILES.get((channel, thread_ts)),
+                    save_under=save_under, no_save=no_save)
             except Exception:  # noqa: BLE001 -- a bad download must not cost the resume
                 logging.exception("resume: could not re-read the task's files")
                 notes = ["the files this task started with could not be read again"]
@@ -484,9 +487,12 @@ def _turn(event, say, client, logger):
     # Attachments ride in event["files"], not in the text (#68). Only this
     # message's -- files in thread *history* stay unread for now, since every
     # reply would re-download them. The refs are kept so a resume after an
-    # approval card gets this message's files back (#362).
+    # approval card gets this message's files back (#362). Each one is also
+    # saved under the channel cwd and its path given to the model (#372).
     _remember_files(channel, thread_ts, event.get("files"))
-    parts, notes = attachments.to_parts(event.get("files"))
+    save_under, no_save = attachments.save_root(channel)
+    parts, notes = attachments.to_parts(
+        event.get("files"), save_under=save_under, no_save=no_save)
     text = event.get("text", "")
     if notes:
         text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"

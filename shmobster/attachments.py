@@ -16,12 +16,15 @@ Two things about Slack file URLs are worth knowing before touching this:
   PNG. The content-type check below is what turns that into an error.
 """
 import base64
+import hashlib
 import logging
+import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import config
+from . import config, policy, sandbox, spine
 
 _TIMEOUT = 20
 # ponytail: one flat cap for every type; split per-mimetype only if it bites.
@@ -102,12 +105,163 @@ def _part(name, mime, blob):
     return retval
 
 
-def to_parts(files):
+# Under the channel cwd (#372). The directory ignores itself (a `*` .gitignore
+# inside it), so a `git add -A` in a checkout never commits a client's file,
+# and the repo's own .gitignore is never touched.
+SAVE_DIR = ".attachments"
+_ID_OK = re.compile(r"^[A-Za-z0-9]{1,64}$")
+_NAME_BAD = re.compile(r"[^A-Za-z0-9._ -]")
+_NAME_MAX = 200
+
+
+def _safe_name(name):
+    """The Slack filename as one plain path component. The name is data from
+    the event, so `../x`, `a/b` and a leading dot all come out as an ordinary
+    file inside the attachment's own directory. A long name keeps its
+    extension, so `cp`ing the file somewhere still yields a `.csv`."""
+    base = _NAME_BAD.sub("_", name).lstrip(". ").rstrip(". ")
+    if len(base) > _NAME_MAX:
+        stem, ext = os.path.splitext(base)
+        ext = ext if len(ext) <= 16 else ""
+        base = stem[:_NAME_MAX - len(ext)].rstrip(". ") + ext
+    retval = base or "file"
+    return retval
+
+
+def _dir_id(f, url):
+    """The per-file directory: Slack's file id, or a hash of the url when the
+    event carries no usable id."""
+    fid = str(f.get("id") or "")
+    retval = fid if _ID_OK.match(fid) else "u" + hashlib.sha256(url.encode()).hexdigest()[:16]
+    return retval
+
+
+def _open_dir(name, dir_fd):
+    """Open (creating if needed) one directory under dir_fd without following
+    a symlink. The channel can write its own cwd, so `.attachments` could be a
+    link it planted; this process is not sandboxed, and following one would
+    write wherever it pointed."""
+    try:
+        os.mkdir(name, 0o700, dir_fd=dir_fd)
+    except FileExistsError:
+        pass
+    retval = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    return retval
+
+
+def _save(cwd, sub, name, blob):
+    """Write blob to <cwd>/.attachments/<sub>/<name>, byte-identical, and
+    return the absolute path. A repeat save of the same file id rewrites the
+    file atomically, so the path always holds Slack's bytes; an edit belongs
+    on a copy."""
+    fds = []
+    try:
+        fds.append(os.open(cwd, os.O_RDONLY | os.O_DIRECTORY))
+        fds.append(_open_dir(SAVE_DIR, fds[-1]))
+        try:
+            gi = os.open(".gitignore", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=fds[-1])
+            with os.fdopen(gi, "w") as fh:
+                fh.write("*\n")
+        except FileExistsError:
+            pass
+        fds.append(_open_dir(sub, fds[-1]))
+        # A random suffix, retried on a clash: two turns saving the same file id
+        # at once, or a temp left by a killed process, must not block a save.
+        for _ in range(8):
+            tmp = f".{name}.{os.urandom(6).hex()}.tmp"
+            try:
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=fds[-1])
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise FileExistsError("no free temp file name")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(blob)
+            os.replace(tmp, name, src_dir_fd=fds[-1], dst_dir_fd=fds[-1])
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=fds[-1])
+            except OSError:
+                pass
+            raise
+    finally:
+        for fd in fds:
+            os.close(fd)
+    retval = os.path.join(SAVE_DIR, sub, name)
+    return retval
+
+
+def save_root(channel):
+    """(cwd, None) where this conversation's attachments may be saved, or
+    (None, reason) when they may not.
+
+    Only a conversation whose policy (directly, or through its `link`) sets a
+    `cwd` of its own gets one: every other DM and channel shares
+    default_policy's or exec.cwd's,
+    so one person's file would be readable from another's turn. And never
+    inside this deployment's own code, runtime files or standing prompt --
+    `exec.cwd` defaults to ".", which is the live checkout -- by the same
+    lists the sandbox write-denies (#147, #174, self_roots)."""
+    shared = (None, "this conversation has no working directory of its own, so it may "
+                    "be shared with others")
+    try:
+        # Its own `cwd`, not just an entry: a routing-only entry (mirror, link to
+        # one), an empty one or one without `cwd` resolves to the shared default.
+        resolved = policy.resolve(channel)
+        cwd = policy.cwd_for(resolved)
+        real = os.path.realpath(cwd)
+        common = {os.path.realpath(policy.cwd_for(config.DEFAULT_POLICY)),
+                  os.path.realpath(os.path.expanduser(os.path.expandvars(config.EXEC_CWD)))}
+    except Exception:  # noqa: BLE001 -- fail closed: no save, said as a note
+        logging.exception("attachments: could not resolve this conversation's working directory")
+        return shared
+    if not resolved.get("cwd") or real in common:
+        return shared
+    try:
+        # Inside a self root (the checkout, venv, runtime files), or AT the
+        # directory holding a config, policy or spine file. Only "at" for the
+        # latter: a config file can sit in $HOME, and "under $HOME" would refuse
+        # every channel on the host.
+        inside = (any(sandbox._under(real, os.path.realpath(r)) for r in sandbox.self_roots())
+                  or real in {os.path.dirname(os.path.realpath(p))
+                              for p in tuple(config.SELF_FILES) + tuple(spine.files())})
+    except Exception:  # noqa: BLE001 -- fail closed: no save, said as a note
+        logging.exception("attachments: could not work out shmobster's own roots")
+        inside = True
+    if inside:
+        retval = (None, "this channel's working directory is inside shmobster's own files")
+        return retval
+    retval = (cwd, None)
+    return retval
+
+
+def _unsaved(name, why):
+    """The model's line for a file it can read but has no saved copy of. Its
+    own wording, not the could-not-read list: the content did arrive."""
+    retval = {"type": "text", "text": (
+        f"[attached file {name} was NOT saved to disk: {why}. There is no copy "
+        f"to work from; do not retype it.]")}
+    return retval
+
+
+def to_parts(files, save_under=None, no_save=None):
     """Turn one message's `files` into (content_parts, notes).
 
     `notes` is every attachment we could not read and why -- surfaced to the
     user rather than swallowed, because silence here is exactly the bug that
     made #68 look like the model ignoring the question.
+
+    With `save_under` (the channel cwd), each file that passed the caps is
+    also written to disk byte-identical and the model is told its path (#372):
+    a model that only sees the text has no way to put the bytes in a file but
+    to retype them, which silently dropped rows. Same fetch, same caps, same
+    Slack-only download. A save that fails, or `no_save` (the reason this
+    conversation gets none, from save_root), is said to the model per file,
+    never dropped (#68).
     """
     parts = []
     notes = []
@@ -128,5 +282,19 @@ def to_parts(files):
             notes.append(f"{name}: {exc}")
             continue
         parts.append(_part(name, mime, blob))
+        if no_save:
+            parts.append(_unsaved(name, no_save))
+        elif save_under:
+            try:
+                path = _save(save_under, _dir_id(f, url), _safe_name(name), blob)
+            except OSError as exc:
+                logging.warning("could not save attachment %s: %s", name, exc)
+                parts.append(_unsaved(name, exc.strerror or str(exc)))
+                continue
+            parts.append({"type": "text", "text": (
+                f"[attached file {name} is saved byte-identical at {path}, relative "
+                f"to the working directory ({len(blob)} bytes, sha256 "
+                f"{hashlib.sha256(blob).hexdigest()}). Work from that path; copy it "
+                f"before editing.]")})
     retval = (parts, notes)
     return retval

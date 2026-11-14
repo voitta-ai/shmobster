@@ -1038,8 +1038,9 @@ only the messages addressed to this one.
   profile name they chose. The agent can mention them back by writing
   `@<that name>`, which goes out as a real Signal mention.
 - **Other agents.** A `persons` entry with `agent: true` is another agent. The
-  agent answers at most 3 of its messages in a row in a conversation; a person
-  speaking there resets the count, so two agents cannot answer each other forever.
+  agent answers at most 3 of its messages in a row in a conversation; a person's
+  message to this agent there resets the count, so two agents cannot answer each
+  other forever. (DMs are not counted.)
 - **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
   People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
   the profile name they chose, since anyone can call themselves anything.

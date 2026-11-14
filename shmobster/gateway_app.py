@@ -123,8 +123,13 @@ def send(channel, markdown, reply_to=None, key=None, raw=None):
     if raw:
         pieces = gateway_text.raw_parts(*raw)
     else:
-        text, ids = _to_mentions(channel, unsigned(for_signal(markdown)))   # after the marker is gone
-        pieces = _attach_mentions(gateway_text.parts(text), ids)
+        plain = unsigned(for_signal(markdown)).replace(_MARK, "")   # after the marker is gone
+        text, ids = _to_mentions(channel, plain)
+        pieces = gateway_text.parts(text)
+        marks = sum(p.get("text", "").count(_MARK) for parts in pieces for p in parts)
+        if marks != len(ids):             # rendering moved or dropped one: no mention beats a wrong one
+            pieces, ids = gateway_text.parts(plain), []
+        pieces = _attach_mentions(pieces, ids)
     for i, parts in enumerate(pieces):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
@@ -243,6 +248,7 @@ _MARK = "\ufffc"
 
 _MEMBERS = {}             # channel -> (fetched at, members report or None)
 _MEMBERS_TTL = 60
+_MEMBERS_FAIL_TTL = 5     # a failed read refuses only briefly, then is tried again
 _LOCK = threading.Lock()
 _REFUSED = {}             # channel -> when the last refusal was posted there
 _REFUSE_EVERY = 3600
@@ -251,27 +257,30 @@ _AGENT_RUN_MAX = 3
 
 
 def _group(channel):
-    """The gateway label of a group channel (`<medium>:<label>`), or None for a DM."""
-    rest = str(channel or "").partition(":")[2]
-    retval = None if (not rest or rest.startswith("id:")) else rest
+    """The gateway label of a Signal group channel (`signal:<label>`), or None for
+    a DM or any other medium: the closed-group rule is about Signal groups."""
+    medium, _, rest = str(channel or "").partition(":")
+    retval = None if (medium != "signal" or not rest or rest.startswith("id:")) else rest
     return retval
 
 
-def members(channel):
+def members(channel, fresh=False):
     """The gateway's report on a group: members (id, admin, self, person_id,
-    agent) and whether it is open. Cached a minute; None when it could not be
-    had, which serves nothing (fail closed)."""
+    agent) and whether it is open. Cached a minute (a failure a few seconds);
+    None when it could not be had or is not the expected shape, which serves
+    nothing (fail closed)."""
     label = _group(channel)
     if label is None:
         return None
     now = time.time()
     with _LOCK:
         hit = _MEMBERS.get(channel)
-    if hit and now - hit[0] < _MEMBERS_TTL:
+    if hit and not fresh and now - hit[0] < (_MEMBERS_TTL if hit[1] is not None else _MEMBERS_FAIL_TTL):
         return hit[1]
     try:
         info = _call("GET", f"/v1/conversations/{urllib.parse.quote(label, safe='')}/members", timeout=10)
-        if not (isinstance(info, dict) and isinstance(info.get("members"), list)):
+        if not (isinstance(info, dict) and isinstance(info.get("members"), list)
+                and isinstance(info.get("open"), bool) and isinstance(info.get("reasons", []), list)):
             info = None
     except urllib.error.HTTPError as exc:
         logging.warning("gateway: could not list members of %s: %s %s", channel, exc.code, _error_code(exc))
@@ -332,7 +341,11 @@ def _guard(fn, data, *args):
                  reply_to=data.get("message_id"))
         return
     if _group(channel) is not None:
-        sender = _member(channel, (data.get("sender") or {}).get("id"))
+        sender_id = (data.get("sender") or {}).get("id")
+        sender = _member(channel, sender_id)
+        if sender is None:                # joined since the cache was filled: ask again
+            info = members(channel, fresh=True)
+            sender = next((m for m in (info or {}).get("members") or [] if m.get("id") == sender_id), None)
         with _LOCK:
             if sender and sender.get("agent"):
                 run = _AGENT_RUN.get(channel, 0)
@@ -355,12 +368,16 @@ def _to_mentions(channel, text):
         if m.get("id") and not m.get("self"):
             names[_name(channel, m["id"])] = m["id"]
     ids = []
+    text = text.replace(_MARK, "")        # only the mentions made here may carry one
     if names:
         alt = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+        pattern = re.compile(rf"(?<![\w/.@:])@({alt})(?![\w-])")
         def one(match):
             ids.append(names[match.group(1)])
             return _MARK
-        text = re.sub(rf"@({alt})(?![\w-])", one, text)
+        # Not inside code (``` blocks, `spans`): a name there is text, not a mention.
+        chunks = re.split(r"(```.*?```|`[^`\n]*`)", text, flags=re.S)
+        text = "".join(c if i % 2 else pattern.sub(one, c) for i, c in enumerate(chunks))
     return text, ids
 
 
@@ -401,10 +418,11 @@ def _mentioned(text, mentions, channel=None):
     return retval
 
 
-def _text(data, channel=None):
+def _text(data, channel=None, names=True):
     """The message as text: text parts, and voice notes by their transcript.
-    `channel` names other people's mentions; an event carries its own."""
-    if channel is None and data.get("conversation"):
+    `channel` names other people's mentions; an event carries its own. With
+    `names` off (the poll thread's parsing) nobody is looked up."""
+    if channel is None and names and data.get("conversation"):
         channel = channel_of(data)
     pieces, unread = [], []
     mentions = data.get("mentions") or []
@@ -492,7 +510,7 @@ _HELP = re.compile(r"^\s*/help\s+@?(\S+)\s*$", re.IGNORECASE)
 def _help(data):
     """The channel when the message is `/help <this agent>`. Any other `/help x`
     goes to the model: a gateway that is older or not shared passes those on."""
-    m = _HELP.match(_unaddressed(_text(data)))      # "@Ada /help ada" too
+    m = _HELP.match(_unaddressed(_text(data, names=False)))      # "@Ada /help ada" too
     me = {n.lower() for n in (config.AGENT_LABEL, config.GATEWAY_CONSUMER) if n}
     retval = channel_of(data) if m and m.group(1).lower() in me else None
     return retval
@@ -522,7 +540,7 @@ def _approval(data):
     user's `approve <id>` / `deny <id>`, else None."""
     medium = data.get("channel", "gateway")
     user = f"{medium}:{(data.get('sender') or {}).get('id')}"
-    m = _APPROVAL.match(_unaddressed(_text(data)))
+    m = _APPROVAL.match(_unaddressed(_text(data, names=False)))
     if not (m and admin_tools.is_trusted(user)):
         return None
     retval = (m.group(1).lower() == "approve", m.group(2), channel_of(data), user, GatewaySurface(medium))
@@ -548,6 +566,9 @@ def _turn(data):
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)
+    if _closed(channel):                  # it opened while the turn ran: say nothing there
+        logging.warning("gateway: %s opened during a turn; reply and cards withheld", channel)
+        return
     send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)
@@ -690,8 +711,8 @@ def _loop():
                     # Every lane goes through _guard: no open group is served (CLAUDE.md).
                     if approval:                  # its own lane: never behind long turns
                         fut = _approvals_pool.submit(_run, _guard, mid, started, _resolve_text, data, *approval)
-                    elif _help(data):             # no model: the same lane, it is as quick
-                        fut = _approvals_pool.submit(_run, _guard, mid, started, _describe, data, _help(data), mid)
+                    elif (help_in := _help(data)):   # no model: the same lane, it is as quick
+                        fut = _approvals_pool.submit(_run, _guard, mid, started, _describe, data, help_in, mid)
                     else:
                         fut = _pool.submit(_run, _guard, mid, started, _turn, data, data)
                 if isinstance(e.get("id"), str):
@@ -713,10 +734,12 @@ def start(slack_post=None):
     served = conversations(timeout=5)       # boot waits on this; a hung gateway must not stall it
     if served is not None:
         logging.info("gateway: serving %d listed conversation(s)", len(served))
-        for channel in served:
-            why = _closed(channel)
-            if why:
-                logging.warning("gateway: %s is not served until it is closed: %s", channel, "; ".join(why))
+        def report(channels):
+            for channel in channels:
+                why = _closed(channel)
+                if why:
+                    logging.warning("gateway: %s is not served until it is closed: %s", channel, "; ".join(why))
+        threading.Thread(target=report, args=(served,), name="gateway-groups", daemon=True).start()
     for key, pol in sorted(config.CHANNEL_POLICIES.items()):
         if ":" not in key or ":id:" in key:
             continue
@@ -756,7 +779,8 @@ def announce(text):
     me = config.AGENT_LABEL or "an agent"
     text += (f"\n\n_I'm {me}, one of the agents on this account. Start a message with "
              f"\"{me.lower()}\" or mention the account; /help lists who's here._")
-    retval = sum(1 for channel in conversations() or [] if send(channel, text) == "ok")
+    retval = sum(1 for channel in conversations() or []
+                 if not _closed(channel) and send(channel, text) == "ok")   # never into an open group
     return retval
 
 
@@ -793,5 +817,8 @@ def mirror_in(slack_channel, question, answer):
         return
     question = redact.scrub(re.sub(r"<@\w+>", "", question or "").strip())
     for channel in targets:
+        if _closed(channel):              # never into an open group (CLAUDE.md)
+            logging.warning("gateway: not mirroring into %s: it is not closed", channel)
+            continue
         send(channel, f"{_MIRRORED} from Slack: _someone asked:_ {question}")
         send(channel, f"{_MIRRORED} from Slack: {answer}")

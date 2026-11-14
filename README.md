@@ -1037,12 +1037,11 @@ only the messages addressed to this one.
   1. turns **Group link** off (an invite link, even one that needs approval,
      counts as open: signal-cli cannot tell the two apart);
   2. under **Permissions**, sets **Add members** to **Only admins**.
-
-  The account itself does not need to be an admin. The gateway re-reads each
-  group every 30 seconds and the agent caches what it read for a minute, so a
-  group starts being served (or stops) within about a minute of the change.
-  At boot the log names every served group that is still open, with what is
-  open about it.
+  The account itself does not need to be an admin. The agent re-checks a group
+  at most once a minute, and the gateway re-checks an `admit: members` group
+  every 30 seconds, so a group starts being served (or stops) within about a
+  minute of the change. After boot the log names every served group that is
+  still open, or that could not be checked, and why.
 - **People in a group** are named by the operator's `persons` name in
   `gateway.yaml`, else a stable handle (`Signal user 3f9a2c`) -- never the
   profile name they chose. The agent can mention them back by writing

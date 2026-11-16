@@ -113,12 +113,18 @@ _TASK_FILES = {}
 _TASK_FILES_MAX = 200
 _TASK_FILES_PER_TASK = 10
 _FILE_REF_KEYS = ("attachment_id", "filename", "content_type", "missing")
+_TASK_FILES_LOCK = threading.Lock()   # turns run on a pool: no lost merges
 
 
 def _remember_files(channel, files):
     """While the channel's task is under way, a message's files add to the
     task's and a message without files changes nothing; once it is idle, a
     message with files starts the list afresh and one without clears it."""
+    with _TASK_FILES_LOCK:
+        _remember_files_locked(channel, files)
+
+
+def _remember_files_locked(channel, files):
     busy = approvals.busy(channel, _THREAD)
     refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
     if refs:
@@ -721,7 +727,7 @@ def _resume(channel, req_id, req, approved, result, user, surface):
         # The task's files, read again only when this answer can resume it:
         # with other requests still parked, handler.resume refuses.
         parts, notes = ([], []) if approvals.pending_in(channel, _THREAD) \
-            else _read_files(channel, _TASK_FILES.get(channel))
+            else _read_files(channel, list(_TASK_FILES.get(channel) or []))
         reply = handler.resume(req_id, approved, req.get("command", ""), result,
                                attachments=parts, attachment_notes=notes,
                                thread_context=_history(cid, None, channel=channel) if cid else None,

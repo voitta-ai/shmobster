@@ -355,8 +355,13 @@ def capabilities(policy, channel=None):
         policy.get("github_repos"), "no repo restriction"))
     lines.append("- AWS: " + (f"profile {policy['aws_profile']}" if policy.get("aws_profile")
                               else "no profile; no AWS credentials unless a command brings its own"))
-    lines.append("- network without a card: " + _listed(
-        policy.get("allow_domains"),
+    # "Parks" spelled out for the listed case too: an agent reading only the
+    # list concluded an unlisted host was unreachable and handed the check back
+    # to a human instead of running it and letting it card.
+    lines.append("- network without a card: " + (
+        _listed(policy.get("allow_domains"), "")
+        + "; any other host still works -- the fetch parks for approval"
+        if policy.get("allow_domains") else
         "no hosts -- every curl, wget or git remote fetch parks for approval"))
     lines.append("- credentials injected (names only, values never shown): " + _listed(
         sorted(policy.get("env") or {}), "none"))

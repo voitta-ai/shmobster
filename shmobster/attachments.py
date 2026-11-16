@@ -1,4 +1,5 @@
-"""Slack file attachments -> model content parts (#68).
+"""File attachments -> model content parts (#68); Slack's fetch lives here, the
+gateway's in gateway_app (#413).
 
 Slack never puts an attachment in the message text; it arrives as
 `event["files"]`, which the loop used to drop on the floor. So a mention like
@@ -248,7 +249,20 @@ def _unsaved(name, why):
     return retval
 
 
-def to_parts(files, save_under=None, no_save=None):
+def slack_source(f):
+    """What to_parts needs to know about one Slack file: (name, mime, the
+    per-file directory, a zero-argument fetch), or a str saying why it cannot
+    be fetched. The fetch is Slack-only (_fetch)."""
+    name = f.get("name") or "file"
+    url = f.get("url_private_download") or f.get("url_private")
+    if not url:
+        retval = f"{name}: no download url in the event"
+        return retval
+    retval = (name, (f.get("mimetype") or "").lower(), _dir_id(f, url), lambda: _fetch(url))
+    return retval
+
+
+def to_parts(files, save_under=None, no_save=None, source=slack_source):
     """Turn one message's `files` into (content_parts, notes).
 
     `notes` is every attachment we could not read and why -- surfaced to the
@@ -258,35 +272,41 @@ def to_parts(files, save_under=None, no_save=None):
     With `save_under` (the channel cwd), each file that passed the caps is
     also written to disk byte-identical and the model is told its path (#372):
     a model that only sees the text has no way to put the bytes in a file but
-    to retype them, which silently dropped rows. Same fetch, same caps, same
-    Slack-only download. A save that fails, or `no_save` (the reason this
-    conversation gets none, from save_root), is said to the model per file,
-    never dropped (#68).
+    to retype them, which silently dropped rows. A save that fails, or
+    `no_save` (the reason this conversation gets none, from save_root), is said
+    to the model per file, never dropped (#68).
+
+    `source` turns one entry of `files` into its name, type, directory and
+    fetch (slack_source's contract). It is the only transport-specific part:
+    the type and size caps, the content part and the save are the same for
+    every ingest (#413).
     """
     parts = []
     notes = []
     for f in files or []:
-        name = f.get("name") or "file"
-        mime = (f.get("mimetype") or "").lower()
-        url = f.get("url_private_download") or f.get("url_private")
-        if not url:
-            notes.append(f"{name}: no download url in the event")
+        got = source(f)
+        if isinstance(got, str):
+            notes.append(got)
             continue
+        name, mime, sub, fetch = got
         if not (mime.startswith("image/") or mime.startswith("text/")):
             notes.append(f"{name}: unsupported type {mime or 'unknown'}")
             continue
         try:
-            blob = _fetch(url)
+            blob = fetch()
         except (urllib.error.URLError, ValueError, OSError) as exc:
             logging.warning("could not fetch attachment %s: %s", name, exc)
             notes.append(f"{name}: {exc}")
+            continue
+        if len(blob) > _MAX_BYTES:
+            notes.append(f"{name}: larger than the {_MAX_BYTES} byte cap")
             continue
         parts.append(_part(name, mime, blob))
         if no_save:
             parts.append(_unsaved(name, no_save))
         elif save_under:
             try:
-                path = _save(save_under, _dir_id(f, url), _safe_name(name), blob)
+                path = _save(save_under, sub, _safe_name(name), blob)
             except OSError as exc:
                 logging.warning("could not save attachment %s: %s", name, exc)
                 parts.append(_unsaved(name, exc.strerror or str(exc)))

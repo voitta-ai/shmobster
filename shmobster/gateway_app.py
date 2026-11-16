@@ -23,8 +23,10 @@ Approvals are text, and they are not the model's call. A trusted user's whole
 message reading `approve <id>` or `deny <id>` resolves that request here, the
 way a button click does on Slack. Anything else is a turn, in which the model
 can still call approve_command, under the same trusted-user check."""
+import hashlib
 import json
 import logging
+import mimetypes
 import re
 import threading
 import time
@@ -33,7 +35,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import admin_tools, approvals, config, gateway_text, handler, identity, policy, proposals, redact, state
+from . import admin_tools, approvals, attachments, config, gateway_text, handler, identity, policy, proposals, redact, state
 from .surface import Surface
 
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
@@ -61,6 +63,109 @@ def _call(method, path, body=None, timeout=30):
         headers={"Authorization": f"Bearer {config.GATEWAY_TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         retval = json.loads(resp.read() or b"{}")
+    return retval
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The consumer token goes to the configured gateway and nowhere else, so a
+    redirect is an error rather than a hop that carries the bearer along."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(newurl, code, "gateway redirected; not following", headers, fp)
+
+
+_FILE_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _fetch_attachment(aid):
+    """One stored attachment's bytes from the gateway, capped like Slack's."""
+    req = urllib.request.Request(
+        config.GATEWAY_URL.rstrip("/") + "/v1/attachments/" + urllib.parse.quote(aid, safe=""),
+        headers={"Authorization": f"Bearer {config.GATEWAY_TOKEN}"})
+    with _FILE_OPENER.open(req, timeout=30) as resp:
+        retval = resp.read(attachments._MAX_BYTES + 1)
+    return retval
+
+
+def _attachment_source(p):
+    """attachments.to_parts' view of one gateway file part (#413). A Signal
+    paste has no filename, so one is made from the id and the type."""
+    mime = str(p.get("content_type") or "").lower()
+    aid = p.get("attachment_id")
+    name = p.get("filename") or (
+        (aid or "attachment") + (mimetypes.guess_extension(mime.split(";")[0].strip()) or ""))
+    if not aid or p.get("missing"):
+        retval = f"{name}: the gateway did not receive the file"
+        return retval
+    # The directory is the id when it is already a safe name, else a hash of the
+    # whole id: stripping characters would let two distinct ids share a directory.
+    sid = str(aid)
+    dir_id = sid if attachments._ID_OK.match(sid) else "a" + hashlib.sha256(sid.encode()).hexdigest()[:16]
+    retval = (name, mime, dir_id, lambda: _fetch_attachment(aid))
+    return retval
+
+
+# channel -> the file parts of the message that started the task under way, so
+# the turn that resumes it after an approval gets them back (#413, as Slack's
+# #362). Refs only, never bytes: a resume re-fetches through to_parts, with the
+# same caps. In memory, like the parked requests they serve.
+_TASK_FILES = {}
+_TASK_FILES_MAX = 200
+_TASK_FILES_PER_TASK = 10
+_FILE_REF_KEYS = ("attachment_id", "filename", "content_type", "missing")
+_TASK_FILES_LOCK = threading.Lock()   # turns run on a pool: no lost merges
+
+
+def _remember_files(channel, files):
+    """While the channel's task is under way, a message's files add to the
+    task's and a message without files changes nothing; once it is idle, a
+    message with files starts the list afresh and one without clears it."""
+    with _TASK_FILES_LOCK:
+        _remember_files_locked(channel, files)
+
+
+def _task_files(channel):
+    """A copy of the task's file refs, read under the lock that guards merges."""
+    with _TASK_FILES_LOCK:
+        retval = list(_TASK_FILES.get(channel) or [])
+    return retval
+
+
+def _remember_files_locked(channel, files):
+    busy = approvals.busy(channel, _THREAD)
+    refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
+    if refs:
+        held = _TASK_FILES.pop(channel, None) or []
+        if not busy:
+            held = []
+        seen = {r.get("attachment_id") for r in held if r.get("attachment_id")}
+        merged = held + [r for r in refs if not r.get("attachment_id") or r["attachment_id"] not in seen]
+        _TASK_FILES[channel] = merged[-_TASK_FILES_PER_TASK:]
+        if len(_TASK_FILES) > _TASK_FILES_MAX:
+            del _TASK_FILES[next(iter(_TASK_FILES))]
+    elif not busy:
+        _TASK_FILES.pop(channel, None)
+
+
+def _read_files(channel, files):
+    """(parts, notes) for gateway file parts, never raising."""
+    parts, notes = [], []
+    if files:
+        try:
+            save_under, no_save = attachments.save_root(channel)
+            parts, notes = attachments.to_parts(files, save_under=save_under,
+                                                no_save=no_save, source=_attachment_source)
+        except Exception:  # noqa: BLE001 -- said to the model, never dropped (#68)
+            logging.exception("gateway: could not read the attachments in %s", channel)
+            notes = ["the attached files could not be read"]
+    return parts, notes
+
+
+def _files(data):
+    """The message's file parts the model should get, voice notes excepted:
+    those arrive as their transcript, in _text."""
+    retval = [p for p in data.get("parts") or []
+              if p.get("type") == "file" and not p.get("transcript")]
     return retval
 
 
@@ -441,10 +546,12 @@ def _mentioned(text, mentions, channel=None):
     return retval
 
 
-def _text(data, channel=None, names=True):
+def _text(data, channel=None, names=True, files=True):
     """The message as text: text parts, and voice notes by their transcript.
     `channel` names other people's mentions; an event carries its own. With
-    `names` off (the poll thread's parsing) nobody is looked up."""
+    `names` off (the poll thread's parsing) nobody is looked up. With `files`
+    off, other file parts are left to the caller, which reads them (#413);
+    otherwise they are named as unread, which is right for history."""
     if channel is None and names and data.get("conversation"):
         channel = channel_of(data)
     pieces, unread = [], []
@@ -455,7 +562,7 @@ def _text(data, channel=None, names=True):
             mentions = []                         # offsets are into the message's one text part
         elif p.get("transcript"):
             pieces.append(f"[voice note] {p['transcript']}")
-        elif p.get("type") == "file":
+        elif p.get("type") == "file" and files:
             unread.append(p.get("filename") or p.get("content_type") or "a file")
     retval = "\n".join(pieces).strip()
     if unread:
@@ -577,7 +684,13 @@ def _turn(data):
     user = f"{medium}:{sender.get('id')}"
     _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
-    text = _text(data)
+    text = _text(data, files=False)
+    # The message's files, read the way slack_app reads Slack's (#413): same caps,
+    # same content parts, same save rules, fetched from the gateway.
+    _remember_files(channel, _files(data))
+    parts, notes = _read_files(channel, _files(data))
+    if notes:
+        text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
     try:
         _call("POST", f"/v1/messages/{data['message_id']}/reactions", {"emoji": "\U0001F440"})
     except Exception:  # noqa: BLE001
@@ -585,7 +698,7 @@ def _turn(data):
     context = _history(data["conversation_id"], data["message_id"], channel=channel)
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=_THREAD,
-                               user_id=user, surface=surface)
+                               user_id=user, surface=surface, attachments=parts)
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)
@@ -618,7 +731,12 @@ def _resume(channel, req_id, req, approved, result, user, surface):
     whether this is the moment."""
     try:
         cid = _CONVERSATIONS.get(channel)
+        # The task's files, read again only when this answer can resume it:
+        # with other requests still parked, handler.resume refuses.
+        parts, notes = ([], []) if approvals.pending_in(channel, _THREAD) \
+            else _read_files(channel, _task_files(channel))
         reply = handler.resume(req_id, approved, req.get("command", ""), result,
+                               attachments=parts, attachment_notes=notes,
                                thread_context=_history(cid, None, channel=channel) if cid else None,
                                channel=channel, thread_ts=_THREAD,
                                user_id=user, surface=surface, requester=req.get("requester"))

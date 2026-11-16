@@ -2635,7 +2635,6 @@ try:
                "git -c diff.external=touch diff --ext-diff",
                "git --config-env=core.fsmonitor=EV status",
                "git grep -Otouch needle",
-               "git grep needle",
                "git diff --output=out.txt",
                "git diff -O out.txt",
                "tree -o out.txt"):
@@ -2646,7 +2645,8 @@ try:
     _ok, _why = grant.check("git -c core.fsmonitor=touch add .", _rpol)
     assert not _ok, (_ok, _why)
     # the ordinary forms still pass
-    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x ."):
+    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x .",
+               "git grep needle"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok and "read-only" in _why, (_c, _ok, _why)
     # process substitution runs a command, in an argument or as a redirect

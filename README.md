@@ -506,9 +506,12 @@ One JSON config, no `.env`. Copy the example and fill it in:
 
   The bar for entry is that no flag turns the command into a write, which is
   why `sort` (`-o`), `uniq` (output positional), `find` (`-delete`), `xargs`
-  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent, and why
-  `git grep` is absent from the git list -- `git grep -O<cmd>` runs the pager it
-  is handed, whether or not anything is a terminal.
+  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent. `git grep`
+  is on the git list with its two program-running options refused:
+  `-O`/`--open-files-in-pager` runs the pager it is handed whether or not
+  anything is a terminal, and `--textconv` runs the configured driver. Both are
+  refused in every spelling git accepts -- abbreviated long names and clustered
+  short flags -- and such a command parks for a card.
 
   `npm` is admitted for `ls`/`list` only (`grant.NPM_READS`): local, no network,
   no scripts. `npm view`/`outdated` are left out because they reach whatever

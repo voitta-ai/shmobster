@@ -664,7 +664,54 @@ GIT_READ = frozenset((
     # A..B`); it takes revision options only, and the diff family's `--output`
     # is refused for every subcommand below anyway.
     "merge-base", "for-each-ref", "rev-list",
+    # Searching tracked content. Read-only except for two flags, refused by
+    # _git_grep_refusal below.
+    "grep",
 ))
+
+# `git grep -O[<pager>]` / `--open-files-in-pager[=<pager>]` hands the matching
+# file names to a program of the caller's choosing, and `--textconv` runs the
+# textconv drivers configured for those files. Measured on git 2.49 with stdin
+# and stdout not a terminal: `-O<cmd>`, `-iO<cmd>`, `--open=<cmd>` and the full
+# spelling all ran the program. git's option parser accepts any unambiguous
+# prefix of a long option and short flags clustered behind one dash, so both
+# are matched here, not just the exact token. A refusal on something git would
+# have read differently costs a card, which is the direction this may be wrong in.
+_GIT_GREP_RUNS_LONG = ("--open-files-in-pager", "--textconv")
+# Exact long options that share a prefix with the above and do not run anything.
+_GIT_GREP_EXACT_SAFE = frozenset(("--text", "--or"))
+# Short flags whose value follows, attached or as the next word.
+_GIT_GREP_VALUE_LETTERS = frozenset("efABCm")
+
+
+def _git_grep_refusal(rest):
+    """Why this `git grep` may run a program, or None. `rest` is the literal
+    words after the subcommand, up to and past `--`."""
+    retval = None
+    skip = False
+    for w in rest:
+        if skip:
+            skip = False
+            continue
+        if w == _END_OF_OPTIONS:
+            break
+        if w.startswith("--"):
+            name = w.split("=", 1)[0]
+            if (name not in _GIT_GREP_EXACT_SAFE and len(name) > 2
+                    and any(o.startswith(name) for o in _GIT_GREP_RUNS_LONG)):
+                retval = f"git grep {name}: runs a program"
+                break
+        elif w.startswith("-") and len(w) > 1:
+            for i, ch in enumerate(w[1:], start=1):
+                if ch == "O":
+                    retval = "git grep -O: runs a program"
+                    break
+                if ch in _GIT_GREP_VALUE_LETTERS:
+                    skip = i == len(w) - 1
+                    break
+            if retval:
+                break
+    return retval
 
 # `git branch`'s listing form, as an allowlist rather than a list of the ways
 # it writes (#236). The deny-list shape used for `find` and `sort` is wrong
@@ -1913,8 +1960,9 @@ class _Walker:
                 retval = (False, "git worktree: only `list` is read-only")
         elif sub in GIT_READ and not self.writes_file and not writes_flag:
             # A word this cannot read could be the output flag.
-            retval = ((False, f"git {sub}: an argument is not a literal")
-                      if None in rest else (True, f"git {sub}: read-only"))
+            why = (f"git {sub}: an argument is not a literal" if None in rest
+                   else _git_grep_refusal(rest) if sub == "grep" else None)
+            retval = (False, why) if why else (True, f"git {sub}: read-only")
         elif sub is None:                 # `git -C <dir>` alone: nothing to vouch for
             retval = (False, "git: no subcommand")
         else:

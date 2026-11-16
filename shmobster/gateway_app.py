@@ -23,6 +23,7 @@ Approvals are text, and they are not the model's call. A trusted user's whole
 message reading `approve <id>` or `deny <id>` resolves that request here, the
 way a button click does on Slack. Anything else is a turn, in which the model
 can still call approve_command, under the same trusted-user check."""
+import hashlib
 import json
 import logging
 import mimetypes
@@ -96,9 +97,55 @@ def _attachment_source(p):
     if not aid or p.get("missing"):
         retval = f"{name}: the gateway did not receive the file"
         return retval
-    retval = (name, mime, re.sub(r"[^A-Za-z0-9]", "", aid)[:64] or "file",
-              lambda: _fetch_attachment(aid))
+    # The directory is the id when it is already a safe name, else a hash of the
+    # whole id: stripping characters would let two distinct ids share a directory.
+    sid = str(aid)
+    dir_id = sid if attachments._ID_OK.match(sid) else "a" + hashlib.sha256(sid.encode()).hexdigest()[:16]
+    retval = (name, mime, dir_id, lambda: _fetch_attachment(aid))
     return retval
+
+
+# channel -> the file parts of the message that started the task under way, so
+# the turn that resumes it after an approval gets them back (#413, as Slack's
+# #362). Refs only, never bytes: a resume re-fetches through to_parts, with the
+# same caps. In memory, like the parked requests they serve.
+_TASK_FILES = {}
+_TASK_FILES_MAX = 200
+_TASK_FILES_PER_TASK = 10
+_FILE_REF_KEYS = ("attachment_id", "filename", "content_type", "missing")
+
+
+def _remember_files(channel, files):
+    """While the channel's task is under way, a message's files add to the
+    task's and a message without files changes nothing; once it is idle, a
+    message with files starts the list afresh and one without clears it."""
+    busy = approvals.busy(channel, _THREAD)
+    refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
+    if refs:
+        held = _TASK_FILES.pop(channel, None) or []
+        if not busy:
+            held = []
+        seen = {r.get("attachment_id") for r in held if r.get("attachment_id")}
+        merged = held + [r for r in refs if not r.get("attachment_id") or r["attachment_id"] not in seen]
+        _TASK_FILES[channel] = merged[-_TASK_FILES_PER_TASK:]
+        if len(_TASK_FILES) > _TASK_FILES_MAX:
+            del _TASK_FILES[next(iter(_TASK_FILES))]
+    elif not busy:
+        _TASK_FILES.pop(channel, None)
+
+
+def _read_files(channel, files):
+    """(parts, notes) for gateway file parts, never raising."""
+    parts, notes = [], []
+    if files:
+        try:
+            save_under, no_save = attachments.save_root(channel)
+            parts, notes = attachments.to_parts(files, save_under=save_under,
+                                                no_save=no_save, source=_attachment_source)
+        except Exception:  # noqa: BLE001 -- said to the model, never dropped (#68)
+            logging.exception("gateway: could not read the attachments in %s", channel)
+            notes = ["the attached files could not be read"]
+    return parts, notes
 
 
 def _files(data):
@@ -627,15 +674,8 @@ def _turn(data):
     text = _text(data, files=False)
     # The message's files, read the way slack_app reads Slack's (#413): same caps,
     # same content parts, same save rules, fetched from the gateway.
-    parts, notes = [], []
-    if _files(data):
-        try:
-            save_under, no_save = attachments.save_root(channel)
-            parts, notes = attachments.to_parts(_files(data), save_under=save_under,
-                                                no_save=no_save, source=_attachment_source)
-        except Exception:  # noqa: BLE001 -- said to the model, never dropped (#68)
-            logging.exception("gateway: could not read the attachments of %s", data["message_id"])
-            notes = ["the attached files could not be read"]
+    _remember_files(channel, _files(data))
+    parts, notes = _read_files(channel, _files(data))
     if notes:
         text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
     try:
@@ -678,7 +718,12 @@ def _resume(channel, req_id, req, approved, result, user, surface):
     whether this is the moment."""
     try:
         cid = _CONVERSATIONS.get(channel)
+        # The task's files, read again only when this answer can resume it:
+        # with other requests still parked, handler.resume refuses.
+        parts, notes = ([], []) if approvals.pending_in(channel, _THREAD) \
+            else _read_files(channel, _TASK_FILES.get(channel))
         reply = handler.resume(req_id, approved, req.get("command", ""), result,
+                               attachments=parts, attachment_notes=notes,
                                thread_context=_history(cid, None, channel=channel) if cid else None,
                                channel=channel, thread_ts=_THREAD,
                                user_id=user, surface=surface, requester=req.get("requester"))

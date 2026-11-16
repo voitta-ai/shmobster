@@ -677,7 +677,8 @@ GIT_READ = frozenset((
 # prefix of a long option and short flags clustered behind one dash, so both
 # are matched here, not just the exact token. A refusal on something git would
 # have read differently costs a card, which is the direction this may be wrong in.
-_GIT_GREP_RUNS_LONG = ("--open-files-in-pager", "--textconv")
+# `--ext-grep` is a no-op in current git, but documented as running grep(1).
+_GIT_GREP_RUNS_LONG = ("--open-files-in-pager", "--textconv", "--ext-grep")
 # Exact long options that share a prefix with the above and do not run anything.
 _GIT_GREP_EXACT_SAFE = frozenset(("--text", "--or"))
 # Short flags whose value follows, attached or as the next word.

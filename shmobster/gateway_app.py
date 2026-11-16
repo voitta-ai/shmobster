@@ -25,6 +25,7 @@ way a button click does on Slack. Anything else is a turn, in which the model
 can still call approve_command, under the same trusted-user check."""
 import json
 import logging
+import mimetypes
 import re
 import threading
 import time
@@ -33,7 +34,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from . import admin_tools, approvals, config, gateway_text, handler, identity, policy, proposals, redact, state
+from . import admin_tools, approvals, attachments, config, gateway_text, handler, identity, policy, proposals, redact, state
 from .surface import Surface
 
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
@@ -61,6 +62,50 @@ def _call(method, path, body=None, timeout=30):
         headers={"Authorization": f"Bearer {config.GATEWAY_TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         retval = json.loads(resp.read() or b"{}")
+    return retval
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The consumer token goes to the configured gateway and nowhere else, so a
+    redirect is an error rather than a hop that carries the bearer along."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(newurl, code, "gateway redirected; not following", headers, fp)
+
+
+_FILE_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _fetch_attachment(aid):
+    """One stored attachment's bytes from the gateway, capped like Slack's."""
+    req = urllib.request.Request(
+        config.GATEWAY_URL.rstrip("/") + "/v1/attachments/" + urllib.parse.quote(aid, safe=""),
+        headers={"Authorization": f"Bearer {config.GATEWAY_TOKEN}"})
+    with _FILE_OPENER.open(req, timeout=30) as resp:
+        retval = resp.read(attachments._MAX_BYTES + 1)
+    return retval
+
+
+def _attachment_source(p):
+    """attachments.to_parts' view of one gateway file part (#413). A Signal
+    paste has no filename, so one is made from the id and the type."""
+    mime = str(p.get("content_type") or "").lower()
+    aid = p.get("attachment_id")
+    name = p.get("filename") or (
+        (aid or "attachment") + (mimetypes.guess_extension(mime.split(";")[0].strip()) or ""))
+    if not aid or p.get("missing"):
+        retval = f"{name}: the gateway did not receive the file"
+        return retval
+    retval = (name, mime, re.sub(r"[^A-Za-z0-9]", "", aid)[:64] or "file",
+              lambda: _fetch_attachment(aid))
+    return retval
+
+
+def _files(data):
+    """The message's file parts the model should get, voice notes excepted:
+    those arrive as their transcript, in _text."""
+    retval = [p for p in data.get("parts") or []
+              if p.get("type") == "file" and not p.get("transcript")]
     return retval
 
 
@@ -441,10 +486,12 @@ def _mentioned(text, mentions, channel=None):
     return retval
 
 
-def _text(data, channel=None, names=True):
+def _text(data, channel=None, names=True, files=True):
     """The message as text: text parts, and voice notes by their transcript.
     `channel` names other people's mentions; an event carries its own. With
-    `names` off (the poll thread's parsing) nobody is looked up."""
+    `names` off (the poll thread's parsing) nobody is looked up. With `files`
+    off, other file parts are left to the caller, which reads them (#413);
+    otherwise they are named as unread, which is right for history."""
     if channel is None and names and data.get("conversation"):
         channel = channel_of(data)
     pieces, unread = [], []
@@ -455,7 +502,7 @@ def _text(data, channel=None, names=True):
             mentions = []                         # offsets are into the message's one text part
         elif p.get("transcript"):
             pieces.append(f"[voice note] {p['transcript']}")
-        elif p.get("type") == "file":
+        elif p.get("type") == "file" and files:
             unread.append(p.get("filename") or p.get("content_type") or "a file")
     retval = "\n".join(pieces).strip()
     if unread:
@@ -577,7 +624,20 @@ def _turn(data):
     user = f"{medium}:{sender.get('id')}"
     _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
-    text = _text(data)
+    text = _text(data, files=False)
+    # The message's files, read the way slack_app reads Slack's (#413): same caps,
+    # same content parts, same save rules, fetched from the gateway.
+    parts, notes = [], []
+    if _files(data):
+        try:
+            save_under, no_save = attachments.save_root(channel)
+            parts, notes = attachments.to_parts(_files(data), save_under=save_under,
+                                                no_save=no_save, source=_attachment_source)
+        except Exception:  # noqa: BLE001 -- said to the model, never dropped (#68)
+            logging.exception("gateway: could not read the attachments of %s", data["message_id"])
+            notes = ["the attached files could not be read"]
+    if notes:
+        text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
     try:
         _call("POST", f"/v1/messages/{data['message_id']}/reactions", {"emoji": "\U0001F440"})
     except Exception:  # noqa: BLE001
@@ -585,7 +645,7 @@ def _turn(data):
     context = _history(data["conversation_id"], data["message_id"], channel=channel)
     try:
         reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=_THREAD,
-                               user_id=user, surface=surface)
+                               user_id=user, surface=surface, attachments=parts)
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)

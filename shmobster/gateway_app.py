@@ -124,6 +124,13 @@ def _remember_files(channel, files):
         _remember_files_locked(channel, files)
 
 
+def _task_files(channel):
+    """A copy of the task's file refs, read under the lock that guards merges."""
+    with _TASK_FILES_LOCK:
+        retval = list(_TASK_FILES.get(channel) or [])
+    return retval
+
+
 def _remember_files_locked(channel, files):
     busy = approvals.busy(channel, _THREAD)
     refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
@@ -727,7 +734,7 @@ def _resume(channel, req_id, req, approved, result, user, surface):
         # The task's files, read again only when this answer can resume it:
         # with other requests still parked, handler.resume refuses.
         parts, notes = ([], []) if approvals.pending_in(channel, _THREAD) \
-            else _read_files(channel, list(_TASK_FILES.get(channel) or []))
+            else _read_files(channel, _task_files(channel))
         reply = handler.resume(req_id, approved, req.get("command", ""), result,
                                attachments=parts, attachment_notes=notes,
                                thread_context=_history(cid, None, channel=channel) if cid else None,

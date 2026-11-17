@@ -230,7 +230,7 @@ def _post_pending(client, channel, thread_ts):
             _card_failed(client, channel, thread_ts, req_id, exc)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
-    for key, prop in proposals.claim_unsurfaced(channel):
+    for key, prop in proposals.claim_unsurfaced(channel, thread_ts):
         try:
             client.chat_postMessage(
                 channel=channel,

@@ -789,7 +789,7 @@ def _post_pending(channel, surface):
             logging.warning("gateway: withdrew [%s]: %s is not closed", req_id, channel)
         elif outcome != "ok":
             _card_failed(channel, req_id, surface, rejected=outcome == "rejected")
-    for key, prop in proposals.claim_unsurfaced(channel):
+    for key, prop in proposals.claim_unsurfaced(channel, _THREAD):
         card = redact.scrub(f"Worth a skill? [{key}] {prop['name']} -- {prop['why']}\n"
                             f"A trusted user can ask me to open it ({key}) or decline it.")
         if send(channel, card, key=f"proposal:{key}") != "ok":

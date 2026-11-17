@@ -328,20 +328,22 @@ def claim_unsurfaced(channel, thread_ts=None):
     out = []
     with _LOCK:
         for key, req in list(_PENDING.items()):
-            if req.get("channel") == channel and not req.get("surfaced"):
-                req["surfaced"] = True
-                # Where it was surfaced. Since #266 add() records this at
-                # park time, so this is the fallback for a caller that did not
-                # pass one -- and it must not overwrite, because a card
-                # surfaced into a thread other than the one it was parked in
-                # would silently move which thread waits on it.
-                if req.get("thread_ts") is None:
-                    req["thread_ts"] = thread_ts
-                elif thread_ts is not None and req["thread_ts"] != thread_ts:
-                    logging.warning(
-                        "approvals: [%s] was parked in thread %s and surfaced in %s; "
-                        "keeping the parked one", key, req["thread_ts"], thread_ts)
-                out.append((key, req))
+            if req.get("channel") != channel or req.get("surfaced"):
+                continue
+            # Another thread's request is left for that thread's turn, which
+            # surfaces what it parked when it ends, a failed turn included.
+            # Taking it here posted a card into a conversation that never
+            # asked for it: two turns ran at once in one channel, and the one
+            # that finished first carried the other's cards off with it.
+            if (thread_ts is not None and req.get("thread_ts") is not None
+                    and req["thread_ts"] != thread_ts):
+                continue
+            req["surfaced"] = True
+            # Since #266 add() records the thread at park time, so this is the
+            # fallback for a caller that did not pass one.
+            if req.get("thread_ts") is None:
+                req["thread_ts"] = thread_ts
+            out.append((key, req))
     retval = out
     return retval
 

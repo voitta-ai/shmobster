@@ -57,16 +57,22 @@ def sandboxed(pol):
     channel, a background job -- can swap them in between and aim git at a
     config the agent wrote. A key such as `core.fsmonitor` then runs a
     command. Confined, that command reaches only what the channel's own
-    commands reach. No sandbox, no probe: None, which never grants."""
+    commands reach, minus the network and git's credential helper (#422
+    review). No sandbox, no probe: None, which never grants."""
     def run(directory, args):
         # tools imports grant, which imports this module.
         from . import tools
         try:
-            argv = sandbox.wrap(shlex.join(["git", "-C", directory, "--no-pager"] + args), pol)
+            argv = sandbox.wrap(shlex.join(["git", "-C", directory, "--no-pager"] + args),
+                                pol, network=False)
         except RuntimeError:
             return None
-        # The floor environment only: a probe needs no channel credential.
-        retval = _run(argv, env=tools.child_env({}))
+        # The floor environment only: no channel credential and not git's
+        # credential helper (gitcfg), which a probe never needs. Whatever a
+        # swapped config runs gets no network either.
+        env = {k: v for k, v in os.environ.items()
+               if k in tools._BASE_ENV_NAMES or k.startswith(tools._BASE_ENV_PREFIXES)}
+        retval = _run(argv, env=env)
         return retval
     return run
 

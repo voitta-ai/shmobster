@@ -1662,9 +1662,13 @@ _g_pol = {"cwd": _g_primary}
 # YOLT stubbed by verb: the grant layer asks it about the segments it does not
 # vouch for itself, so `diff` and `git status` come back safe, `rm` does not
 yolt_gate.classify = lambda cmd, cwd=None: (("safe", "read-only") if cmd.split()[0] in ("cd", "diff", "ls", "cat", "echo") or cmd.startswith(("git status", "git log")) else ("unsafe", cmd.split()[0] + ": mutating"))
-_ok, _why = grant.check(f"cd {_g_wt} && cp README copy && diff -q README copy; git add copy && git status --short && git commit -m 'c'", _g_pol)
+_ok, _why = grant.check(f"cd {_g_wt} && git status --short && cp README copy && diff -q README copy; git add copy && git commit -m 'c'", _g_pol)
 assert _ok, _why
 assert "git commit: linked worktree on feat, solo author" in _why, _why
+# ...but git reading the repository after a write in the same command parks:
+# the write lands first and can change what git loads (#344)
+_ok, _why = grant.check(f"cd {_g_wt} && cp README copy && git status --short", _g_pol)
+assert not _ok and "after a write in the same command" in _why, _why
 _ok, _why = grant.check("git commit -m x", _g_pol)
 assert not _ok and "primary checkout" in _why, _why
 _ok, _why = grant.check(f"git -C {_g_wt} commit -m x", _g_pol)
@@ -1682,7 +1686,10 @@ assert not _ok and "other@example.com" in _why, _why
 for _cmd, _frag in (
     ("cat > f <<'EOF'\nhi\nEOF", None),
     ("mkdir -p out && ls | tee out/l 2>/dev/null", None),
-    ("git checkout -b x && git switch -c y && git add -A && git stash", None),
+    ("git checkout -b x", None),
+    ("git switch -c y", None),
+    ("git stash", None),
+    ("git add -A && git stash", "git stash: after a write in the same command"),
     ('cp "$SRC" dst', None),
     ("rm -rf out", "rm: mutating"),
     ("git reset --hard", "git reset: not a local write"),
@@ -2609,9 +2616,12 @@ try:
         _ok, _why = grant.check(_c, _rpol)
         assert not _ok, (_c, _ok, _why)
     # ...and the flag walk survives `git -C <dir>` before the subcommand
-    _ok, _why = grant.check("git -C /tmp branch -a", _rpol)
+    _ok, _why = grant.check("git -C . branch -a", _rpol)
     assert _ok, _why
-    _ok, _why = grant.check("git -C /tmp branch -D topic", _rpol)
+    # ...and pointed anywhere but the checkout, git is not granted (#344)
+    _ok, _why = grant.check("git -C /tmp branch -a", _rpol)
+    assert not _ok and "not the channel's checkout" in _why, _why
+    _ok, _why = grant.check("git -C . branch -D topic", _rpol)
     assert not _ok and "flag -D" in _why, _why
     # ...and the things that look like reads but are not. Each of these was
     # `safe` under voitta-yolt 1.6.0, which is why READ_VERBS is not parity
@@ -4002,9 +4012,10 @@ yolt_gate.classify = lambda cmd, cwd=None: (
 )
 try:
 
-    _inv = ("cd /tmp && git log --oneline -5 && echo --- && "
+    # In a checkout: git is granted only in the channel's repository (#344).
+    _inv = (f"cd {_g_primary} && git log --oneline -5 && echo --- && "
             "find . -maxdepth 2 -not -path './.git*' | sort")
-    _ok, _why = grant.check(_inv, _rpol)
+    _ok, _why = grant.check(_inv, {"cwd": _g_primary})
     assert _ok, (_inv, _why)
 
     for _c in ("find . -maxdepth 2 -name '*.json'", "find . -type f -print",
@@ -4898,7 +4909,7 @@ assert "already resuming this thread" in _app59, "the other silence stays silent
 # absence cost a card, taking every other segment of the command with it.
 _saved60, yolt_gate.classify = yolt_gate.classify, (
     lambda cmd, cwd=None: ("unsafe", "stub: only the grant layer may grant this"))
-_pol60 = {"cwd": "/tmp", "github_repos": ["*"]}
+_pol60 = {"cwd": _g_primary, "github_repos": ["*"]}   # git is granted in a checkout (#344)
 try:
     for _c in ("git merge-base --is-ancestor A B", "git merge-base A B",
                "git merge-base --fork-point origin/main", "git merge-base -a A B",

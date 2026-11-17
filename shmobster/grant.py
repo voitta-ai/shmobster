@@ -2472,12 +2472,11 @@ def _git_pin_refusal(directory, start_dir):
         return "git: the repository's .git is a symlink"
     if d == root and os.path.isdir(dot):
         return None
-    # The checkout may itself be a linked worktree. Nothing names which
-    # repository it belongs to, so its pointer is held to the shape the
-    # sandbox protects rather than to a particular repository.
+    # A checkout that is itself a linked worktree has nothing trusted to hold
+    # its pointer to: a gitdir of the right shape can be built anywhere the
+    # sandbox writes, by renaming a directory into place (#344 review).
     if d == root and os.path.isfile(dot):
-        retval = _pointer_refusal(dot, None)
-        return retval
+        return "git: the checkout's .git is a file, with no repository to check it against"
     if d.startswith(worktrees + os.sep) and os.path.isfile(dot):
         main = os.path.join(root, ".git")
         if os.path.islink(main) or not os.path.isdir(main):
@@ -2497,10 +2496,7 @@ def _pointer_refusal(dot, main):
     `core.fsmonitor`, and the probes run git outside the sandbox (#344
     review). So the pointer has to have the shape `git worktree add` gives it:
     a gitdir directly under `<C>/worktrees/`, whose `commondir` resolves back
-    to `<C>`, where `<C>` is a directory named `.git`. Every configuration
-    file and hook git then loads -- `<C>/config`, `<C>/hooks/`, the gitdir's
-    `config.worktree` -- is a path the sandbox denies writing. `main`, when
-    given, is the one `<C>` allowed: the channel's own checkout."""
+    to `<C>`, where `<C>` is `main`, the channel's own checkout's `.git`."""
     gitdir = _read_pointer(dot, "gitdir: ")
     if gitdir is None:
         return "git: the worktree's .git is not a single gitdir line"
@@ -2508,7 +2504,7 @@ def _pointer_refusal(dot, main):
     admin = os.path.dirname(gitdir)
     common = os.path.dirname(admin)
     if (os.path.basename(admin) != "worktrees" or os.path.basename(common) != ".git"
-            or (main is not None and common != main) or not os.path.isdir(gitdir)):
+            or common != main or not os.path.isdir(gitdir)):
         return "git: the worktree's .git does not point into a repository's .git/worktrees"
     pointed = _read_pointer(os.path.join(gitdir, "commondir"), "")
     if pointed is None or os.path.realpath(os.path.join(gitdir, pointed)) != common:

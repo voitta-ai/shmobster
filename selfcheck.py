@@ -2536,7 +2536,7 @@ def _yolt_2x(cmd, cwd=None):
 
 
 yolt_gate.classify = _yolt_2x
-_rpol = {"cwd": "."}
+_rpol = {"cwd": _g_primary}   # a real checkout, wherever selfcheck runs from (#344)
 try:
     # the reads that 1.6.0 called safe and 2.0.x delegates
     for _c in ("cat README.md", "ls -la", "grep -rn x .", "head -1 f", "wc -l f",
@@ -2745,7 +2745,12 @@ try:
     # inside its repos and its tree the destructive commands run too. The point
     # is enabling the people in that channel, not protecting them from their
     # own workspace.
-    _un = {"cwd": ".", "unattended": True, "github_repos": ["o/r"],
+    # A checkout of its own, with an origin on github.com, so `git push` has a
+    # remote to read wherever selfcheck runs from (#344 pins git to it).
+    _un_repo = os.path.join(tempfile.mkdtemp(), "r")
+    subprocess.run(["git", "init", "-q", _un_repo], check=True)
+    subprocess.run(["git", "-C", _un_repo, "remote", "add", "origin", "https://github.com/o/r.git"], check=True)
+    _un = {"cwd": _un_repo, "unattended": True, "github_repos": ["o/r"],
            "allow_domains": ["github.com", "api.github.com"]}
     for _c in ("rm -rf build", "gh pr merge 3",
                "gh api -X POST repos/o/r/issues -f title=x",

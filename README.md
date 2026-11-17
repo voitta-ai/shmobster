@@ -1,5 +1,8 @@
 # shmobster
 
+[![checks](https://github.com/voitta-ai/shmobster/actions/workflows/checks.yml/badge.svg?branch=master)](https://github.com/voitta-ai/shmobster/actions/workflows/checks.yml)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/voitta-ai/shmobster/python-coverage-comment-action-data/endpoint.json)](https://github.com/voitta-ai/shmobster/tree/python-coverage-comment-action-data)
+
 A Slack agent you host yourself: one process per machine, answering in the
 channels it is invited to, running commands in a tree you scope per channel.
 

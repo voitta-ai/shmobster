@@ -1,0 +1,5 @@
+[run]
+source = shmobster
+# The coverage action maps paths against the checkout; absolute paths from the
+# runner would not match.
+relative_files = true

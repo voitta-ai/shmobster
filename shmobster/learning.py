@@ -193,7 +193,7 @@ def amend_candidate(name, why, channel):
     if not words:
         return None
     best, score = None, 0
-    for entry in skills.view(channel):
+    for entry in skills.view(channel).values():
         hay = f"{entry.get('name', '')} {entry.get('summary', '')}".lower()
         n = sum(1 for w in words if w in hay)
         if n > score:

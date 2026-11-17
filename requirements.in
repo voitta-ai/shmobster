@@ -12,8 +12,8 @@
 # this file without recompiling is self-revealing instead: the package does not
 # get installed, and selfcheck says so.
 slack-bolt>=1.18
-litellm>=1.100
-tree-sitter>=0.21
+litellm>=1.109.1
+tree-sitter>=0.26.1
 tree-sitter-bash>=0.21
 pyyaml>=6
 

@@ -1241,7 +1241,9 @@ class _Walker:
         # satisfy a check_command -- the safe direction.
         self.channel = channel
         self.thread_ts = thread_ts
-        self.probe = gitstate.GitProbe()
+        # Probes run git on a repository the channel can write, so they run
+        # confined (#421).
+        self.probe = gitstate.GitProbe(gitstate.sandboxed(self.policy))
         self.reasons = []
         # Raised while walking the body of a redirect that writes to a real
         # file, so a read verb under it is not granted as a read (#177).

@@ -27,7 +27,10 @@ Three facts about a directory, all deterministic and reproducible:
 Every probe failure -- no git, not a repo, timeout, unparseable output --
 reads as "predicate not satisfied". A failed probe must never grant."""
 import os
+import shlex
 import subprocess
+
+from . import sandbox
 
 # Read-only probes, but a hung git (network filesystem, index.lock
 # contention, a filter process) must not hang the turn.
@@ -37,14 +40,47 @@ _DEFAULT_BRANCH_FALLBACKS = ("main", "master")
 
 
 def _run_git(directory, args):
-    """Run a read-only git command. Returns stdout, or None on any failure."""
+    """Run a read-only git command unconfined. Returns stdout, or None on any
+    failure. Only for a repository nothing sandboxed can write; the grant
+    layer uses `sandboxed` instead."""
+    retval = _run(["git", "-C", directory, "--no-pager"] + args)
+    return retval
+
+
+def sandboxed(pol):
+    """A runner that confines each probe the way run_shell confines a command:
+    sandbox.wrap with the channel's policy (#421).
+
+    A probe asks git about a repository the channel can write. The grant layer
+    checks the `.git` pointer and `commondir` first, but git resolves them
+    again when it runs, and a concurrent writer -- a second turn in the same
+    channel, a background job -- can swap them in between and aim git at a
+    config the agent wrote. A key such as `core.fsmonitor` then runs a
+    command. Confined, that command reaches only what the channel's own
+    commands reach. No sandbox, no probe: None, which never grants."""
+    def run(directory, args):
+        # tools imports grant, which imports this module.
+        from . import tools
+        try:
+            argv = sandbox.wrap(shlex.join(["git", "-C", directory, "--no-pager"] + args), pol)
+        except RuntimeError:
+            return None
+        # The floor environment only: a probe needs no channel credential.
+        retval = _run(argv, env=tools.child_env({}))
+        return retval
+    return run
+
+
+def _run(argv, env=None):
+    """stdout of argv, or None on any failure."""
     retval = None
     try:
         proc = subprocess.run(
-            ["git", "-C", directory, "--no-pager"] + args,
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=_GIT_TIMEOUT_SECONDS,
+            env=env,
         )
         if proc.returncode == 0:
             retval = proc.stdout.decode("utf-8", "replace")

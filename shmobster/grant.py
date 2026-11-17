@@ -990,8 +990,9 @@ def _unquote(text):
 def _literal_word(node, src):
     """The word bash ends up with, when that takes no shell rules beyond quote
     removal to work out, else None. A check has to read what the command gets
-    rather than what the source looks like, so quoted pieces are joined, and
-    anything with a glob, a brace or an escape is not read at all. The escaped
+    rather than what the source looks like, so quoted pieces are joined, a
+    double-quoted string's escapes are decoded (_dq_unescape), and an unquoted
+    word with a glob, a brace or an escape is not read at all. The escaped
     parentheses and `!` of a `find` expression are the one exception."""
     text = _text(node, src)
     retval = None
@@ -1002,12 +1003,36 @@ def _literal_word(node, src):
             retval = text[1:]
         elif not any(ch in text for ch in "\\{*?["):
             retval = text
-    elif (node.type == "string" and "\\" not in text
+    elif (node.type == "string"
           and all(c.type in ('"', "string_content") for c in node.children)):
-        retval = text[1:-1]
+        retval = _dq_unescape(text[1:-1])
     elif node.type == "concatenation" and _contiguous(node):
         parts = [_literal_word(c, src) for c in node.children]
         retval = "".join(parts) if all(p is not None for p in parts) else None
+    return retval
+
+
+def _dq_unescape(body):
+    """The word a double-quoted string with no expansion in it becomes. Inside
+    double quotes a backslash escapes only `$`, a backquote, `"`, `\\` and a
+    newline (which it removes with itself); before anything else it stays, so
+    `"\\n"` is the two characters backslash and n, which is what curl's `-w`
+    and printf want. That is fixed by the shell, not by the command, so the
+    result is the word the command gets."""
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in '$`"\\':
+                out.append(nxt)
+            elif nxt != "\n":
+                out.append(ch + nxt)
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    retval = "".join(out)
     return retval
 
 

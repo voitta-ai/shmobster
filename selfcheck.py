@@ -2077,6 +2077,30 @@ _g2_ok, _g2_why = grant.check("mkdir -p x && curl -X POST https://elsewhere.test
 assert not _g2_ok, (_g2_ok, _g2_why)
 yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
 
+# A double-quoted word with a backslash but no expansion is read the way bash
+# reads it (#419), instead of refusing it as "takes shell rules to read". Each
+# word is checked against bash itself; a word with an expansion stays None.
+import subprocess as _dq_sp
+import tree_sitter as _dq_ts
+for _dq_w in (r'"\nHTTP:%{http_code}\n"', r'"a\\b"', r'"a\"b"', r'"\$HOME"', r'"a\`b"',
+              '"a\\\nb"', r'"\t"', r'"x\\"', r'"\\\n"', r'"\q"', r'"a\\\$b"', r'"\${X}"'):
+    _dq_src = ("printf %s " + _dq_w).encode()
+    _dq_arg = _dq_ts.Parser(grant._LANG).parse(_dq_src).root_node.children[0].children[-1]
+    _dq_mine = grant._literal_word(_dq_arg, _dq_src)
+    _dq_real = _dq_sp.run(["bash", "-c", "printf %s " + _dq_w], capture_output=True, text=True, env={}).stdout
+    assert _dq_mine == _dq_real, (_dq_w, _dq_mine, _dq_real)
+for _dq_w in (r'"$HOME"', r'"a$(id)"', r'"`id`"', r'"${X}"', r'"\n$X"'):
+    _dq_src = ("printf %s " + _dq_w).encode()
+    _dq_arg = _dq_ts.Parser(grant._LANG).parse(_dq_src).root_node.children[0].children[-1]
+    assert grant._literal_word(_dq_arg, _dq_src) is None, _dq_w
+# the incident command (#419): a -w format with \n escapes, to an allowed host
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\nHTTP:%{http_code}\n" https://example.com/x', _eg)
+assert _dq_ok, (_dq_ok, _dq_why)
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\nHTTP:%{http_code}\n" https://elsewhere.test/x', _eg)
+assert not _dq_ok and "elsewhere.test" in _dq_why, (_dq_ok, _dq_why)
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\n$X\n" https://example.com/x', _eg)
+assert not _dq_ok, (_dq_ok, _dq_why)
+
 # ...and end to end: an off-list fetch parks with the host in its reason, while
 # a read-only command in the same channel still runs
 _eg_out = tools.run_shell("curl https://elsewhere.test/x", _eg, "C_EG")

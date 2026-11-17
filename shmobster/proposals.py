@@ -87,13 +87,21 @@ def unsurface(key):
             prop["surfaced"] = False
 
 
-def claim_unsurfaced(channel):
+def claim_unsurfaced(channel, thread_ts=None):
+    """Proposals in this channel that no ingest has rendered yet, marked as
+    surfaced. Another thread's proposal is left for that thread's turn, by the
+    same rule as approvals.claim_unsurfaced: two turns running at once in one
+    channel must not carry each other's cards off."""
     out = []
     with _LOCK:
         for key, prop in list(_PENDING.items()):
-            if prop.get("channel") == channel and not prop.get("surfaced"):
-                prop["surfaced"] = True
-                out.append((key, prop))
+            if prop.get("channel") != channel or prop.get("surfaced"):
+                continue
+            if (thread_ts is not None and prop.get("thread_ts") is not None
+                    and prop["thread_ts"] != thread_ts):
+                continue
+            prop["surfaced"] = True
+            out.append((key, prop))
     retval = out
     return retval
 

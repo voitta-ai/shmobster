@@ -207,7 +207,7 @@ def for_signal(text):
 
 def unsigned(text):
     """The text without a leading "<label>:" signature. The gateway signs every
-    message with the agent's label, so one the model wrote too ("Cosima: Cosima:
+    message with the agent's label, so one the model wrote too ("Ada: Ada:
     ...") is dropped, and the agent's own lines in history are shown unsigned so
     the model has no signature to copy."""
     label = config.AGENT_LABEL

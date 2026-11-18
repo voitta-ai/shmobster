@@ -15,8 +15,12 @@ edit is not silently clobbered."""
 import json
 import logging
 import os
+import threading
 
 _PATH = os.getenv("SHMOBSTER_STATE", "shmobster-state.json")
+# Several threads write (the gateway poll on every page, learning, the waterfall):
+# one at a time, and through a rename, so a reader never sees a half-written file.
+_LOCK = threading.Lock()
 
 
 def read():
@@ -42,13 +46,16 @@ def get(key, default=None):
 
 def put(key, value):
     """Merge one key into the file. Returns True on a successful write."""
-    data = read()
-    data[key] = value
-    try:
-        with open(_PATH, "w") as f:
-            json.dump(data, f, indent=2)
-        retval = True
-    except OSError:
-        logging.exception("state: could not write %s", _PATH)
-        retval = False
+    with _LOCK:
+        data = read()
+        data[key] = value
+        tmp = f"{_PATH}.tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, _PATH)
+            retval = True
+        except OSError:
+            logging.exception("state: could not write %s", _PATH)
+            retval = False
     return retval

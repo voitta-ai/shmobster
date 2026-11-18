@@ -1,5 +1,8 @@
 # shmobster
 
+[![checks](https://github.com/voitta-ai/shmobster/actions/workflows/checks.yml/badge.svg?branch=master)](https://github.com/voitta-ai/shmobster/actions/workflows/checks.yml)
+[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/voitta-ai/shmobster/python-coverage-comment-action-data/endpoint.json)](https://github.com/voitta-ai/shmobster/tree/python-coverage-comment-action-data)
+
 A Slack agent you host yourself: one process per machine, answering in the
 channels it is invited to, running commands in a tree you scope per channel.
 
@@ -50,7 +53,7 @@ files:
   logs:         logs/shmobster.{out,err}.log
   spine:        workspace/*.md              # $SHMOBSTER_WORKSPACE or agent.workspace
 needs:
-  - voitta-ai/voitta-yolt, pinned at v2.8.0   # a clone, not a package: exec classifier + secret_redact; boot refuses < 2.0.1
+  - voitta-ai/voitta-yolt, pinned at v2.17.0   # a clone, not a package: exec classifier + secret_redact; boot refuses < 2.0.1
   - a Slack app of your own          # created from deploy/slack-app-manifest.yaml
   - one model vendor key or more     # or a ChatGPT subscription, via the codex rung
 gates:       [yolt verdict, grant layer, channel policy, sandbox, human approval]
@@ -86,6 +89,7 @@ license:     MIT
   - [Config & run](#config--run)
   - [Running as a service (launchd, macOS)](#running-as-a-service-launchd-macos)
   - [Running multiple instances](#running-multiple-instances)
+  - [Signal, through voitta-gateway (#336)](#signal-through-voitta-gateway-336)
 - [How it decides what to run](#how-it-decides-what-to-run)
   - [Trust model](#trust-model)
   - [Approving mutating commands (#48)](#approving-mutating-commands-48)
@@ -366,6 +370,23 @@ though the message were text-only.
 Only files on the *mentioning* message are read. Attachments earlier in the
 thread are not, because every reply in that thread would re-download them.
 
+Each file that passes those caps is also saved, byte-identical, under the
+channel's working directory at `.attachments/<file id>/<name>` (files 0600,
+directories 0700), and the turn names that path relative to the working
+directory (#372), so the agent copies the file instead of retyping it. The
+directory carries its own `*` `.gitignore`, so it is never committed and the
+repo's own `.gitignore` is left alone. Nothing prunes it; delete it by hand when
+it grows.
+
+Nothing is saved for a conversation without a working directory of its own:
+its policy (directly or through its `link`) must set `cwd`, and that must not be
+`default_policy`'s or `exec.cwd`. Every other conversation shares those, so one
+person's file would be readable from another's turn. Nothing is saved when the cwd is
+inside shmobster's own checkout, venv or runtime files, or is the directory
+holding its config, policies or workspace spine -- `exec.cwd` defaults to `.`,
+the deployment itself. In those cases, and when a save fails, the turn tells
+the model the file was not saved, so it says so instead of retyping it.
+
 An app created before `files:read` landed in the manifest must **reinstall** to
 grant it (same flow as `reactions:write` above). Until it does, attachments come
 back as `got Slack's sign-in page instead of the file` -- Slack answers an
@@ -488,9 +509,12 @@ One JSON config, no `.env`. Copy the example and fill it in:
 
   The bar for entry is that no flag turns the command into a write, which is
   why `sort` (`-o`), `uniq` (output positional), `find` (`-delete`), `xargs`
-  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent, and why
-  `git grep` is absent from the git list -- `git grep -O<cmd>` runs the pager it
-  is handed, whether or not anything is a terminal.
+  (runs its argument), `awk` (`system()`) and `tree` (`-o`) are absent. `git grep`
+  is on the git list with its two program-running options refused:
+  `-O`/`--open-files-in-pager` runs the pager it is handed whether or not
+  anything is a terminal, and `--textconv` runs the configured driver. Both are
+  refused in every spelling git accepts -- abbreviated long names and clustered
+  short flags -- and such a command parks for a card.
 
   `npm` is admitted for `ls`/`list` only (`grant.NPM_READS`): local, no network,
   no scripts. `npm view`/`outdated` are left out because they reach whatever
@@ -511,6 +535,19 @@ One JSON config, no `.env`. Copy the example and fill it in:
   being a read when its output lands in a file: YOLT cannot tell us, since
   `cat x`, `cat x > out.txt` and `cat x > /usr/local/bin/foo` are one `unknown`
   to it, so the redirect is caught in the grant layer's AST walk or not at all.
+
+  Two compound shapes are reads too (#373), when every part is granted by these
+  read rules and never by a classifier verdict. A plain `for f in <words>; do
+  ...; done` is, when its list is literals or globs, its variable a short
+  lower-case name, and nothing in it redirects into a file; C-style `for`,
+  `while` and `select` park. A command substitution in an argument is, when
+  the command taking it is a read verb or a git read, a `--` that is no
+  option's value comes before it, and the command inside is a read: its output
+  becomes argv, and before `--` a word in it could be an option. So
+  `git log -- $(git ls-files '*.py')` runs and `cat $(git ls-files)` parks.
+  `--end-of-options` does not count: `git shortlog` still reads options after
+  it. Arithmetic (`$((x))`, `$[x]`) and any `${...}` beyond a bare name park
+  everywhere, because they evaluate a variable's value as code.
 
   The classifier is invoked with `--no-user-allow` (#148), so "read-only" means
   what YOLT's own rules say. Without it, YOLT also promotes anything matching a
@@ -781,6 +818,13 @@ machine's channel layout is versioned separately from the token/key config:
     argument skipped unread, so `--token "$VERCEL_TOKEN"` works and is never
     logged. Policy-file only, like `unattended`.
 
+    The grant only decides what may run. Making the CLI work in a channel
+    takes a team (not project) token, `--scope <team>` on every command
+    (the system prompt says so), the team and project IDs and a writable
+    `XDG_DATA_HOME` in `env` -- each of which otherwise fails with an error
+    that points elsewhere:
+    [docs/VERCEL.md](docs/VERCEL.md).
+
   - `mcp` -- MCP servers this channel may use, and which of each server's tools,
     turning any MCP server into gated tools the agent can call (#299). The
     default, like every capability, is none. Shape:
@@ -844,9 +888,18 @@ in-tree write on the verb alone, and `.git/` is inside the tree, so
 it already grants -- ran arbitrary code with no card. `.git/config` reaches the
 same place without a commit, since `diff.external` fires on the next
 `git diff --ext-diff`, which is a read. The sandbox denies `file-write*` on
-`.git/hooks/`, `.git/config`, any `.git` that is a file (a worktree's gitdir
-pointer) and `config.worktree`, by regex rather than by literal, because a tree
-has more than one gitdir.
+`.git/hooks/`, `.git/config` and `config.worktree`, by regex rather than by
+literal, because a tree has more than one gitdir.
+
+Those regexes match paths, and a rename moves a directory without writing any
+path beneath it: `mv d .git` with a `config` already in `d` installs one. So
+the entries that decide which repository git loads are frozen as well (#344):
+every `.git` (a checkout's directory or a worktree's pointer file), a `hooks`
+directory under one, a linked worktree's admin directory with its `commondir`
+and `gitdir`, a submodule's gitdir, and the `worktrees` and `modules`
+directories that hold them. The cost is that `git init`,
+`git clone`, `git worktree add/remove/prune` and `git submodule add` fail in a
+channel, approved or not; an operator runs those.
 
 It is deliberately not a deny on all of `.git/`: `git add` and `git commit` are
 granted and have to write `index`, `objects` and `refs`. And it is in the
@@ -899,7 +952,7 @@ and any private catalog) -- so the code that actually runs after a restart is
 whatever those checkouts hold, and a release note that says "needs yolt >=
 X" means their `git pull`, not this repo's. In that order:
 
-    git -C /path/to/voitta-yolt fetch --tags && git -C /path/to/voitta-yolt checkout --detach v2.8.0   # yolt_gate.YOLT_PIN
+    git -C /path/to/voitta-yolt fetch --tags && git -C /path/to/voitta-yolt checkout --detach v2.17.0   # yolt_gate.YOLT_PIN
     git -C /path/to/skillz pull            # and each other skills.paths entry
     git -C /path/to/skillz-private pull    # learned skills land there (#129, #130)
     git pull && .venv/bin/pip install --require-hashes -r requirements.txt
@@ -969,6 +1022,116 @@ name; name each instance via `agent.label` (or let it auto-derive from the app).
   `SHMOBSTER_CONFIG=/path/other.json .venv/bin/python -m shmobster.slack_app`.
 - **Two instances on the *same* machine** additionally need distinct launchd
   Labels, log paths, and `SHMOBSTER_CONFIG` per plist -- not yet parameterized.
+
+### Signal, through voitta-gateway (#336)
+
+Signal reaches the agent through voitta-gateway. The gateway holds the one
+signal-cli process for the account, shared with other agents, and passes on
+only the messages addressed to this one.
+
+**Setup.**
+- In `gateway.yaml`:
+  - give this agent a consumer with `names` and a `label`;
+  - list each group it serves under `conversations`, with this consumer in
+    its `consumers`. That list is the only one: the agent asks the gateway
+    which groups it serves (`GET /v1/conversations`) at boot and for each
+    announcement.
+- In `shmobster-config.json`:
+
+```json
+"gateway": {
+  "url": "http://127.0.0.1:8080",
+  "token": "${SHMOBSTER_GATEWAY_TOKEN}",
+  "consumer": "shmobster",
+  "account_name": "Team Agents"
+}
+```
+
+- In `channel_policies`, a group is `signal:<its gateway label>`. Give it a
+  policy of its own, or `link` it to a Slack channel to share that channel's
+  policy; `mirror` lives here too:
+
+```json
+"signal:team": {"link": "C0123456789", "mirror": false}
+```
+
+  A policy for a label the gateway does not route to this agent is a warning
+  at boot (when the gateway answers then). The old `gateway.conversations`
+  stops the boot when `url` is set: move its entries here. `token` is this
+  consumer's own, not an admin token: the agent announces into every group the
+  gateway lists for it.
+
+**How it behaves.**
+- **Turns.** A message addressed to the agent is a turn, answered in the same
+  conversation. The agent quotes the message, so a follow-up that quotes the
+  answer comes back to this agent. Long answers are split to Signal's limit,
+  and Markdown becomes Signal's bold, italic, strikethrough and monospace.
+- **Policy.** A conversation's own entry applies; one with a `link` shares that
+  Slack channel's policy (any other keys in it are ignored, with a boot
+  warning). A conversation with no entry, or an entry holding only `mirror`,
+  falls back to `default_policy`, a DM included.
+- **One account, several agents.** Signal shows every agent on the account under its one
+  profile name (`account_name`, optional). The agent is told so, sees an @mention of the
+  account as `@<its label>`, and its replies are signed with its label by the gateway, so a
+  signature the model writes itself is dropped.
+- **`/help`.** A shared gateway answers a bare `/help` with the agents on the account.
+  `/help <label>` reaches the agent, which answers without the model: what it is, how to reach
+  it, and its GitHub repositories and whether it asks before changing anything there. No paths:
+  anyone the gateway lets in can ask. Any other `/help ...` is a normal turn. Release announcements on Signal end with a line saying the same.
+- **Closed groups only.** shmobster serves a Signal group only while the gateway
+  reports it closed: no group link, and only admins can add members. An open
+  group, or one whose members cannot be checked, is refused, with a line in the
+  group at most once an hour saying why and how to close it. This is a fixed
+  rule, not a setting (CLAUDE.md). In the gateway, give such a group
+  `admit: members` so every member's message gets through, as a private Slack
+  channel's do. To close a group, a group admin, in the Signal app, opens the
+  group's settings and:
+  1. turns **Group link** off (an invite link, even one that needs approval,
+     counts as open: signal-cli cannot tell the two apart);
+  2. under **Permissions**, sets **Add members** to **Only admins**.
+  The account itself does not need to be an admin. The agent re-checks a group
+  at most once a minute, and the gateway re-checks an `admit: members` group
+  every 30 seconds, so a group starts being served (or stops) within about a
+  minute of the change. After boot the log names every served group that is
+  still open, or that could not be checked, and why.
+- **People in a group** are named by the operator's `persons` name in
+  `gateway.yaml`, else a stable handle (`Signal user 3f9a2c`) -- never the
+  profile name they chose. The agent can mention them back by writing
+  `@<that name>`, which goes out as a real Signal mention.
+- **Other agents.** A `persons` entry with `agent: true` is another agent
+  (`persons: {other-bot: {signal: ["<its ACI>"], agent: true}}` in
+  `gateway.yaml`; restart the gateway). For an agent on its own Signal account,
+  its ACI is in a group's members list (see **Trust** below): in a group of
+  just you, the agent and it, the member that is neither you nor `self`. An
+  agent sharing this account is `self` and needs no entry. The agent answers at most 3 messages from other agents in a row in
+  a group; a person's message to this agent there resets the count, so two
+  agents cannot answer each other forever. (DMs are not counted.)
+- **Trust.** `trusted_users` lists a Signal user as `signal:<their ACI>`.
+  People on Signal appear as a stable handle (`Signal user 3f9a2c`), never by
+  the profile name they chose, since anyone can call themselves anything. To
+  find your own ACI, ask the gateway for the members of one of the agent's
+  groups that you administer (`self` is the agent's account). It prints a line
+  per admin other than the agent; yours is the one that is not someone else's:
+
+  ```bash
+  curl -s -H "Authorization: Bearer $SHMOBSTER_GATEWAY_TOKEN" \
+    <gateway.url>/v1/conversations/<label>/members |
+    jq -r '.members[] | select(.admin and (.self | not)) | "signal:" + .id'
+  ```
+
+  Add the line it prints to `trusted_users` and restart. An ACI is an account
+  id: keep it out of channels, commits and logs, like any other id in the
+  config.
+- **Approvals are text.** A card names the request id. If a trusted user's
+  whole message is `approve <id>` or `deny <id>`, it resolves the request the
+  way a button click does on Slack, and the task carries on (#169). The
+  model's approve tool still works in a normal turn.
+- **Mirroring** is off by default. With `mirror: true`, the question and the
+  final answer of each turn are copied to the linked side, in both
+  directions. Cards stay where they were posted, so each request is answered
+  in the one place it can be resolved.
+- **Restarts.** The poll position is kept in the state file, so messages that
+  arrive during a restart are answered once it is back.
 
 ## How it decides what to run
 
@@ -1626,6 +1789,42 @@ Nothing raises when the chain still answers, and LiteLLM itself logs nothing at
 WARNING, so without that line a rung that is throttled or holding a bad key
 leaves no trace.
 
+#### When a rung is dead (#353)
+
+Some failures mean the rung will not work until something changes: a 404 that
+says the model or endpoint is gone (a retired model, a dropped free tier), or a
+400 that says the model itself is refused (`model_not_found`, a model that
+"does not exist", "decommissioned", or a subscription plan that does not serve
+it). These are parked, logged at ERROR, and announced once in the thread of the
+next Slack turn a trusted user starts (wherever that turn is), after its reply,
+with the vendor's suggested replacement when it names one. A turn started by
+anyone else never gets the notice, nor does Signal: it is for the operator.
+
+    waterfall: DEAD RUNG orfree (openrouter/acme/model-x:free): the vendor says this model or endpoint does not exist for this account (404); the vendor suggests model 'acme/model-x'; skipping it for 1h -- fix or remove it in the waterfall config
+
+The channel line names only the rung, never its model string, which for some
+providers carries a cloud account id; the model is in the log line.
+
+- **Request-shaped failures are not dead.** OpenRouter's "No endpoints found
+  that support image input" is a 404 about one request (an attachment the model
+  cannot read), and a 400 rejecting a parameter "for this model" is about the
+  request too. Neither parks anything.
+- **The park grows on repeat.** 1 hour first, doubling each time the rung dies
+  again within a day of coming back, capped at 24 hours. A rung can be fixed on
+  the vendor's side (access enabled, credit added) with no config edit, so the
+  first park is short; one that is really gone stops being re-dialled hourly.
+- **Fixing the config un-parks it at once.** The park is recorded against the
+  rung's model; a different model under the same name is a different rung.
+- **To un-park it by hand** after a vendor-side fix, delete the rung's entry
+  under `dead_rungs` in `shmobster-state.json`. The file is re-read every turn,
+  so no restart is needed.
+- **Bounded, not until restart.** The watchdog restarts the process routinely,
+  so "until restart" would re-pay the failure every few minutes.
+- **`budget_park_sec: 0` turns this parking off too.** The rung is still logged
+  and announced, once a day, and a repeat failure logs a WARNING.
+- **The vendor's error text is never echoed.** These bodies carry account and
+  function ids; only a fixed reason and a charset-bound model slug leave it.
+
 ## Reading a URL (#62)
 
 `web_fetch` reads a page somebody pasted into a channel. It is the fetch the
@@ -1993,7 +2192,7 @@ or `~/.config/skillz/sensitive-terms.txt`, one term per line. `git push
 An instance announces itself in its channels the first time it boots on a new
 version:
 
-> :sparkles: upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
+> ✨ upgraded to **shmobster v0.2.0** (from v0.1.0) -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Now running `0.2.0+b698870`.
 
 The trigger is a *version change*, not a boot -- the watchdog and launchd restart
 this process often, and none of that is worth a message. The last announced
@@ -2002,7 +2201,7 @@ version lives in `shmobster-state.json` (gitignored, path from `SHMOBSTER_STATE`
 An instance with **no** recorded version announces too, without claiming where it
 came from:
 
-> :sparkles: now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
+> ✨ now running **shmobster v0.2.0** -- [release notes](https://github.com/voitta-ai/shmobster/releases/tag/v0.2.0). Build `0.2.0+b698870`.
 
 That case is a deployment installed before the state file existed *or* a brand
 new one -- indistinguishable from inside the process. Staying quiet would skip

@@ -26,7 +26,7 @@ import logging
 import re
 import subprocess
 
-from . import config, llm, proposals, redact, skills, state, trajectory
+from . import config, identity, llm, proposals, redact, skills, state, trajectory
 
 _STATE_KEY = "skill_threads"
 _STATE_MAX = 500
@@ -193,7 +193,7 @@ def amend_candidate(name, why, channel):
     if not words:
         return None
     best, score = None, 0
-    for entry in skills.view(channel):
+    for entry in skills.view(channel).values():
         hay = f"{entry.get('name', '')} {entry.get('summary', '')}".lower()
         n = sum(1 for w in words if w in hay)
         if n > score:
@@ -376,6 +376,32 @@ they are the point. If the record does not support a reusable procedure, say so
 in the Notes section rather than inventing steps."""
 
 
+def _skill_text(raw):
+    """The SKILL.md inside a model's answer, or None. Models wrap it despite
+    being told not to: a sentence first ("Here is the skill:"), a ```markdown
+    fence. So this looks for the first `---` line that opens frontmatter with
+    a `name:` in it, and drops the fence that wrapped it, if one did, along
+    with anything after that fence. A note after an UNfenced draft cannot be
+    told from the skill's last paragraph and stays in; the draft becomes a
+    pull request a person reviews, which is where it gets seen (#425 review)."""
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "---":
+            continue
+        close = next((j for j in range(i + 1, min(len(lines), i + 40)) if lines[j].strip() == "---"), None)
+        if close is None or not any(l.startswith("name:") for l in lines[i + 1:close]):
+            continue
+        # Trim a wrapping fence only: a skill's own code blocks are content.
+        # The wrapper opened just above the frontmatter and closes last.
+        prev = next((lines[k].strip() for k in range(i - 1, -1, -1) if lines[k].strip()), "")
+        end = len(lines)
+        if prev.startswith("```"):
+            end = next((j for j in range(len(lines) - 1, close, -1) if lines[j].strip() == "```"), len(lines))
+        retval = "\n".join(lines[i:end]).strip() + "\n"
+        return retval
+    return None
+
+
 def draft(name, why, channel, thread_ts):
     """A SKILL.md from the thread's trajectory, via the waterfall. Returns
     (text, error)."""
@@ -397,10 +423,13 @@ def draft(name, why, channel, thread_ts):
     except Exception as exc:  # noqa: BLE001
         retval = (None, f"draft failed: {exc}")
         return retval
-    text = re.sub(r"^```[a-z]*\n|\n```$", "", text).strip() + "\n"
-    if not text.startswith("---"):
+    found = _skill_text(text)
+    if found is None:
+        logging.warning("learning: draft for %s had no frontmatter; it began %r",
+                        name, redact.scrub(text[:200]))
         retval = (None, "draft did not start with frontmatter")
         return retval
+    text = found
     retval = (redact.scrub(text), None)
     return retval
 
@@ -476,13 +505,10 @@ def open_pr(key, name, channel, text, body, api=_gh, scope="channel"):
 
 
 def _permalink(ctx):
-    client, channel, thread_ts = ctx.get("client"), ctx.get("channel"), ctx.get("thread_ts")
+    surface, channel, thread_ts = ctx.get("surface"), ctx.get("channel"), ctx.get("thread_ts")
     retval = ""
-    if client and channel and thread_ts:
-        try:
-            retval = client.chat_getPermalink(channel=channel, message_ts=thread_ts).get("permalink", "")
-        except Exception:  # noqa: BLE001
-            retval = ""
+    if surface and channel and thread_ts:
+        retval = surface.permalink(channel, thread_ts)
     return retval
 
 
@@ -564,11 +590,11 @@ def propose_acquired(key, prop, ctx, api=_gh, scope=None):
     link = _permalink({**ctx, "thread_ts": thread_ts})
     body = (
         f"Proposed from a shmobster turn in `#{channel_slug(channel)}`, flagged by the agent "
-        f"and opened by <@{ctx.get('user_id')}>.\n\n**Why:** {why}\n\n"
+        f"and opened by {identity.mention(ctx.get('user_id'))}.\n\n**Why:** {why}\n\n"
         + (f"**Thread:** {link}\n\n" if link else "")
         + (f"**Scope:** {'this channel only' if _scope == 'channel' else 'every channel'}"
            + (f" -- {prop.get('scope_reason')}" if prop.get("scope_reason") else "")
-           + (f", overridden by <@{ctx.get('user_id')}>" if scope in SCOPES else "") + "\n\n")
+           + (f", overridden by {identity.mention(ctx.get('user_id'))}" if scope in SCOPES else "") + "\n\n")
         + (f"**May amend:** `{prop['amends']}` -- check whether this belongs as a section there "
            f"rather than as a new file.\n\n" if prop.get("amends") else "")
         + "Merging this PR is what makes the skill load (learning L1, #130); until then it is a proposal.\n\n"
@@ -585,7 +611,7 @@ def propose_acquired(key, prop, ctx, api=_gh, scope=None):
     mark_thread(thread_ts, "proposed")
     logging.info("learning: PR opened for %s in %s by %s: %s", name, channel, ctx.get("user_id"), url)
     _where = "this channel only" if _scope == "channel" else "every channel"
-    retval = (f"PR opened by <@{ctx.get('user_id')}> for `{name}` ({_where}): {url}\n"
+    retval = (f"PR opened by {identity.mention(ctx.get('user_id'))} for `{name}` ({_where}): {url}\n"
               f"Merging it is the promotion; nothing loads until then.")
     return retval
 
@@ -593,7 +619,7 @@ def propose_acquired(key, prop, ctx, api=_gh, scope=None):
 def decline_acquired(key, prop, ctx):
     proposals.finish(key)
     mark_thread(prop["thread_ts"], "declined")
-    retval = f"DECLINED by <@{ctx.get('user_id')}>: `{prop['name']}` -- this thread will not be asked again."
+    retval = f"DECLINED by {identity.mention(ctx.get('user_id'))}: `{prop['name']}` -- this thread will not be asked again."
     return retval
 
 

@@ -299,12 +299,22 @@ def profile(pol):
     # whose hooks and config are a second copy of exactly this hazard one level
     # down -- hence `(.+/)?` rather than an anchored `hooks/`.
     #
-    # A worktree's own `.git` -- a *file* naming its real gitdir -- is NOT
-    # denied, although overwriting it repoints the repository. Denying it breaks
-    # `git worktree add`, which is how work is done in this repo, and it buys
-    # little: TMPDIR is writable, so `git init /tmp/x` plus a hook there plus a
-    # commit reaches the same place without touching any pointer. That is a
-    # wider question than this deny, and it is recorded rather than solved.
+    # The regexes above match paths, and a rename moves a directory without
+    # writing any path beneath it: `mv d .git` with `d/config` and `d/hooks/`
+    # already inside installs both, and so does `mv d .git/hooks`. So the
+    # entries that decide WHICH repository, config and hooks git loads are
+    # frozen too -- created, overwritten, deleted or renamed, never from inside
+    # the sandbox: every `.git` (a checkout's directory, a worktree's pointer
+    # file), a `hooks` directory under one, a linked worktree's admin
+    # directory and its `commondir` and `gitdir` files, a submodule's
+    # gitdir, and the `worktrees` and `modules` directories holding them --
+    # renaming a prebuilt container over either swaps every entry inside. The grant layer validates a worktree's pointer before a command
+    # runs (#344); this is what keeps it the pointer git reads when the
+    # command does, including after an earlier write in the same command.
+    #
+    # The cost: `git init`, `git clone`, `git worktree add/remove/prune` and
+    # `git submodule add` fail in a channel, approved or not. An operator runs
+    # those. (clone already failed here: it writes `.git/config`.)
     #
     # Deliberately NOT all of `.git/`: `git add` and `git commit` are granted
     # and have to write `index`, `objects` and `refs`. Denying those would
@@ -315,6 +325,12 @@ def profile(pol):
             r'(regex #"/\.git/(.+/)?hooks/")',
             r'(regex #"/\.git/(.+/)?config$")',
             r'(regex #"/config\.worktree$")',
+            r'(regex #"/\.git$")',
+            r'(regex #"/\.git/(modules/.+/)?hooks$")',
+            r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+$")',
+            r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+/(commondir|gitdir)$")',
+            r'(regex #"/\.git/(modules/.+/)?modules/[^/]+$")',
+            r'(regex #"/\.git/(modules/.+/)?(worktrees|modules)$")',
         ))
         + ")"
     )
@@ -328,14 +344,16 @@ def profile(pol):
     return retval
 
 
-def wrap(command, pol):
+def wrap(command, pol, network=True):
     """argv that runs `command` confined to the channel's tree. Raises
     RuntimeError when the sandbox is unavailable -- the caller must not fall
-    back to running unconfined."""
+    back to running unconfined. `network=False` also denies every socket, for
+    a caller that runs nothing that should reach anywhere (gitstate's probes)."""
     exe = shutil.which("sandbox-exec")
     if not exe:
         raise RuntimeError(
             f"sandbox-exec not found on {sys.platform}; refusing to run unconfined (#116)"
         )
-    retval = [exe, "-p", profile(pol), "/bin/sh", "-c", command]
+    prof = profile(pol) + ("" if network else "(deny network*)\n")
+    retval = [exe, "-p", prof, "/bin/sh", "-c", command]
     return retval

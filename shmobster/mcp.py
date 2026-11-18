@@ -199,7 +199,8 @@ def _park(entry, merged, label, channel, thread_ts, user_id):
         "1. `tl;dr:` one line for the person who asked -- what you were trying "
         "to do and that it is now waiting on an approval.\n"
         "2. `for the approver:` the server and tool, what it will change, and "
-        f"the id {req_id} to quote (approve_command), or the card's button.\n"
+        f"what to send: `approve {req_id}` or `deny {req_id}` (or the card's button). "
+        "Never name your own tools to people.\n"
         "Do not retry. End your turn now; once it is approved and runs, you are "
         "continued automatically with its output."
     )

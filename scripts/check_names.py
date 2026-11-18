@@ -70,18 +70,23 @@ def files(paths):
                 dirs[:] = [d for d in dirs if d != ".git"]
                 for name in sorted(names):
                     yield os.path.join(root, name)
-        elif os.path.isfile(path):
+        else:
+            # A missing path is yielded so main() reports it: grep exits 2 on
+            # it, and a gate that skips what it was told to scan fails open.
             yield path
 
 
 def main(argv):
     patterns = compile_terms(argv[1])
     retval = 0
+    unread = False
     for path in files(argv[2:]):
         try:
             with open(path, "rb") as f:
                 data = f.read()
-        except OSError:
+        except OSError as e:
+            print(f"error: could not read {path}: {e.strerror}", file=sys.stderr)
+            unread = True
             continue
         if b"\0" in data:
             continue  # binary, like grep -I
@@ -90,7 +95,9 @@ def main(argv):
                    for p in patterns for m in p.finditer(text)):
                 print(f"{path}:{number}:{text}")
                 retval = 1
-    return retval
+    # 2 = the scan did not cover everything it was given; the caller fails
+    # closed on it even when other files matched.
+    return 2 if unread else retval
 
 
 if __name__ == "__main__":

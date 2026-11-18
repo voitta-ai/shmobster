@@ -7,9 +7,31 @@ import datetime
 import json
 import logging
 
-from . import admin_tools, approvals, build, config, cost, learning, llm, mcp, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
+from . import admin_tools, approvals, build, config, cost, grant, identity, learning, llm, mcp, memory, policy as policy_mod, projectdocs, redact, skills, slack_tools, spine, tools, trajectory
+from .surface import Surface
+
+# A turn with no surface (a script, the self-check) still says where it is.
+_NO_SURFACE = Surface()
 
 _SYSTEM = None
+
+
+# Model errors that pass on their own: worth "try again in a few minutes".
+# By class name, so classes that move between litellm modules still match; a
+# bad request, a context overflow or a bad key fails the same way every time.
+_TRANSIENT = {"RateLimitError", "RouterRateLimitError", "Timeout", "APITimeoutError",
+              "ServiceUnavailableError", "InternalServerError", "BadGatewayError", "APIConnectionError"}
+
+
+def failure_line(exc):
+    """The one line a failed turn posts, on every surface. Never the exception
+    text (#352): a router failure is the whole multi-provider dump, which nobody
+    in the conversation can act on and the operator reads in the log."""
+    if (type(exc).__module__.split(".")[0] in ("litellm", "openai")
+            and type(exc).__name__ in _TRANSIENT):
+        return ("\u26a0\ufe0f No language model is available right now, so I could not "
+                "answer. Please try again in a few minutes; the details are in my log.")
+    return "\u26a0\ufe0f Something went wrong and I could not finish this. The details are in my log."
 
 
 def _system_prompt():
@@ -55,7 +77,7 @@ def _finalize(answer, steps, capped=False):
 
 
 _RESUME_TEMPLATE = (
-    "[system] <@{user}> {verdict} approval request [{req_id}].\n"
+    "[system] {user} {verdict} approval request [{req_id}].\n"
     "command: {command}\n"
     "{body}\n"
     "Continue the task that command was part of, from this outcome. Do not "
@@ -66,7 +88,8 @@ _RESUME_TEMPLATE = (
 
 
 def resume(req_id, approved, command, result, thread_context=None, channel=None,
-           thread_ts=None, user_id=None, slack_client=None, requester=None):
+           thread_ts=None, user_id=None, surface=None, requester=None,
+           attachments=None, attachment_notes=None):
     """Continue a turn that ended waiting on a parked command (#169).
 
     A button click used to run the command, rewrite the card with its output,
@@ -87,13 +110,20 @@ def resume(req_id, approved, command, result, thread_context=None, channel=None,
     on each click would run three turns in one thread, each seeing a different
     part of the outcome. The rule lives here rather than in the ingest so it
     holds for every ingest and can be checked without one."""
-    if channel is not None and not approvals.begin_resume(channel, thread_ts):
+    # The outcome is handed over so that, if the request still holding this
+    # thread is later withdrawn rather than resolved, the ingest can resume
+    # from it (#356). Only what describes the outcome: the ingest supplies its
+    # own client and re-reads the thread when it gets there.
+    outcome = {"req_id": req_id, "approved": approved, "command": command,
+               "result": result, "user_id": user_id, "requester": requester}
+    if channel is not None and not approvals.begin_resume(channel, thread_ts, outcome):
         logging.info("resume: [%s] resolved, but this thread is not ready to continue "
                      "(still parked, or already resuming)", req_id)
         return None
     try:
         retval = _resume_turn(req_id, approved, command, result, thread_context,
-                              channel, thread_ts, user_id, slack_client, requester)
+                              channel, thread_ts, user_id, surface, requester,
+                              attachments, attachment_notes)
     finally:
         if channel is not None:
             approvals.end_resume(channel, thread_ts)
@@ -101,7 +131,8 @@ def resume(req_id, approved, command, result, thread_context=None, channel=None,
 
 
 def _resume_turn(req_id, approved, command, result, thread_context, channel,
-                 thread_ts, user_id, slack_client, requester=None):
+                 thread_ts, user_id, surface, requester=None,
+                 attachments=None, attachment_notes=None):
     # Scrubbed here as well as upstream: a command line carries credentials
     # routinely, and this text becomes a turn, a trajectory record and whatever
     # the model quotes back (#72, and the same rule approvals follows).
@@ -117,27 +148,40 @@ def _resume_turn(req_id, approved, command, result, thread_context, channel,
                    else "it ran and succeeded")
         body = f"{outcome}. Its output was:\n<output>\n{redact.scrub(result)}\n</output>"
     text = _RESUME_TEMPLATE.format(
-        user=user_id or "someone", verdict="approved" if approved else "denied",
+        user=identity.mention(user_id) if user_id else "someone", verdict="approved" if approved else "denied",
         req_id=req_id, command=redact.scrub(command), body=body,
     )
+    # The files the task started with (#362). A resumed turn is built from the
+    # thread's text, and an attachment is not in the text, so without this the
+    # model asks for a file the user already gave it. Anything that could not
+    # be read again is said, never dropped (#68).
+    if attachments:
+        text += ("\nThe files attached to the message that started this task "
+                 "are attached again below.")
+    if attachment_notes:
+        text += "\n\n[attachments I could not read: " + "; ".join(attachment_notes) + "]"
     # The turn is answered to whoever ASKED, not to whoever approved (#262):
     # the approver is named in the text above, and a task a designer started
     # must not come back written for an operator because an operator clicked.
     retval = handle(text, thread_context=thread_context, channel=channel,
                     thread_ts=thread_ts, user_id=requester or user_id,
-                    slack_client=slack_client)
+                    surface=surface, attachments=attachments)
     return retval
 
 
-def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, slack_client=None, attachments=None):
+def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None, surface=None, attachments=None):
     # One turn, one bill (#190). Clearing first matters: a turn that raised
     # before draining must not charge the next one.
     cost.start()
     policy = policy_mod.resolve(channel)
     flagging = False
     tool_schemas = list(tools.TOOLS)
-    if slack_client is not None:
-        tool_schemas += slack_tools.TOOLS + admin_tools.TOOLS
+    if surface is not None:
+        # The slack tools read and post through a Slack client, so only a Slack
+        # surface gets them; approving, policy and learning work on any (#336).
+        if surface.client is not None:
+            tool_schemas += slack_tools.TOOLS
+        tool_schemas += admin_tools.TOOLS
         # The flag is offered only where a PR can follow it (#129).
         if learning.enabled():
             tool_schemas += learning.TOOLS
@@ -158,6 +202,12 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     _standing = skills.standing_block(channel)
     if _standing:
         system += "\n\n" + _standing
+    # The vercel grant's calling convention, which the model cannot infer: a
+    # command missing --token parked for a card, one missing --scope hit the
+    # wrong team.
+    _vercel = grant.vercel_prompt_block(policy)
+    if _vercel:
+        system += "\n\n" + _vercel
     # The bar for flagging, in view while the answer is composed (#211). It was
     # only ever in the tool description, which the model reads once it is
     # already deciding to call something -- so a turn whose *conclusion* was the
@@ -182,12 +232,9 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             f"only as {config.AGENT_LABEL}. \"Shmobster\" is the software platform "
             "you run on, not your name -- never call yourself Shmobster."
         )
-    if config.BOT_USER_ID:
-        _ident.append(
-            f"Your Slack user id is {config.BOT_USER_ID}; a message mentioning "
-            f"<@{config.BOT_USER_ID}> is addressed to YOU -- that's you, not "
-            "another agent, so never wait on yourself."
-        )
+    _self = surface.self_line() if surface is not None else None
+    if _self:
+        _ident.append(_self)
     # Who is asking, and therefore which half of the voice rule applies (#262).
     # The model could not tell before: the same words went to the operator who
     # set the deployment up and to a designer who does not use git, and one of
@@ -195,14 +242,14 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     if user_id:
         if user_id in config.TRUSTED_USERS:
             _ident.append(
-                f"This turn was asked by <@{user_id}>, a trusted operator of "
+                f"This turn was asked by {identity.mention(user_id)}, a trusted operator of "
                 "this deployment: they own the setup and can approve parked "
                 "commands. Give them the technical answer -- commands, errors, "
                 "ids, file and line."
             )
         else:
             _ident.append(
-                f"This turn was asked by <@{user_id}>, who is NOT an operator "
+                f"This turn was asked by {identity.mention(user_id)}, who is NOT an operator "
                 "of this deployment. They are here for their own expertise and "
                 "are not assumed to know git, branches, CI or cloud consoles. "
                 "Answer in plain language: what happened, what it means for "
@@ -212,15 +259,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     if _ident:
         system = " ".join(_ident) + "\n\n" + system
     if channel:
-        loc = f"You are in Slack channel {channel}"
-        _cname = config.CHANNEL_NAMES.get(channel)
-        if _cname:
-            loc += f" ({_cname})"
-        loc += "."
-        if thread_ts:
-            loc += f" This thread's ts is {thread_ts}."
-        loc += " Use the slack tools with this channel_id to read history or post here."
-        system += "\n\n" + loc
+        system += "\n\n" + (surface or _NO_SURFACE).location(channel, thread_ts)
     # Standing context for this channel (#140). After the skills menu and the
     # identity block, before the thread: it is reference the turn reads, not
     # instruction it follows, and the block says so in as many words. It never
@@ -306,14 +345,14 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 args = {}
             name = call.function.name
             if name in admin_tools.NAMES:
-                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
+                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "surface": surface}
                 result = admin_tools.dispatch(name, args, ctx)
                 # An admin tool (set_policy) may have just changed this channel's
                 # policy; re-resolve so the rest of THIS turn's tool calls see the
                 # new scope instead of the stale dict from turn start (#58).
                 policy = policy_mod.resolve(channel)
             elif name in learning.NAMES:
-                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "client": slack_client}
+                ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "surface": surface}
                 result = learning.dispatch(name, args, ctx)
             elif name in skills.NAMES:
                 result = skills.dispatch(name, args, channel)
@@ -326,7 +365,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 # where the turn is happening rather than to any channel the
                 # bot belongs to (#151).
                 result = slack_tools.dispatch(
-                    name, args, slack_client,
+                    name, args, surface.client if surface is not None else None,
                     {"channel": channel, "policy": policy, "thread_ts": thread_ts},
                 )
             else:

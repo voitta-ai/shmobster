@@ -24,7 +24,12 @@ does:
   parked in this thread" rule and returns None when the answer is yes -- do not
   re-implement that check, and do pass the thread id to
   `approvals.claim_unsurfaced(channel, thread_ts)` when surfacing cards, or it
-  has nothing to reason about.
+  has nothing to reason about. When a card fails for a reason that may pass,
+  `approvals.unsurface(req_id)` retries it next turn; when the surface rejects
+  the card itself, call `approvals.withdraw(req_id)`, say so in the thread, and
+  resume from `approvals.take_deferred(channel, thread_ts)` if it returns an
+  outcome. A parked request no human can see still counts as parked, and holds
+  the thread's resume forever.
 - **Skill proposals (#129)** -- after a turn, render `proposals.claim_unsurfaced(channel)`
   the way you render `approvals.claim_unsurfaced`: a card or a line naming the id,
   and a way for a trusted user to answer by id (`propose_skill` / `decline_skill`).
@@ -67,3 +72,20 @@ text to paste. The full reasoning and the verification steps are in the
 Config values are `${VAR}` references (#73), never literals -- including in a
 running deployment's own `shmobster-config.json`, not just the example. Never
 print a config value, and never echo one into a log, a commit, or a channel.
+
+## Signal groups: shmobster serves only closed groups
+
+This is decided, not a setting, and not open to argument in a PR. shmobster is
+built for private channels; on Slack the maintainer keeps a channel private, and
+the agent answers whoever is in it. A Signal group is only as private as its
+settings: an open group link lets anyone holding it walk in, and "every member
+can add members" lets the group grow without its admins. So shmobster refuses
+to serve a group the gateway reports as open (a group link on, or members other
+than admins able to add members), refuses when it cannot find out, and says why
+in the group at most once an hour (`gateway_app._guard`). Do not add a flag,
+policy key or per-group exception that serves an open group, and do not weaken
+the rule to "warn". The fix for a refused group is in Signal: turn the link off
+and set Add members to Only admins. Every post to a group goes through
+`gateway_app.send`, which withholds it while the group is not closed; an
+approval card withheld that way is withdrawn for good, and nothing resumes a
+task because of it.

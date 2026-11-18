@@ -14,7 +14,28 @@ from . import config, spine
 
 
 def resolve(channel):
-    retval = config.CHANNEL_POLICIES.get(channel) or config.DEFAULT_POLICY
+    # A gateway conversation linked to a Slack channel shares that channel's
+    # policy (#336): one capability envelope, set in one place.
+    # `link` and `mirror` are routing, not envelope. A `link` is followed first,
+    # to the linked channel's policy; an entry left with nothing else (mirror
+    # only) has no policy of its own and falls back to default_policy, as an
+    # absent one does. Read truthily, `{"mirror": false}` would be an empty
+    # envelope -- no github_repos bound at all -- which is wider than the default.
+    channel = linked(channel) or channel
+    own = {k: v for k, v in (config.CHANNEL_POLICIES.get(channel) or {}).items() if k not in ROUTING_KEYS}
+    retval = own or config.DEFAULT_POLICY
+    return retval
+
+
+ROUTING_KEYS = ("link", "mirror")
+
+
+def linked(channel):
+    """The Slack channel id a gateway conversation (`<medium>:<label>`) is
+    linked to by its policy entry's `link`, or None. Slack ids have no colon,
+    so a Slack channel never links."""
+    channel = str(channel or "")
+    retval = (config.CHANNEL_POLICIES.get(channel) or {}).get("link") if ":" in channel else None
     return retval
 
 
@@ -236,6 +257,71 @@ def _tokens(command):
     return retval
 
 
+# What ends a command for the segment scan: the list and pipe separators, a
+# newline, and the edges of a subshell, a `$( )` or a backquote, so that
+# `echo ok;gh ...` and `echo $(gh ...)` each give gh a segment of its own.
+_SEG_PUNCT = ";&|\n()`"
+
+
+def _shell_tokens(command):
+    """shlex tokens with the separators split out even where they touch a word
+    (`ok;git`, `x&&cd d`), each run as its own token, a newline read as `;`.
+    `_git_dirs` walks segments by those tokens, and `shlex.split` leaves them
+    glued, which hid a `-C` or `cd` from it. None if the text will not lex."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        raw = list(lex)
+    except ValueError:
+        return None
+    retval = []
+    for t in raw:
+        if t and set(t) <= set(";&|\n"):
+            t = t if t in _SEGMENT_BREAK else ";"
+        retval.append(t)
+    return retval
+
+
+def _mentions(command, name):
+    """True when `name` appears as a word anywhere in the raw text, glued to a
+    separator or not. Over-reports on purpose (`grep gh f` counts): it only
+    decides whether the repo checks run, and shlex keeps `ok;gh` one word."""
+    retval = re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", command) is not None
+    return retval
+
+
+def _gh_segment_tokens(command, name="gh"):
+    """The segments of `command` that invoke gh, each a token list, or None
+    when the command cannot be split into segments. Kept apart, because each
+    segment's positional repo is its own target (#425 review): concatenated,
+    `gh repo view a/b; gh repo view c/d` read as naming only `a/b`.
+
+    The repo scans in `_gh_repos` read a `-R` value and a positional
+    `owner/repo`. Run over the whole command, they read other commands'
+    arguments as gh's: `jq . app/data.json` beside a `gh run list` was refused
+    as repo 'app/data.json', and `grep -R pat dir; gh pr list` would read `pat`
+    as one. A newline separates commands as `;` does, which `shlex.split` alone
+    treats as plain whitespace."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=_SEG_PUNCT)
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return None
+    out, seg = [], []
+    for t in tokens + [";"]:
+        if t and set(t) <= set(_SEG_PUNCT):
+            if _invokes(seg, name):
+                out.append(seg)
+            seg = []
+        else:
+            seg.append(t)
+    retval = out
+    return retval
+
+
 def _check_github(command, policy):
     allowed = policy.get("github_repos") or []
     if not allowed:
@@ -245,8 +331,8 @@ def _check_github(command, policy):
     # as `git` and `gh`, and an exact token match answered "no git here" to
     # both, skipping the whitelist entirely. Pre-dates #150 and #186; found by
     # the third adversarial pass on #195.
-    is_gh = _invokes(tokens, "gh")
-    is_git = _invokes(tokens, "git")
+    is_gh = _invokes(tokens, "gh") or _mentions(command, "gh")
+    is_git = _invokes(tokens, "git") or _mentions(command, "git")
     if not (is_gh or is_git):
         return (True, "")
     # A git command that names a GitHub URL outright (`git ls-remote
@@ -264,9 +350,37 @@ def _check_github(command, policy):
     for repo in named:
         if not _in_scope(repo):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
-    if named and not is_gh:
-        return (True, "")
-    gh_repos, gh_unresolvable = _gh_repos(tokens) if is_gh else ([], False)
+    # A git segment that names no GitHub URL reaches its checkout's origin.
+    # Decided per segment (#425 review): an allowed URL in one segment says
+    # nothing about `git status` in the next.
+    git_segments = _gh_segment_tokens(command, "git") if is_git else []
+    if git_segments is None:
+        git_segments = [tokens]
+    git_bare = any(not any(_GITHUB_URL.match(t) for t in seg) for seg in git_segments)
+    gh_segments = _gh_segment_tokens(command) if is_gh else None
+    if is_gh and gh_segments is None:
+        gh_segments = [tokens]
+    gh_repos, gh_unresolvable, gh_tokens = [], False, []
+    # A gh segment naming no repo reaches the checkout's origin, which then
+    # has to be in scope too, whatever the other segments name.
+    gh_bare = False
+    gh_api_bare = False
+    if is_gh:
+        # `export GH_REPO=o/r; gh pr list` may retarget gh from another
+        # segment, so such a value is one more target to check -- never the
+        # segment's own: `echo GH_REPO=o/r; gh issue list` sets nothing, and
+        # counting it would excuse that bare gh from the origin check below.
+        exported = [t.split("=", 1)[1] for t in tokens if t.startswith("GH_REPO=")]
+        gh_repos += exported
+        for seg in gh_segments:
+            seg_repos, seg_bad = _gh_repos(seg)
+            gh_repos += seg_repos
+            gh_unresolvable = gh_unresolvable or seg_bad
+            gh_bare = gh_bare or not seg_repos
+            # Per segment, like the targets: an allowed repo named elsewhere
+            # says nothing about where this segment's `gh api` goes.
+            gh_api_bare = gh_api_bare or ("api" in seg and not seg_repos)
+            gh_tokens += seg
     if gh_unresolvable:
         return (False, "gh names a repo path this policy cannot resolve; blocked by channel policy")
     # `gh api` that names no repo -- `gh api graphql`, `gh api user` -- is
@@ -274,28 +388,28 @@ def _check_github(command, policy):
     # be inside a GraphQL document or absent entirely, and "I could not tell"
     # has to mean no while `github_repos` is set, or the one command that
     # reaches every repo is the one command that is never checked.
-    if is_gh and not gh_repos and "api" in tokens:
+    if is_gh and gh_api_bare:
         return (False, "gh api names no repo this policy can resolve; blocked by channel policy")
     # Every named target, not the first: a command naming two reaches both.
     for repo in gh_repos:
         if not _in_scope(repo):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
-    if gh_repos:
+    # Every explicit target is checked above; none of them excuses a segment
+    # that named nothing (#425 review). Only when no git or gh segment is
+    # bare is the command done.
+    if not (git_bare or (is_gh and gh_bare)):
         return (True, "")
-    repo = None
-    if not is_gh:
-        # Every directory the command names, not just the channel's cwd: a
-        # `cd` and a `-C` retarget git identically (#186). Each one's origin
-        # has to be in scope, because the command reaches all of them.
-        _base = cwd_for(policy)
-        _dirs = _git_dirs(tokens, _base)
-        for _d in _dirs:
-            _r = _git_origin(_d)
-            if _r and not _in_scope(_r):
-                return (False, f"repo '{_r}' not in channel whitelist {allowed}")
-        repo = _git_origin(_dirs[-1] if _dirs else _base)
-    else:
-        repo = _git_origin(cwd_for(policy))
+    # Every directory the command names, not just the channel's cwd: a `cd`
+    # and a `-C` retarget git identically (#186), and gh too reads the
+    # checkout it runs in. Each one's origin has to be in scope, because the
+    # command reaches all of them.
+    _base = cwd_for(policy)
+    _dirs = _git_dirs(_shell_tokens(command) or tokens, _base)
+    for _d in _dirs:
+        _r = _git_origin(_d)
+        if _r and not _in_scope(_r):
+            return (False, f"repo '{_r}' not in channel whitelist {allowed}")
+    repo = _git_origin(_dirs[-1] if _dirs else _base)
     if not repo:
         return (False, "target github repo undeterminable; blocked by channel policy")
     if _in_scope(repo):

@@ -8,8 +8,10 @@ import os
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 
-from . import admin_tools, announce, approvals, attachments, build, config, diag, gitcfg, handler, identity, learning, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from . import admin_tools, announce, approvals, attachments, build, config, diag, gateway_app, gitcfg, handler, identity, learning, llm, logsetup, policy as policy_mod, proposals, redact, sandbox, skills, slack_blocks, slack_tools, trajectory, watchdog, yolt_gate
+from .surface import SlackSurface
 
 # Installed here, at import, before ANY statement that can log (#72). The App()
 # constructor below round-trips auth.test, and every startup call can raise with
@@ -55,6 +57,44 @@ def _thread_context(client, channel, thread_ts, cur_ts):
     return retval
 
 
+# (channel, thread_ts) -> the file refs of the mention that started the task in
+# that thread (#362). Refs only, never bytes: a resume re-fetches them through
+# attachments.to_parts, so the type and size caps and the Slack-only download
+# rule are the same ones the original turn went through. In memory, like the
+# parked requests they serve -- a restart drops both together.
+_TASK_FILES = {}
+_TASK_FILES_MAX = 200
+_TASK_FILES_PER_THREAD = 10
+_FILE_REF_KEYS = ("id", "name", "mimetype", "url_private_download", "url_private")
+
+
+def _remember_files(channel, thread_ts, files):
+    """Record what a mention attached, for the turns that resume its task.
+
+    While the thread's task is under way (a request parked, running, or a
+    resume in flight: approvals.busy), a mention adds its files to the task's
+    and one without files changes nothing: a "how is it going?" is not a new
+    task, and clearing then would starve the resume this exists for. Once the
+    thread is idle, a mention with files starts the list afresh and one
+    without clears it, so a later, unrelated task does not inherit an old
+    file."""
+    key = (channel, thread_ts)
+    busy = approvals.busy(channel, thread_ts)
+    refs = [{k: f.get(k) for k in _FILE_REF_KEYS} for f in files or []]
+    if refs:
+        held = _TASK_FILES.pop(key, None) or []
+        if not busy:
+            held = []
+        seen = {r.get("url_private_download") or r.get("url_private") for r in held}
+        merged = held + [r for r in refs
+                         if (r.get("url_private_download") or r.get("url_private")) not in seen]
+        _TASK_FILES[key] = merged[-_TASK_FILES_PER_THREAD:]   # one resume reads them all
+        if len(_TASK_FILES) > _TASK_FILES_MAX:
+            del _TASK_FILES[next(iter(_TASK_FILES))]
+    elif not busy:
+        _TASK_FILES.pop(key, None)
+
+
 _SEEN = {}  # message ts -> None; dedup duplicate Slack deliveries / retries
 
 # Slack's cap on all markdown blocks in one message.
@@ -84,24 +124,113 @@ def _seen(ts):
     return False
 
 
+# Slack truncates message text past 40000 characters.
+_FULL_COMMAND_MAX = 39000
+
+
+def _post_full_command(client, channel, thread_ts, req_id, command):
+    """Post a command too long for its card as a plain thread reply and return
+    its permalink, or None. Message text has no 3000-character block cap, and
+    this needs only `chat:write` -- a file upload would need `files:write`,
+    which the manifest leaves out on purpose. Never raises: the card must post
+    whether or not this did."""
+    cmd = redact.scrub(command)
+    if len(cmd) > _FULL_COMMAND_MAX:
+        cmd = cmd[:_FULL_COMMAND_MAX] + "\n... (truncated)"
+    retval = None
+    try:
+        resp = client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=f"Full command for [{req_id}]:\n```{cmd}```",
+        )
+        retval = client.chat_getPermalink(channel=channel, message_ts=resp["ts"]).get("permalink") or None
+    except Exception:
+        logging.exception("could not post the full command for %s", req_id)
+    return retval
+
+
+# Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
+_TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
+# A "transient" failure that repeats this many times on one card is treated as
+# a rejection: some payloads get internal_error or a 5xx every time (#356 review).
+_CARD_TRIES = 3
+
+
+def _rejected(exc):
+    """Whether Slack refused the card itself, so posting it again will fail the
+    same way (#356). A SlackApiError carries Slack's answer; a 429 or a 5xx is
+    Slack being busy or down, so is one of its transient error codes, and
+    anything that is not a SlackApiError never got an answer at all. Those may
+    pass, and get the next mention's retry."""
+    resp = getattr(exc, "response", None)
+    status = getattr(resp, "status_code", None)
+    try:
+        error = resp.get("error") if resp is not None else None
+    except Exception:
+        error = None
+    retval = (isinstance(exc, SlackApiError) and status is not None and status != 429
+              and status < 500 and error not in _TRANSIENT_ERRORS)
+    return retval
+
+
+def _card_failed(client, channel, thread_ts, req_id, exc):
+    """An approval card did not post. Retry it on the next mention when the
+    failure may pass, up to _CARD_TRIES failures; withdraw it when Slack
+    rejected the card, or the retries ran out (#356).
+
+    A rejected card is rejected again on every mention, and a request no human
+    can see holds the thread's resume forever. Withdrawn, it never runs, and
+    the thread says so -- with the id only, since the command is the likeliest
+    thing the card choked on.
+
+    If the thread was only waiting on this one -- another request here was
+    resolved while it was parked, and that resume was refused -- the thread is
+    resumed from that outcome now, after the note, so the resumed turn reads
+    the withdrawal. A thread whose only request was withdrawn is not resumed:
+    take_deferred() has nothing for it."""
+    if not _rejected(exc) and approvals.unsurface(req_id) < _CARD_TRIES:
+        return
+    if approvals.withdraw(req_id) is None:
+        return
+    try:
+        client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=(f":warning: [{req_id}] needed approval, but its card could not be "
+                  "posted, so it was withdrawn and did not run. Ask again if it is "
+                  "still needed."),
+        )
+    except Exception:
+        logging.exception("could not report the withdrawn request %s", req_id)
+    outcome = approvals.take_deferred(channel, thread_ts)
+    if outcome is not None:
+        _resume_thread(client, channel, thread_ts, outcome["req_id"],
+                       {"command": outcome["command"], "requester": outcome["requester"]},
+                       approved=outcome["approved"], result=outcome["result"],
+                       user_id=outcome["user_id"])
+
+
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
+        # Kept on the request so a retried card does not post the command
+        # twice, and so any later rendering of this card links the same reply.
+        if not slack_blocks.command_fits(req["command"]) and not req.get("full_link"):
+            req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
         try:
             client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
                 # A parked command is echoed verbatim, and a credential rides
                 # command lines routinely -- that is the YOLT lesson (#72).
-                text=redact.scrub(f"Needs approval [{req_id}]: {req['command']}"),
+                text=redact.scrub(slack_blocks.approval_text(req_id, req)),
                 blocks=slack_blocks.approval(req_id, req),
             )
-        except Exception:
+        except Exception as exc:
             logging.exception("could not post approval buttons for %s", req_id)
-            approvals.unsurface(req_id)
+            _card_failed(client, channel, thread_ts, req_id, exc)
     # And any skill the agent flagged this turn (#129): a card tagging the
     # trusted users, who may open the PR or decline. Same rendering path.
-    for key, prop in proposals.claim_unsurfaced(channel):
+    for key, prop in proposals.claim_unsurfaced(channel, thread_ts):
         try:
             client.chat_postMessage(
                 channel=channel,
@@ -126,7 +255,7 @@ def _resolve(ack, body, client, action, run, queue=approvals, claimed=slack_bloc
         "user_id": body["user"]["id"],
         "channel": channel,
         "thread_ts": thread_ts,
-        "client": client,
+        "surface": SlackSurface(client),
     }
     # A click that resolves nothing must not touch the card (#94). chat_update
     # is destructive, and the card is the only place a parked command is ever
@@ -251,14 +380,29 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
     nothing else; it must never look like the approval failed."""
     try:
         context = _thread_context(client, channel, thread_ts, None)
+        # The starting mention's files, read again (#362): only that one
+        # message's, and only on a resume, never the whole thread's.
+        # Fetched only when this click can resume: with other cards still
+        # parked handler.resume refuses, and the download would be for nothing.
+        parts, notes = [], []
+        if not approvals.pending_in(channel, thread_ts):
+            try:
+                save_under, no_save = attachments.save_root(channel)
+                parts, notes = attachments.to_parts(
+                    _TASK_FILES.get((channel, thread_ts)),
+                    save_under=save_under, no_save=no_save)
+            except Exception:  # noqa: BLE001 -- a bad download must not cost the resume
+                logging.exception("resume: could not re-read the task's files")
+                notes = ["the files this task started with could not be read again"]
         reply = handler.resume(
             req_id, approved, req.get("command", ""), result,
             thread_context=context, channel=channel, thread_ts=thread_ts,
             # The clicking trusted user, matching the text path: "approve <id>"
             # runs inside that user's own turn, so the resumed turn carries the
             # same identity a typed approval would.
-            user_id=user_id, slack_client=client,
+            user_id=user_id, surface=SlackSurface(client),
             requester=req.get("requester"),
+            attachments=parts, attachment_notes=notes,
         )
         if reply is None:
             # Two different silences used to look alike here, and only one of
@@ -342,8 +486,13 @@ def _turn(event, say, client, logger):
     context = _thread_context(client, channel, thread_ts, event.get("ts"))
     # Attachments ride in event["files"], not in the text (#68). Only this
     # message's -- files in thread *history* stay unread for now, since every
-    # reply would re-download them.
-    parts, notes = attachments.to_parts(event.get("files"))
+    # reply would re-download them. The refs are kept so a resume after an
+    # approval card gets this message's files back (#362). Each one is also
+    # saved under the channel cwd and its path given to the model (#372).
+    _remember_files(channel, thread_ts, event.get("files"))
+    save_under, no_save = attachments.save_root(channel)
+    parts, notes = attachments.to_parts(
+        event.get("files"), save_under=save_under, no_save=no_save)
     text = event.get("text", "")
     if notes:
         text += "\n\n[attachments I could not read: " + "; ".join(notes) + "]"
@@ -353,18 +502,32 @@ def _turn(event, say, client, logger):
     # not an audience: it gets what a webhook post (no user) gets.
     asker = None if event.get("bot_id") else event.get("user")
     try:
-        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, slack_client=client, attachments=parts)
+        reply = handler.handle(text, thread_context=context, channel=channel, thread_ts=thread_ts, user_id=asker, surface=SlackSurface(client), attachments=parts)
     except Exception as exc:  # one clear message, no dozen "did not run" cards
-        # Both paths are scrubbed: a provider exception can carry the request it
-        # failed on, api_key and Authorization header included (#72). The log
-        # side is covered by redact.install_logging(), which scrubs the rendered
-        # traceback too.
-        logger.exception("handler failed")
-        reply = redact.scrub(f":warning: shmobster error: {exc}")
+        # The exception goes to the log only (#352). A router failure's text is
+        # the whole multi-provider dump -- deployment hashes, fallback groups,
+        # vendor JSON with account ids -- which nobody in the channel can act on
+        # and the operator reads in the log anyway. The log side is scrubbed by
+        # redact.install_logging(), the traceback included (#72).
+        logger.exception("handler failed: channel=%s thread=%s", channel, thread_ts)
+        reply = handler.failure_line(exc)
     say(thread_ts=thread_ts, **_reply_payload(reply))
     # Anything the turn parked gets Approve/Deny buttons (#50), so a trusted
     # user answers with a click instead of another round-trip through the model.
     _post_pending(client, channel, thread_ts)
+    # A rung found dead during this or an earlier turn (#353), told once, as its
+    # own post so a mirror never carries it. Only in a trusted user's turn: an
+    # operator notice belongs to an operator, not a client channel, a stranger's
+    # DM or a Signal group. Until then it waits in the state file.
+    if admin_tools.is_trusted(asker):
+        try:
+            for notice in llm.claim_dead_notices():
+                say(thread_ts=thread_ts, **_reply_payload(notice))
+        except Exception:  # noqa: BLE001 -- the ERROR log line already has it
+            logging.exception("could not post a dead-rung notice")
+    # The question and the answer, into linked gateway conversations that
+    # mirror this channel (#336). Off unless configured.
+    gateway_app.mirror_in(channel, event.get("text", ""), reply)
 
 
 @app.event("app_mention")
@@ -485,11 +648,12 @@ def main():
         delivered = 0
         for channel in config.CHANNELS:
             try:
-                app.client.chat_postMessage(channel=channel, text=text)
+                app.client.chat_postMessage(channel=channel, **_reply_payload(text))   # Markdown (#397)
                 delivered += 1
             except Exception:
                 logging.exception(
                     "announce: could not post to %s", config.CHANNEL_NAMES.get(channel, channel))
+        delivered += gateway_app.announce(text)  # listed gateway conversations too (#336)
         if not delivered:
             raise RuntimeError("no configured channel accepted the announcement")
 
@@ -593,6 +757,9 @@ def main():
             "with a working keychain.", sandbox._GH_HOSTS)
     if learning.enabled():
         logging.info("learning: proposals go to %s (%s)", config.LEARNING_REPO, config.LEARNING_PATH)
+    # The second door (#336): messages the gateway addresses to this agent.
+    gateway_app.start(slack_post=lambda channel, text: app.client.chat_postMessage(
+        channel=channel, **_reply_payload(text)))
     socket_mode = SocketModeHandler(app, config.SLACK_APP_TOKEN)
     # Deaf-but-alive is the failure mode KeepAlive cannot see (#66), so we watch
     # the connection ourselves and exit when it stops hearing Slack.

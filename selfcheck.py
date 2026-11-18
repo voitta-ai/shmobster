@@ -38,11 +38,14 @@ for _var in (
     # referenced by the example policy file's per-channel env (#104)
     "VERCEL_TOKEN",
     "HEROKU_API_KEY",
+    # the example gateway token (#336)
+    "SHMOBSTER_GATEWAY_TOKEN",
 ):
     os.environ.setdefault(_var, f"selfcheck-placeholder-{_var.lower()}")
 
 import litellm  # noqa: E402
 
+from shmobster.surface import SlackSurface  # noqa: E402
 from shmobster import __version__, admin_tools, announce, approvals, build, config, cost, handler, identity, llm, memory, policy, projectdocs, redact, sandbox, skills, slack_blocks, slack_tools, spine, state, tools, trajectory, web, yolt_gate  # noqa: E402
 
 # Redaction (#72) fails loud without voitta-yolt's secret_redact, and the example
@@ -79,7 +82,7 @@ import shutil  # noqa: E402
 _REAL_WRAP = sandbox.wrap
 _HAVE_SANDBOX = bool(shutil.which("sandbox-exec"))
 if not _HAVE_SANDBOX:
-    sandbox.wrap = lambda command, pol: ["/bin/sh", "-c", command]
+    sandbox.wrap = lambda command, pol, network=True: ["/bin/sh", "-c", command]
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == [
@@ -576,7 +579,7 @@ def _cap_ch(messages, tools=None):
 
 llm.complete = _cap_ch
 config.BOT_USER_ID = "UBOTSELF"
-handler.handle("hey", channel=_ex_ch, thread_ts="123.456", slack_client=_fs)
+handler.handle("hey", channel=_ex_ch, thread_ts="123.456", surface=SlackSurface(_fs))
 assert f"Slack channel {_ex_ch}" in _capch["sys"], _capch["sys"]
 assert "123.456" in _capch["sys"], _capch["sys"]
 assert "UBOTSELF" in _capch["sys"], _capch["sys"]  # self user-id injected
@@ -596,7 +599,7 @@ class _FakePost:
 # non-trusted -> loud refusal + trusted users tagged, no write
 _res = admin_tools.dispatch(
     "set_policy", {"channel_id": "C1", "cwd": "/x"},
-    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+    {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())},
 )
 assert _res.startswith("REFUSED"), _res
 assert "<@U_TRUSTED>" in _posted["text"], _posted
@@ -613,7 +616,7 @@ def _fake_set(ch, updates):
 config.set_channel_policy = _fake_set
 _res2 = admin_tools.dispatch(
     "set_policy", {"channel_id": "C1", "cwd": "/x"},
-    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C1", "surface": None},
 )
 assert "updated" in _res2, _res2
 assert _applied["call"][0] == "C1", _applied
@@ -621,7 +624,7 @@ assert _applied["call"][0] == "C1", _applied
 # 11) approval flow (#48): a mutating command parks; a trusted user releases it
 yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
 policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
-_parked = tools.run_shell("echo approved_marker_456", {}, "C1")
+_parked = tools.run_shell("printf approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
 _req = _parked.split("[", 1)[1].split("]", 1)[0]
 # What run_shell shows a human is the queue key itself, nonce and all (#109)
@@ -632,7 +635,7 @@ assert approvals.ids("C1") == [_key], approvals.ids("C1")
 # non-trusted approval is refused, and the request stays parked
 _ref = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()},
+    {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())},
 )
 assert _ref.startswith("REFUSED"), _ref
 assert approvals.ids("C1") == [_key], approvals.ids("C1")
@@ -640,32 +643,32 @@ assert approvals.ids("C1") == [_key], approvals.ids("C1")
 # wrong channel can't release another channel's request
 _other = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_TRUSTED", "channel": "C_OTHER", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_OTHER", "surface": None},
 )
 assert "no pending request" in _other, _other
 
 # trusted, same channel -> runs, and the request is consumed
 _ran = admin_tools.dispatch(
     "approve_command", {"request_id": _req},
-    {"user_id": "U_TRUSTED", "channel": "C1", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C1", "surface": None},
 )
 assert "approved_marker_456" in _ran, _ran
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
 # 12) Slack approval surface (#50): each parked command is handed to an ingest
 # exactly once, and Deny drops it unrun -- trust-gated like approve
-_parked2 = tools.run_shell("echo never_runs_789", {}, "C1")
+_parked2 = tools.run_shell("printf never_runs_789", {}, "C1")
 _req2 = _parked2.split("[", 1)[1].split("]", 1)[0]
 _key2 = approvals.canonical(_req2)
 _surfaced = approvals.claim_unsurfaced("C1")
 assert [k for k, _ in _surfaced] == [_key2], _surfaced
 assert approvals.claim_unsurfaced("C1") == [], "already surfaced -> no duplicate buttons"
 
-_dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+_dref = admin_tools.deny(_req2, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())})
 assert _dref.startswith("REFUSED"), _dref
 assert approvals.ids("C1") == [_key2], approvals.ids("C1")
 
-_den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_den = admin_tools.deny(_req2, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert _den.startswith("DENIED"), _den
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
@@ -674,15 +677,15 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # slack_app builds a Bolt App. What is checkable is everything the ingest calls:
 # the queue survives, and the alert says who clicked, which button, and what it
 # did not run.
-_parked3 = tools.run_shell("echo refused_click_321", {}, "C1")
+_parked3 = tools.run_shell("printf refused_click_321", {}, "C1")
 _req3 = _parked3.split("[", 1)[1].split("]", 1)[0]
 _key3 = approvals.canonical(_req3)
-assert approvals.peek(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.peek(_req3, "C1")["command"] == "printf refused_click_321"
 assert approvals.peek(_req3, "C_OTHER") is None, "peek is channel-scoped, like pop"
 
 # two deliveries of one button press land on two threads (#103): the second
 # must get nothing, so it cannot overwrite the first one's result
-assert approvals.acquire(_req3, "C1")["command"] == "echo refused_click_321"
+assert approvals.acquire(_req3, "C1")["command"] == "printf refused_click_321"
 assert approvals.acquire(_req3, "C1") is None, "a second click must not acquire a held request"
 assert approvals.acquire(_req3, "C_OTHER") is None, "acquire is channel-scoped, like pop"
 approvals.release(_req3)
@@ -704,7 +707,7 @@ assert approvals.status(_req3, "C1")[0] == "held", "acquired -> held"
 assert approvals.pop(_req3, "C1") is None, "a consumer racing a hold must get nothing (#105)"
 assert approvals.peek(_req3, "C1") is None, "held means out of the queue entirely"
 _h_state, _h_req = approvals.status(_req3, "C1")
-assert _h_state == "held" and _h_req["command"] == "echo refused_click_321", "held comes WITH the request now (#105)"
+assert _h_state == "held" and _h_req["command"] == "printf refused_click_321", "held comes WITH the request now (#105)"
 assert approvals.status("no-such-id", "C1")[0] == "absent", "an absent request is not held"
 # ids are a process counter that restarts at 1 while approval cards outlive the
 # process, so a stale card in one channel can name an id another channel holds
@@ -739,11 +742,11 @@ for _k in _all_held:
     approvals.release(_k)
 for _k in approvals.ids("C_FULL"):
     approvals.pop(_k, "C_FULL")
-_req3 = tools.run_shell("echo refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
+_req3 = tools.run_shell("printf refused_click_321", {}, "C1").split("[", 1)[1].split("]", 1)[0]
 _key3 = approvals.canonical(_req3)
 
 _cref = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "approve_command"
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command"
 )
 assert _cref.startswith("REFUSED"), _cref
 assert approvals.ids("C1") == [_key3], approvals.ids("C1")
@@ -756,7 +759,7 @@ assert "Approve" in _posted["text"], _posted
 assert "still parked" in _posted["text"], _posted
 assert "right here" in _posted["text"], _posted
 assert "card above" not in _posted["text"], _posted
-assert "echo refused_click_321" in str(_posted["blocks"]), _posted
+assert "printf refused_click_321" in str(_posted["blocks"]), _posted
 
 # ...but pending is not the same as clickable, and the queue goes quiet in the
 # middle of a trusted click: it acquires the request, strips the buttons, and
@@ -767,14 +770,14 @@ assert "echo refused_click_321" in str(_posted["blocks"]), _posted
 _flight = approvals.add("echo in_flight", "C1", "mutating")
 approvals.acquire(_flight, "C1")
 _posted.clear()
-admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_HELD", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "already acting on it" in _posted["text"], _posted
 assert "still live" not in _posted["text"], _posted
 
 assert approvals.pop(_flight, "C1") is None, "the text path cannot steal a held request (#105)"
 approvals.finish(_flight)  # what run_approved does before it executes
 _posted.clear()
-admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_flight, {"user_id": "U_STRANGER_RUN", "channel": "C1", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "no longer pending" in _posted["text"], "consumed is absent now, and the alert says so"
 approvals.release(_flight)  # no-op after finish (#105)
 assert approvals.status(_flight, "C1")[0] == "absent", "release after finish resurrects nothing"
@@ -785,17 +788,17 @@ assert approvals.status(_flight, "C1")[0] == "absent", "release after finish res
 # users are meant to hear about
 _dup = approvals.add("echo same_id_other_channel", "C_DUP", "mutating")
 _posted.clear()
-admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "<@U_STRANGER>" in _posted["text"], "first channel alerts"
 _posted.clear()
-admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "client": _FakePost()}, "approve_command")
+admin_tools.refuse_click(_dup, {"user_id": "U_STRANGER", "channel": "C_DUP2", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "<@U_STRANGER>" in _posted["text"], "same id and user in another channel must still alert"
 approvals.pop(_dup, "C_DUP")
 # ...and it does not hedge about the agent's own initiative: that wording is
 # #59's, for the model path, and a button press has exactly one possible actor.
 assert "my own" not in _posted["text"], _posted
 
-_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_den3 = admin_tools.deny(_req3, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert _den3.startswith("DENIED"), _den3
 assert approvals.ids("C1") == [], approvals.ids("C1")
 
@@ -804,7 +807,7 @@ assert approvals.ids("C1") == [], approvals.ids("C1")
 # refused, but silent.
 _posted.clear()
 _again = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()}, "deny_command"
+    _req3, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())}, "deny_command"
 )
 assert _again.startswith("REFUSED"), _again
 assert _posted == {}, _posted
@@ -815,9 +818,9 @@ assert _posted == {}, _posted
 _race = approvals.add("echo race_marker_105", "C1", "mutating")
 _race_req = approvals.acquire(_race, "C1")           # the click side takes it
 _ans = admin_tools.dispatch("approve_command", {"request_id": _race},
-                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+                            {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "already being acted on" in _ans and "race_marker_105" not in _ans, _ans
-_ans = admin_tools.deny(_race, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_ans = admin_tools.deny(_race, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "already being acted on" in _ans, _ans
 # the click side finishes: the runner executes the request it was HANDED
 _out = admin_tools.run_approved(_race, _race_req, {"user_id": "U_TRUSTED", "channel": "C1"})
@@ -827,14 +830,14 @@ assert approvals.status(_race, "C1")[0] == "absent" and approvals.ids("C1") == [
 # and a text approval that wins cleanly still works end to end
 _race2 = approvals.add("echo race2_marker", "C1", "mutating")
 _ans = admin_tools.dispatch("approve_command", {"request_id": _race2},
-                            {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+                            {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "race2_marker" in _ans and approvals.ids("C1") == [], _ans
 
 # a click on a stale card -- the request already claimed, denied, or cleared by
 # a restart -- must not claim it is "still parked". Being confidently wrong in
 # the alert is the failure this whole path exists to stop.
 _sref = admin_tools.refuse_click(
-    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "client": _FakePost()}, "deny_command"
+    _req3, {"user_id": "U_STRANGER_2", "channel": "C1", "surface": SlackSurface(_FakePost())}, "deny_command"
 )
 assert _sref.startswith("REFUSED"), _sref
 assert "no longer pending" in _posted["text"], _posted
@@ -849,11 +852,11 @@ class _FailingPost:
         raise RuntimeError("slack is down")
 
 
-_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "client": _FailingPost()}
+_ctx_flaky = {"user_id": "U_STRANGER_3", "channel": "C1", "surface": SlackSurface(_FailingPost())}
 _posted.clear()
 assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
 assert _posted == {}, _posted
-_ctx_flaky["client"] = _FakePost()
+_ctx_flaky["surface"] = SlackSurface(_FakePost())
 assert admin_tools.refuse_click(_req3, _ctx_flaky, "approve_command").startswith("REFUSED")
 assert "<@U_STRANGER_3>" in _posted["text"], "a failed post must not spend the alert"
 
@@ -913,16 +916,16 @@ assert "block_id" not in json.dumps(_exp), "echoed block ids are dropped"
 assert approvals.peek("1", "C_BOOT") is None, "a bare number is not this boot's id"
 assert admin_tools.dispatch(
     "approve_command", {"request_id": "1"},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 ).startswith("no pending request"), "typing the short number must not approve anything"
-assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None}) \
+assert admin_tools.deny("1", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None}) \
     .startswith("no pending request"), "nor deny anything"
 # the refusal says the queue is not empty without naming what is in it: this
 # answer goes back into the tool loop, and a live id there is an approvable id
 # the human never quoted (#109)
 _stale = admin_tools.dispatch(
     "approve_command", {"request_id": _card_value},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 )
 assert _after not in _stale, "a stale id must not be answered with the live ones"
 assert "1 other request(s) are parked here" in _stale, _stale
@@ -937,12 +940,12 @@ assert approvals.peek(f"[{_after}]", "C_BOOT") is not None, "a quoted id still r
 assert approvals.peek("[1]", "C_BOOT") is None, "brackets do not complete a bare number"
 _bracketed = admin_tools.dispatch(
     "approve_command", {"request_id": f"[{_after}]"},
-    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 )
 assert "different_command" in _bracketed, _bracketed
 _denyable = approvals.add("echo never_runs_at_all", "C_BOOT", "mutating")
 assert admin_tools.deny(
-    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "client": None},
+    f"[{_denyable}]", {"user_id": "U_TRUSTED", "channel": "C_BOOT", "surface": None},
 ).startswith("DENIED"), "deny takes a quoted id too"
 assert approvals.ids("C_BOOT") == [], approvals.ids("C_BOOT")
 
@@ -989,7 +992,7 @@ def _turn(messages, tools=None):
 config.MAX_TOOL_STEPS = 5
 config.WARN_TOOL_STEPS = 4
 llm.complete = _turn
-handler.handle("go", channel="C1", slack_client=_fs)
+handler.handle("go", channel="C1", surface=SlackSurface(_fs))
 assert _seen_pol and _seen_pol[-1] == {"cwd": "/new"}, _seen_pol  # run_shell saw the post-set_policy value
 
 # 15) cwd exclude guard (#55): a path under an excluded dir is blocked, siblings
@@ -1061,7 +1064,7 @@ def _cap_skill(messages, tools=None):
 tools.dispatch = _rec_tools  # (already stubbed above; keep exec off this machine)
 llm.complete = _cap_skill
 handler._SYSTEM = None
-handler.handle("do the thing", channel="C1", slack_client=_fs)
+handler.handle("do the thing", channel="C1", surface=SlackSurface(_fs))
 assert "## Skills" in _capsk["sys"], _capsk["sys"]
 assert "load_skill" in _capsk["tools"], _capsk["tools"]
 assert "Put worktrees" in skills.dispatch("load_skill", {"name": "worktree-convention"})
@@ -1069,9 +1072,9 @@ assert "Put worktrees" in skills.dispatch("load_skill", {"name": "worktree-conve
 # reload_skills is trust-gated like the other admin tools (14) stubbed these out)
 admin_tools.dispatch, admin_tools.NAMES = _real_admin
 assert "reload_skills" in admin_tools.NAMES, admin_tools.NAMES
-_skref = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_STRANGER", "channel": "C1", "client": _FakePost()})
+_skref = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_STRANGER", "channel": "C1", "surface": SlackSurface(_FakePost())})
 assert _skref.startswith("REFUSED"), _skref
-_skok = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_TRUSTED", "channel": "C1", "client": None})
+_skok = admin_tools.dispatch("reload_skills", {}, {"user_id": "U_TRUSTED", "channel": "C1", "surface": None})
 assert "skills reloaded: 1" in _skok, _skok
 
 # no configured paths -> no menu, no tool, nothing paid for the feature
@@ -1094,7 +1097,7 @@ def _cap_ver(messages, tools=None):
 
 llm.complete = _cap_ver
 handler._SYSTEM = None
-handler.handle("what version are you", channel="C1", slack_client=_fs)
+handler.handle("what version are you", channel="C1", surface=SlackSurface(_fs))
 assert f"running shmobster {_b}" in _capv["sys"], _capv["sys"]
 
 # 19) upgrade announcement (#77): a version change is announced once, a restart
@@ -1191,7 +1194,7 @@ if True:
         if not _leaked and _cap_tool(messages, tools) else _FakeMsg(content="done")
     )
     config.MAX_TOOL_STEPS, config.WARN_TOOL_STEPS = 5, 4
-    _out = handler.handle("dump env", channel="C1", slack_client=_fs)
+    _out = handler.handle("dump env", channel="C1", surface=SlackSurface(_fs))
     assert _akia not in "".join(_leaked), "raw credential reached the model context"
     assert _akia not in _out, _out
 
@@ -1659,9 +1662,13 @@ _g_pol = {"cwd": _g_primary}
 # YOLT stubbed by verb: the grant layer asks it about the segments it does not
 # vouch for itself, so `diff` and `git status` come back safe, `rm` does not
 yolt_gate.classify = lambda cmd, cwd=None: (("safe", "read-only") if cmd.split()[0] in ("cd", "diff", "ls", "cat", "echo") or cmd.startswith(("git status", "git log")) else ("unsafe", cmd.split()[0] + ": mutating"))
-_ok, _why = grant.check(f"cd {_g_wt} && cp README copy && diff -q README copy; git add copy && git status --short && git commit -m 'c'", _g_pol)
+_ok, _why = grant.check(f"cd {_g_wt} && git status --short && cp README copy && diff -q README copy; git add copy && git commit -m 'c'", _g_pol)
 assert _ok, _why
 assert "git commit: linked worktree on feat, solo author" in _why, _why
+# ...but git reading the repository after a write in the same command parks:
+# the write lands first and can change what git loads (#344)
+_ok, _why = grant.check(f"cd {_g_wt} && cp README copy && git status --short", _g_pol)
+assert not _ok and "after a write in the same command" in _why, _why
 _ok, _why = grant.check("git commit -m x", _g_pol)
 assert not _ok and "primary checkout" in _why, _why
 _ok, _why = grant.check(f"git -C {_g_wt} commit -m x", _g_pol)
@@ -1679,7 +1686,10 @@ assert not _ok and "other@example.com" in _why, _why
 for _cmd, _frag in (
     ("cat > f <<'EOF'\nhi\nEOF", None),
     ("mkdir -p out && ls | tee out/l 2>/dev/null", None),
-    ("git checkout -b x && git switch -c y && git add -A && git stash", None),
+    ("git checkout -b x", None),
+    ("git switch -c y", None),
+    ("git stash", None),
+    ("git add -A && git stash", "git stash: after a write in the same command"),
     ('cp "$SRC" dst', None),
     ("rm -rf out", "rm: mutating"),
     ("git reset --hard", "git reset: not a local write"),
@@ -1729,7 +1739,7 @@ trajectory._DIR = tempfile.mkdtemp()
 _state_path, state._PATH = state._PATH, os.path.join(tempfile.mkdtemp(), "state.json")
 _trusted, config.TRUSTED_USERS = config.TRUSTED_USERS, {"UT"}
 _repo, config.LEARNING_REPO = config.LEARNING_REPO, ""
-_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "client": None}
+_l_ctx = {"user_id": "U1", "channel": "C9", "thread_ts": "1.1", "surface": None}
 # capture: one line per turn, scrubbed, dispositions read off the results
 _steps = [trajectory.step("run_shell", {"command": "echo hi"}, "hi"),
           trajectory.step("run_shell", {"command": "rm -rf x"}, "NOT RUN -- pending approval [k] (mutating)"),
@@ -1765,7 +1775,7 @@ _alerts = []
 class _AlertClient:
     def chat_postMessage(self, **kw):
         _alerts.append(kw)
-admin_tools.refuse_click(_key, {**_l_ctx, "client": _AlertClient()}, "open_skill_pr")
+admin_tools.refuse_click(_key, {**_l_ctx, "surface": SlackSurface(_AlertClient())}, "open_skill_pr")
 assert any("Open PR" in _a["text"] for _a in _alerts), _alerts
 # the proposal's own card rides along, not the approval one: each queue renders
 # its own surface, and a proposal has a name where a command would be (#215)
@@ -1774,7 +1784,7 @@ assert any("open_skill_pr" in str(_a.get("blocks")) for _a in _alerts), _alerts
 assert proposals.peek(_key, "C9") is not None
 # a held proposal refuses the text path the same way approvals do (#105)
 assert proposals.acquire(_key, "C9") is not None
-_ans = learning.propose(_key, {"user_id": "UT", "channel": "C9", "thread_ts": "1.1", "client": None})
+_ans = learning.propose(_key, {"user_id": "UT", "channel": "C9", "thread_ts": "1.1", "surface": None})
 assert "already being acted on" in _ans, _ans
 proposals.release(_key)
 assert proposals.peek(_key, "C9") is not None, "released back pending"
@@ -2073,6 +2083,30 @@ yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only") if "curl" not i
 _g2_ok, _g2_why = grant.check("mkdir -p x && curl -X POST https://elsewhere.test/x", _eg)
 assert not _g2_ok, (_g2_ok, _g2_why)
 yolt_gate.classify = lambda cmd, cwd=None: ("safe", "read-only")
+
+# A double-quoted word with a backslash but no expansion is read the way bash
+# reads it (#419), instead of refusing it as "takes shell rules to read". Each
+# word is checked against bash itself; a word with an expansion stays None.
+import subprocess as _dq_sp
+import tree_sitter as _dq_ts
+for _dq_w in (r'"\nHTTP:%{http_code}\n"', r'"a\\b"', r'"a\"b"', r'"\$HOME"', r'"a\`b"',
+              '"a\\\nb"', r'"\t"', r'"x\\"', r'"\\\n"', r'"\q"', r'"a\\\$b"', r'"\${X}"'):
+    _dq_src = ("printf %s " + _dq_w).encode()
+    _dq_arg = _dq_ts.Parser(grant._LANG).parse(_dq_src).root_node.children[0].children[-1]
+    _dq_mine = grant._literal_word(_dq_arg, _dq_src)
+    _dq_real = _dq_sp.run(["bash", "-c", "printf %s " + _dq_w], capture_output=True, text=True, env={}).stdout
+    assert _dq_mine == _dq_real, (_dq_w, _dq_mine, _dq_real)
+for _dq_w in (r'"$HOME"', r'"a$(id)"', r'"`id`"', r'"${X}"', r'"\n$X"'):
+    _dq_src = ("printf %s " + _dq_w).encode()
+    _dq_arg = _dq_ts.Parser(grant._LANG).parse(_dq_src).root_node.children[0].children[-1]
+    assert grant._literal_word(_dq_arg, _dq_src) is None, _dq_w
+# the incident command (#419): a -w format with \n escapes, to an allowed host
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\nHTTP:%{http_code}\n" https://example.com/x', _eg)
+assert _dq_ok, (_dq_ok, _dq_why)
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\nHTTP:%{http_code}\n" https://elsewhere.test/x', _eg)
+assert not _dq_ok and "elsewhere.test" in _dq_why, (_dq_ok, _dq_why)
+_dq_ok, _dq_why = grant.check(r'curl -s -w "\n$X\n" https://example.com/x', _eg)
+assert not _dq_ok, (_dq_ok, _dq_why)
 
 # ...and end to end: an off-list fetch parks with the host in its reason, while
 # a read-only command in the same channel still runs
@@ -2502,7 +2536,7 @@ def _yolt_2x(cmd, cwd=None):
 
 
 yolt_gate.classify = _yolt_2x
-_rpol = {"cwd": "."}
+_rpol = {"cwd": _g_primary}   # a real checkout, wherever selfcheck runs from (#344)
 try:
     # the reads that 1.6.0 called safe and 2.0.x delegates
     for _c in ("cat README.md", "ls -la", "grep -rn x .", "head -1 f", "wc -l f",
@@ -2582,9 +2616,12 @@ try:
         _ok, _why = grant.check(_c, _rpol)
         assert not _ok, (_c, _ok, _why)
     # ...and the flag walk survives `git -C <dir>` before the subcommand
-    _ok, _why = grant.check("git -C /tmp branch -a", _rpol)
+    _ok, _why = grant.check("git -C . branch -a", _rpol)
     assert _ok, _why
-    _ok, _why = grant.check("git -C /tmp branch -D topic", _rpol)
+    # ...and pointed anywhere but the checkout, git is not granted (#344)
+    _ok, _why = grant.check("git -C /tmp branch -a", _rpol)
+    assert not _ok and "not the channel's checkout" in _why, _why
+    _ok, _why = grant.check("git -C . branch -D topic", _rpol)
     assert not _ok and "flag -D" in _why, _why
     # ...and the things that look like reads but are not. Each of these was
     # `safe` under voitta-yolt 1.6.0, which is why READ_VERBS is not parity
@@ -2632,7 +2669,6 @@ try:
                "git -c diff.external=touch diff --ext-diff",
                "git --config-env=core.fsmonitor=EV status",
                "git grep -Otouch needle",
-               "git grep needle",
                "git diff --output=out.txt",
                "git diff -O out.txt",
                "tree -o out.txt"):
@@ -2643,7 +2679,8 @@ try:
     _ok, _why = grant.check("git -c core.fsmonitor=touch add .", _rpol)
     assert not _ok, (_ok, _why)
     # the ordinary forms still pass
-    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x ."):
+    for _c in ("git log -p", "git diff", "git status --porcelain", "grep -rn x .",
+               "git grep needle"):
         _ok, _why = grant.check(_c, _rpol)
         assert _ok and "read-only" in _why, (_c, _ok, _why)
     # process substitution runs a command, in an argument or as a redirect
@@ -2708,7 +2745,12 @@ try:
     # inside its repos and its tree the destructive commands run too. The point
     # is enabling the people in that channel, not protecting them from their
     # own workspace.
-    _un = {"cwd": ".", "unattended": True, "github_repos": ["o/r"],
+    # A checkout of its own, with an origin on github.com, so `git push` has a
+    # remote to read wherever selfcheck runs from (#344 pins git to it).
+    _un_repo = os.path.join(tempfile.mkdtemp(), "r")
+    subprocess.run(["git", "init", "-q", _un_repo], check=True)
+    subprocess.run(["git", "-C", _un_repo, "remote", "add", "origin", "https://github.com/o/r.git"], check=True)
+    _un = {"cwd": _un_repo, "unattended": True, "github_repos": ["o/r"],
            "allow_domains": ["github.com", "api.github.com"]}
     for _c in ("rm -rf build", "gh pr merge 3",
                "gh api -X POST repos/o/r/issues -f title=x",
@@ -2852,9 +2894,15 @@ try:
                 r'(regex #"/\.git/(.+/)?config$")',
                 r'(regex #"/config\.worktree$")'):
         assert _rx in _gd_prof, _rx
-    assert r'(regex #"/\.git$")' not in _gd_prof, (
-        "denying the gitdir pointer breaks `git worktree add` (#186)"
-    )
+    # ...and the entries that choose the repository are frozen, because a
+    # rename installs a directory without writing any path beneath it (#344).
+    # #186 left the pointer writable while TMPDIR offered the same door; #344
+    # pins git to the channel's checkout, so freezing it now closes one.
+    for _rx in (r'(regex #"/\.git$")',
+                r'(regex #"/\.git/(modules/.+/)?hooks$")',
+                r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+$")',
+                r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+/(commondir|gitdir)$")'):
+        assert _rx in _gd_prof, _rx
     if _HAVE_SANDBOX:
 
         def _gd_run(cmd, cwd=_gd_root):
@@ -2906,9 +2954,27 @@ try:
         for _cmd in ("echo x > .GIT/hooks/pre-commit", "echo x > .git/HOOKS/pre-commit",
                      "echo x > .git/CONFIG", "ln f.txt .git/hooks/pre-commit"):
             assert _gd_run(_cmd) != 0, _cmd
-        # `git worktree add` must keep working -- it writes the worktree's `.git`
-        # pointer file, and it is how work is done in this repo
-        assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
+        # Renaming a directory into place is a write to the entry, not to the
+        # config or hooks beneath it, so each of these was allowed before #344.
+        for _cmd in ("mkdir -p r/d && echo x > r/d/config && mv r/d r/.git",
+                     "mkdir -p r2/d && echo x > r2/d/config && mv r2/d r2/.GIT",
+                     "mkdir -p h && mv h .git/hooks2 && mv .git/hooks .git/hooks_old",
+                     "mv .git gitold",
+                     "mkdir -p z/.git"):
+            assert _gd_run(_cmd) != 0, _cmd
+        # a worktree's pointer and its admin entry cannot be swapped either,
+        # including after an earlier write in the same command
+        for _cmd in ("echo 'gitdir: /tmp/x' > .git", "echo x > f && cp f .git", "rm .git"):
+            assert _gd_run(_cmd, _gd_wt) != 0, _cmd
+        for _cmd in ("echo /tmp/x > .git/worktrees/w/commondir",
+                     "mv .git/worktrees/w .git/worktrees/w_old",
+                     # the container, swapped whole for a prebuilt one
+                     "mkdir -p pre/w && echo /tmp/x > pre/w/commondir && mv .git/worktrees .git/wt_old",
+                     "mkdir -p .git/pre && mv .git/pre .git/modules"):
+            assert _gd_run(_cmd) != 0, _cmd
+        # The cost: `git worktree add` writes a new pointer, so it fails in a
+        # channel, approved or not; an operator runs it.
+        assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") != 0
         for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
             assert _gd_run(_cmd) == 0, _cmd
         # the pattern matches a gitdir and nothing that merely looks like one: a
@@ -3837,7 +3903,7 @@ def _btns(blocks):
 _r215 = approvals.add("jq . structure.json 2>&1", "C_215", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215", "channel": "C_215",
-                                 "thread_ts": "9.9", "client": _FakePost()}, "approve_command")
+                                 "thread_ts": "9.9", "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == ["approve_command", "deny_command"], _posted
 # same request, so either card resolves it -- the new one is not a second queue
 # entry, it is a second door onto the same one
@@ -3855,7 +3921,7 @@ assert sum("structure.json" in str(_b) for _b in _posted["blocks"]) == 1, _poste
 approvals.acquire(_r215, "C_215")
 _posted.clear()
 admin_tools.refuse_click(_r215, {"user_id": "U_STRANGER_215b", "channel": "C_215",
-                                 "client": _FakePost()}, "approve_command")
+                                 "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == [], _posted
 assert _posted["blocks"] is None, _posted
 approvals.release(_r215)
@@ -3863,14 +3929,14 @@ approvals.release(_r215)
 # nor does an absent one
 _posted.clear()
 admin_tools.refuse_click("nosuchrequest-9", {"user_id": "U_STRANGER_215c", "channel": "C_215",
-                                             "client": _FakePost()}, "approve_command")
+                                             "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _btns(_posted["blocks"]) == [], _posted
 
 # one alert per user per request still holds. Leaving the card standing leaves
 # it re-clickable (#94), and now each alert carries a card of its own, so the
 # dedupe is what keeps a stranger on the button from filling the thread.
 _r215b = approvals.add("ls", "C_215", "unknown")
-_ctx215 = {"user_id": "U_STRANGER_215d", "channel": "C_215", "client": _FakePost()}
+_ctx215 = {"user_id": "U_STRANGER_215d", "channel": "C_215", "surface": SlackSurface(_FakePost())}
 admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
 _posted.clear()
 admin_tools.refuse_click(_r215b, _ctx215, "approve_command")
@@ -3878,29 +3944,29 @@ assert _posted == {}, "a second click from the same user must post nothing at al
 for _k in approvals.ids("C_215"):
     approvals.pop(_k, "C_215")
 
-# ...and a command too long to fit a Slack section gives up the card, never the
-# alert. Slack refuses a section over 3000 characters, so carrying a card for
-# such a command would raise, _post_alert would return False, _mark_alerted
-# would never fire, and the trusted users would not hear about the
-# unauthorized click at all -- trading the one guarantee this path owes them
-# for a convenience. The original card cannot exist for these either
-# (_post_pending unsurfaces on the same failure), so there is nothing lost by
-# falling back to the wording that was always text and always fit.
+# ...and a command too long for a Slack section still gets a card. Slack
+# refuses a section over 3000 characters (`invalid_blocks`), so the card shows a
+# head and a tail and links the full command, which _post_pending posts as its
+# own thread reply. The card therefore always fits, and the alert can carry it.
+# _fits stays as the guard: an oversized card must still never be sent, because
+# the raise would cost the alert itself.
 _long = "echo " + "x" * 4000
-assert not admin_tools._fits(slack_blocks.approval("k-1", {"command": _long, "reason": "r"}))
+assert admin_tools._fits(slack_blocks.approval("k-1", {"command": _long, "reason": "r"}))
+assert admin_tools._fits(slack_blocks.claimed("approve_command", "k-1", "U_X", {"command": _long, "reason": "r"}))
 assert admin_tools._fits(slack_blocks.approval("k-1", {"command": "echo hi", "reason": "r"}))
+assert not admin_tools._fits([{"type": "section", "text": {"type": "mrkdwn", "text": "x" * 3001}}])
+_lc = slack_blocks.approval("k-1", {"command": _long, "reason": "r", "full_link": "https://example.invalid/p1"})
+assert "<https://example.invalid/p1|full command" in _lc[0]["text"]["text"], "the cut card links the full command"
+assert len(slack_blocks.approval_text("k-1", {"command": _long})) < 3000, "the fallback text is cut too"
 
 _r215e = approvals.add(_long, "C_215L", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215e, {"user_id": "U_STRANGER_215e", "channel": "C_215L",
-                                  "client": _FakePost()}, "approve_command")
-assert _posted["blocks"] is None, "an oversized card must not be sent"
-# the alert still went, still tags the trusted users, still names the command,
-# and points at the original card the way it did before #215
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
+assert _posted["blocks"], "the cut card fits, so the alert carries it"
 assert "U_STRANGER_215e" in _posted["text"], _posted
 assert "<@U_TRUSTED>" in _posted["text"], _posted
-assert "card above" in _posted["text"], _posted
-assert _long in _posted["text"], "the fallback has to name the command itself"
+assert "right here" in _posted["text"], _posted
 # and the alert counts as delivered, so the dedupe still holds for it
 assert admin_tools._alerted(approvals.canonical(_r215e), "C_215L", "U_STRANGER_215e")
 for _k in approvals.ids("C_215L"):
@@ -3921,11 +3987,11 @@ class _CountPost:
         return {"ok": True, "ts": "1"}
 for _i in range(6):   # one stranger, six clicks
     admin_tools.refuse_click(_r215f, {"user_id": "U_SPAM", "channel": "C_215S",
-                                      "client": _CountPost()}, "approve_command")
+                                      "surface": SlackSurface(_CountPost())}, "approve_command")
 assert len(_posts) == 1, "six clicks from one user must post once, card or no card"
 for _u in ("U_A", "U_B", "U_C"):   # three strangers, one click each
     admin_tools.refuse_click(_r215f, {"user_id": _u, "channel": "C_215S",
-                                      "client": _CountPost()}, "approve_command")
+                                      "surface": SlackSurface(_CountPost())}, "approve_command")
 assert len(_posts) == 4, len(_posts)
 assert all(_b is not None for _b in _posts), "each alert carries its own card"
 
@@ -3937,7 +4003,7 @@ _secret = "AKIA" + "4KEYSELFCHECK0000"[:16]
 _r215g = approvals.add(f"aws configure set x {_secret}", "C_215K", "unknown")
 _posted.clear()
 admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215g", "channel": "C_215K",
-                                  "client": _FakePost()}, "approve_command")
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
 assert _secret not in str(_posted["blocks"]), "a credential reached the card"
 assert _secret not in _posted["text"], _posted["text"]
 assert "REDACTED" in str(_posted["blocks"]), _posted["blocks"]
@@ -3950,7 +4016,7 @@ approvals.acquire(_r215g, "C_215K")
 approvals.finish(_r215g)
 _posted.clear()
 admin_tools.refuse_click(_r215g, {"user_id": "U_STRANGER_215h", "channel": "C_215K",
-                                  "client": _FakePost()}, "approve_command")
+                                  "surface": SlackSurface(_FakePost())}, "approve_command")
 assert "no longer pending" in _posted["text"], _posted
 assert _posted["blocks"] is None, "a consumed request must not be handed live buttons"
 for _c in ("C_215S", "C_215K"):
@@ -3975,9 +4041,10 @@ yolt_gate.classify = lambda cmd, cwd=None: (
 )
 try:
 
-    _inv = ("cd /tmp && git log --oneline -5 && echo --- && "
+    # In a checkout: git is granted only in the channel's repository (#344).
+    _inv = (f"cd {_g_primary} && git log --oneline -5 && echo --- && "
             "find . -maxdepth 2 -not -path './.git*' | sort")
-    _ok, _why = grant.check(_inv, _rpol)
+    _ok, _why = grant.check(_inv, {"cwd": _g_primary})
     assert _ok, (_inv, _why)
 
     for _c in ("find . -maxdepth 2 -name '*.json'", "find . -type f -print",
@@ -4048,11 +4115,16 @@ try:
         _ok, _why = grant.check(_c, _rpol)
         assert not _ok, (_c, _why)
 
-    # uniq stays out: its output destination is a bare trailing positional, which
-    # no flag check can filter -- the same shape as AWS_WRITES_OUTFILE, and the
-    # reason that one is a named-operation deny set instead
+    # uniq's output destination is a bare second operand, so it is granted only
+    # when its operands are counted exactly: literal words, at most one. A glob
+    # or brace list is one word here and two to uniq, the second overwritten.
     assert not grant.check("uniq f.txt out.txt", _rpol)[0]
-    assert not grant.check("uniq f.txt", _rpol)[0]
+    assert not grant.check("uniq -- f.txt out.txt", _rpol)[0]
+    for _c in ("uniq f*", "uniq f?.txt", "uniq {a,b}", "uniq [ab].txt"):
+        assert not grant.check(_c, _rpol)[0], _c
+    for _c in ("uniq f.txt", "uniq -c f.txt", "uniq -f 2 f.txt", "sort f | uniq -d"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _why)
 finally:
     yolt_gate.classify = _saved50
 
@@ -4104,7 +4176,6 @@ try:
                "curl -sSfL https://api.figma.com/v1/x",
                "curl -fsSL https://api.figma.com/v1/x",
                "curl -I https://api.figma.com/v1/x",
-               "curl -o /tmp/x https://api.figma.com/v1/x",
                "curl -H 'X-Figma-Token: t' https://api.figma.com/v1/x",
                # a body-shaped flag belonging to an earlier command in a chain
                # must not card the fetch -- the scan starts at the fetch verb
@@ -4185,7 +4256,7 @@ _lr52, config.LEARNING_REPO = config.LEARNING_REPO, "o/r"
 _cx52, llm.complete = llm.complete, (lambda messages, tools=None: _FakeMsg(content="done"))
 try:
     # offered (learning enabled) and the turn did not call it
-    handler.handle("what is 2+2", channel="C52", thread_ts="5.2", slack_client=_fs)
+    handler.handle("what is 2+2", channel="C52", thread_ts="5.2", surface=SlackSurface(_fs))
     _r = trajectory.thread("C52", "5.2")
     assert _r and _r[-1]["flag_skill"] == "offered, not used", _r[-1]
 
@@ -4194,14 +4265,14 @@ try:
     _seen = {}
     llm.complete = lambda messages, tools=None: (
         _seen.setdefault("system", messages[0]["content"]), _FakeMsg(content="done"))[1]
-    handler.handle("hello", channel="C52", thread_ts="5.4", slack_client=_fs)
+    handler.handle("hello", channel="C52", thread_ts="5.4", surface=SlackSurface(_fs))
     assert "When to flag this thread as a skill" in _seen["system"], _seen["system"][:200]
     assert "wrong and you now know why" in _seen["system"]
 
     # off where no PR can follow the flag -- no tool, no bar, and the row says so
     config.LEARNING_REPO = ""
     _seen.clear()
-    handler.handle("hello", channel="C52", thread_ts="5.3", slack_client=_fs)
+    handler.handle("hello", channel="C52", thread_ts="5.3", surface=SlackSurface(_fs))
     assert "When to flag this thread as a skill" not in _seen["system"]
     _r = trajectory.thread("C52", "5.3")
     assert _r and _r[-1]["flag_skill"] == "not offered", _r[-1]
@@ -4233,7 +4304,7 @@ _flagged52 = [_FakeMsg(tool_calls=[_FakeCall("f1", "flag_skill",
 llm.complete = lambda messages, tools=None: _flagged52.pop(0)
 try:
     handler.handle("fix it", channel="C54", thread_ts="6.1",
-                   user_id="U1", slack_client=_fs)
+                   user_id="U1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C54", "6.1")
     assert _r and _r[-1]["flag_skill"] == "used", _r[-1]
 finally:
@@ -4256,7 +4327,7 @@ try:
     llm.complete = lambda messages, tools=None: (
         _FakeMsg(tool_calls=[_FakeCall("x", "run_shell", '{"command": "echo hi"}')])
         if tools else _FakeMsg(content="capped"))
-    handler.handle("loop", channel="C55", thread_ts="7.1", slack_client=_fs)
+    handler.handle("loop", channel="C55", thread_ts="7.1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C55", "7.1")
     assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
     assert len(_r[-1]["steps"]) == config.MAX_TOOL_STEPS, _r[-1]
@@ -4265,7 +4336,7 @@ try:
     # the same tools and the same row
     llm.complete = lambda messages, tools=None: _FakeMsg(content="resumed")
     handler.resume("req-1", True, "echo x", "out", channel="C55", thread_ts="7.2",
-                   user_id="U1", slack_client=_fs)
+                   user_id="U1", surface=SlackSurface(_fs))
     _r = trajectory.thread("C55", "7.2")
     assert _r[-1]["flag_skill"] == "offered, not used", _r[-1]
 finally:
@@ -4872,7 +4943,7 @@ assert "already resuming this thread" in _app59, "the other silence stays silent
 # absence cost a card, taking every other segment of the command with it.
 _saved60, yolt_gate.classify = yolt_gate.classify, (
     lambda cmd, cwd=None: ("unsafe", "stub: only the grant layer may grant this"))
-_pol60 = {"cwd": "/tmp", "github_repos": ["*"]}
+_pol60 = {"cwd": _g_primary, "github_repos": ["*"]}   # git is granted in a checkout (#344)
 try:
     for _c in ("git merge-base --is-ancestor A B", "git merge-base A B",
                "git merge-base --fork-point origin/main", "git merge-base -a A B",

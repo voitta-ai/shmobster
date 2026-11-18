@@ -29,15 +29,18 @@ def message(previous):
     state file, or a new deployment. Those are indistinguishable from here, so
     the wording claims only what is known."""
     url = _RELEASE_URL.format(version=__version__)
+    # Standard Markdown, as model replies are: each ingest renders it for its
+    # surface (a Slack markdown block; Signal styles through the gateway).
+    # Slack mrkdwn here reached Signal raw (#397).
     if previous is None:
         retval = (
-            f":sparkles: now running *shmobster v{__version__}* "
-            f"-- <{url}|release notes>. Build `{build()}`."
+            f"\u2728 now running **shmobster v{__version__}** "
+            f"-- [release notes]({url}). Build `{build()}`."
         )
     else:
         retval = (
-            f":sparkles: upgraded to *shmobster v{__version__}* (from v{previous}) "
-            f"-- <{url}|release notes>. Now running `{build()}`."
+            f"\u2728 upgraded to **shmobster v{__version__}** (from v{previous}) "
+            f"-- [release notes]({url}). Now running `{build()}`."
         )
     return retval
 

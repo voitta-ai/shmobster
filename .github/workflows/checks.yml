@@ -4,15 +4,22 @@ on:
   pull_request:
   push:
     branches: [master]
+  # Advisories are published against versions that have not changed, so the
+  # audit also runs on its own clock rather than only when someone pushes.
+  schedule:
+    - cron: '17 13 * * *'
 
 permissions:
   contents: read
 
 jobs:
   check:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -30,8 +37,19 @@ jobs:
       # transitively -- aiohttp, through litellm and slack-sdk -- so nothing in
       # this repo chose its version and nothing would have noticed it aging
       # (#152). This is what notices.
-      - name: pip-audit
+      #
+      # In this required job it runs only when the change touches the lock.
+      # An advisory published upstream against a version nobody changed is not
+      # a defect of the PR in front of it, and gating on it held every open PR
+      # until a separate deps PR merged. The `audit` job below still reports
+      # it on every push, every PR and every day.
+      - name: pip-audit (when the lock changes)
+        if: github.event_name == 'pull_request'
         run: |
+          if ! git diff --name-only "origin/${{ github.base_ref }}...HEAD" | grep -q '^requirements'; then
+            echo "requirements unchanged; the audit job reports advisories"
+            exit 0
+          fi
           pip install pip-audit
           # --strict so a package pip-audit cannot resolve fails the build
           # instead of being skipped. Without it the gate is quietly narrower
@@ -61,3 +79,60 @@ jobs:
         run: |
           bash scripts/check-sensitive-terms.sh \
             shmobster/ examples/ deploy/ docs/ workspace/ README.md selfcheck.py
+
+  # Advisory report, not a merge gate (see the pip-audit step above). A
+  # failure here means a pinned dependency needs a bump PR.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: pip-audit
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install pip-audit
+          pip-audit --strict
+
+  # Coverage of the selfcheck run, reported and not gated. On a PR the action
+  # comments the coverage of the lines the PR touches; on master it pushes the
+  # badge, the shields.io endpoint and an HTML report to the
+  # python-coverage-comment-action-data branch, which the README badge reads.
+  # A separate job so the required `check` keeps the token read-only. Fork
+  # PRs get a read-only token whatever this asks for, and the action then
+  # writes its comment to a file instead of posting it.
+  coverage:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # push the data branch (master only)
+      pull-requests: write   # post or update the PR comment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install coverage
+
+      # slack_app and gateway_app read 0%: selfcheck cannot import them offline
+      # (Bolt round-trips auth.test at construction), so it checks them through
+      # their ASTs and the modules they call. The number is the real one.
+      - name: selfcheck under coverage
+        run: coverage run selfcheck.py
+
+      - name: Coverage comment
+        uses: py-cov-action/python-coverage-comment-action@07249dd712cd2464873eb8a59a24f97fd281e76f # v4.6
+        with:
+          GITHUB_TOKEN: ${{ github.token }}

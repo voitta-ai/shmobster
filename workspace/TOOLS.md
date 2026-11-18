@@ -40,3 +40,16 @@ can delete a file, which the uncarded write set deliberately excludes), and runs
 uncarded only in an unattended channel. So in an attended channel, make a
 multi-line edit with a `cat >` heredoc or `sed`, not `apply_patch` -- and never
 reach for `python3 -c`/`node -e` to write a file, which parks for a worse reason.
+
+## Never rebuild a file by retyping it
+
+A file someone attached is saved byte-identical under the channel's working
+directory, in `.attachments/<file id>/<name>`, and the turn names that path
+relative to the working directory. Use that path: `cp` it where it needs to go,
+then edit the copy. The saved file is the original; leave it as it is.
+
+Never recreate a file by typing its contents back out -- into a heredoc, `tee`,
+`printf`, or anything else. Retyping is silent data loss: a 518-row CSV came
+back as one row, with no error. If there is no saved path (the turn says the
+file was not saved, or it came from somewhere else), say so and stop rather than
+retype it; ask for the file to be attached again or put where you can read it.

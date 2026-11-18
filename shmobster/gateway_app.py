@@ -839,37 +839,48 @@ def _run(fn, mid, started, *args):
 
 
 # ---------------------------------------------------------------- edits (#404)
-# Some senders post a stub and edit the full text in. One message gets one turn:
-# an edit that arrives while that turn still waits in the pool replaces the text
-# it will answer; one that arrives once the turn has begun (running or done) is
-# answered by a follow-up turn quoting the message, after that turn ends, so it
-# is neither lost nor answered alongside the stub. Never an approval or /help.
+# Some senders post a stub and edit the full text in. Every turn for one message
+# -- its own and any follow-up for an edit -- runs on one worker, one after the
+# other, so two never overlap or answer out of order. A turn still waiting takes
+# the newest text: an edit before the message's turn starts replaces what it
+# answers, and edits after it has begun collapse into one follow-up quoting the
+# message, on the latest text, after the turn under way ends. Never an approval
+# or /help.
 
 _EDIT_LOCK = threading.Lock()
-_TURNS = {}       # message id -> {"data", "future", "running", "edits"} while its turn is queued or running
+# message id -> {"next": the turn waiting (data) or None while one runs and none
+# waits, "folded": edit event ids it absorbed, "future"}; gone once idle
+_TURNS = {}
 
 
-def _run_turn(mid, started, data):
-    """A message's turn, then a follow-up for each edit that arrived while it ran."""
-    with _EDIT_LOCK:                      # from here on an edit can no longer change `data`
-        _TURNS[mid]["running"] = True
-    try:
-        _run(_guard, mid, started, _turn, data, data)
-    finally:
-        while True:
-            with _EDIT_LOCK:
-                entry = _TURNS[mid]
-                if not entry["edits"]:
-                    del _TURNS[mid]       # an edit from now on finds it answered
-                    break
-                edit = entry["edits"].pop(0)
-            _run(_guard, edit["edit_event"], started, _turn, edit, edit)
+def _run_turn(mid, started):
+    """Run the message's waiting turn, then whatever was queued behind it, in order."""
+    while True:
+        with _EDIT_LOCK:
+            entry = _TURNS[mid]
+            data, folded = entry["next"], entry["folded"]
+            if data is None:
+                del _TURNS[mid]           # idle: an edit from now on starts a new follow-up
+                return
+            entry["next"], entry["folded"] = None, []
+        try:
+            for eid in folded:            # superseded: answered by this turn, never run on their own
+                _begin(eid, started)
+            _run(_guard, data.get("edit_event") or mid, started, _turn, data, data)
+        except Exception:  # noqa: BLE001 -- the worker must reach the del above, or edits pile up
+            logging.exception("gateway: a turn for %s failed", mid)
+
+
+def _queue_turn(mid, started, data):
+    """Under _EDIT_LOCK: queue a turn for a message with no worker yet."""
+    entry = _TURNS[mid] = {"next": data, "folded": []}
+    entry["future"] = retval = _pool.submit(_run_turn, mid, started)
+    return retval
 
 
 def _submit_turn(mid, started, data):
     with _EDIT_LOCK:
-        entry = _TURNS[mid] = {"data": data, "running": False, "edits": []}
-        entry["future"] = retval = _pool.submit(_run_turn, mid, started, data)
+        retval = _queue_turn(mid, started, data)
     return retval
 
 
@@ -887,17 +898,22 @@ def _edited(e, started):
     retval = None
     with _EDIT_LOCK:
         entry = _TURNS.get(mid)
-        if entry and not entry["running"]:          # not begun: it answers the edited text
-            entry["data"]["parts"] = data.get("parts") or []
-            entry["data"]["mentions"] = data.get("mentions") or []
+        if entry and entry["next"] is not None:     # a turn waits: it answers the newest text
+            waiting = entry["next"]
+            waiting["parts"] = data.get("parts") or []
+            waiting["mentions"] = data.get("mentions") or []
+            if waiting.get("edit_event"):            # a waiting follow-up now answers this edit
+                entry["folded"].append(waiting["edit_event"])
+                waiting["edit_event"] = eid
+            else:                                    # the message's own turn absorbs it
+                entry["folded"].append(eid)
             retval = entry["future"]
-        elif entry:                                 # running: answered after it, by its worker
-            entry["edits"].append(edit)
+        elif entry:                                  # a turn runs: a follow-up after it
+            entry["next"] = edit
             retval = entry["future"]
-    if entry is None:
-        if mid in started:                          # already answered: a follow-up turn
-            retval = _pool.submit(_run, _guard, eid, started, _turn, edit, edit)
-        else:                                       # not a message this agent took: nothing to answer
+        elif mid in started:                         # answered: a follow-up now
+            retval = _queue_turn(mid, started, edit)
+        else:                                        # not a message this agent took: nothing to answer
             logging.info("gateway: ignoring an edit to a message this agent did not take (%s)", eid)
     return retval
 

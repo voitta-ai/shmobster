@@ -1070,7 +1070,9 @@ only the messages addressed to this one.
   (still queued), the turn answers the edited text. If it is edited once the
   turn has started or finished, the edit is answered as a follow-up turn that
   quotes the message and tells the model it is an edit of something already
-  answered; an edit made while the turn runs waits for it to end. A follow-up
+  answered. A message's turns run one at a time, in order: an edit made while
+  one runs waits for it to end, and edits that pile up while a turn waits
+  collapse into one, on the latest text. A follow-up
   rather than ignoring the edit, because the usual edit is a sender posting a
   stub and then the full text: ignored, the full text would never be answered,
   and an edit made mid-turn would be lost. An edit never approves, denies or

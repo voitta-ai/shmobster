@@ -48,6 +48,23 @@ def _inert(text):
     return retval
 
 
+def altered(text):
+    """Whether _inert() has to put a zero-width space into `text` to keep it
+    inert: a run of backticks, or one at either edge. Escaping alone does not
+    alter what a copy yields -- Slack shows and copies `&lt;` as `<` -- but a
+    zero-width space is copied along with the command."""
+    retval = "``" in text or text.startswith("`") or text.endswith("`")
+    return retval
+
+
+def needs_full_reply(command):
+    """Whether a card's command also needs the full-command reply: it does not
+    fit on the card, or the card cannot show it in a form that copies exactly."""
+    cmd = redact.scrub(command)
+    retval = not command_fits(cmd) or altered(cmd)
+    return retval
+
+
 def code_block(text):
     """`text` in a mrkdwn code block, inert (#376)."""
     retval = f"```{_inert(text)}```"
@@ -97,14 +114,23 @@ def _command(req):
     credential so the redactor no longer recognizes either half. Encoded after
     it is cut, so the cut is measured in the characters Slack counts."""
     cmd = redact.scrub(req["command"])
+    link = req.get("full_link")
     if command_fits(cmd):
+        changed = altered(cmd)
         retval = code_block(cmd)
     else:
-        link = req.get("full_link")
+        first, last = head(cmd, _HEAD), tail(cmd, _TAIL)
+        changed = altered(first) or altered(last)
         where = (f"<{link}|full command ({len(cmd)} chars)>" if link else
                  f"full command ({len(cmd)} chars) could not be linked -- "
                  f"look for it just above in this thread")
-        retval = f"```{_inert(head(cmd, _HEAD))}\n...\n{_inert(tail(cmd, _TAIL))}```\n{where}"
+        retval = f"```{_inert(first)}\n...\n{_inert(last)}```\n{where}"
+    if changed:
+        # A zero-width space went into the shown text, and a copy carries it
+        # (#376): say so, and point at the reply that copies exactly.
+        reply = f"<{link}|the full-command reply>" if link else "the full-command reply in this thread"
+        retval += (f"\n_Display altered to keep it inert: copy the command from {reply}, "
+                   f"not from this card._")
     return retval
 
 

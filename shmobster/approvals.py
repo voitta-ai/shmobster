@@ -403,6 +403,19 @@ def unsurface(key, retry_after=None):
     return retval
 
 
+def retry_delay(key):
+    """Seconds until a card that failed may be posted again, 0 when it already
+    may, or None when the request is no longer pending (#376). The ingest
+    schedules its own retry with this: claim_unsurfaced() holds the card back
+    until then, and a thread with no later mention would otherwise never see
+    it again while it held the thread's resume."""
+    now = _clock()
+    with _LOCK:
+        req = _PENDING.get(canonical(key))
+        retval = None if req is None else max(0.0, req.get("card_retry_at", now) - now)
+    return retval
+
+
 def withdraw(key):
     """Slack rejected the card itself: drop the request unrun (#356).
 

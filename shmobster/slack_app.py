@@ -5,6 +5,7 @@ Works with a fresh app (from deploy/slack-app-manifest.yaml) or the existing
 @Shmobster bot's tokens -- same code; only .env differs."""
 import logging
 import os
+import threading
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -137,7 +138,14 @@ def _post_full_command(client, channel, thread_ts, req_id, command):
 
     Encoded like the card (#376), and past Slack's cap the label says so: a
     reply called "Full command" that is not the full command is the one thing
-    an approver must not be told."""
+    an approver must not be told.
+
+    This is the copy-safe rendering (#376). A code block can be kept inert only
+    by putting zero-width spaces into a run of backticks, which a copy carries;
+    when the command has one, the reply goes out as escaped text with mrkdwn
+    off instead. Slack shows and copies an escaped `&lt;` as `<`, and with
+    mrkdwn off a backtick is just a backtick, so what is copied is exactly the
+    command, at the cost of monospace."""
     cmd = redact.scrub(command)
     shown = slack_blocks.head(cmd, _FULL_COMMAND_MAX)
     if len(shown) < len(cmd):
@@ -146,12 +154,14 @@ def _post_full_command(client, channel, thread_ts, req_id, command):
                  "on the host before approving.")
     else:
         label = f"Full command for [{req_id}]:"
+    if slack_blocks.altered(shown):
+        message = {"text": (f"{label} (plain text, so it copies exactly)\n"
+                            f"{slack_blocks.escape(shown)}"), "mrkdwn": False}
+    else:
+        message = {"text": f"{label}\n{slack_blocks.code_block(shown)}"}
     retval = None
     try:
-        resp = client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text=f"{label}\n{slack_blocks.code_block(shown)}",
-        )
+        resp = client.chat_postMessage(channel=channel, thread_ts=thread_ts, **message)
         retval = client.chat_getPermalink(channel=channel, message_ts=resp["ts"]).get("permalink") or None
     except Exception:
         logging.exception("could not post the full command for %s", req_id)
@@ -195,6 +205,30 @@ def _retry_after(exc):
     return retval
 
 
+def _schedule_retry(client, channel, thread_ts, req_id):
+    """Surface this thread's cards again once the failed one's backoff ends
+    (#376), without waiting for a mention: a mention inside the window does
+    not retry it, and a thread that then goes quiet would hold an invisible
+    request forever. The same _post_pending a turn runs, so the thread scope,
+    the backoff and the withdrawal rules are the same; claim_unsurfaced() is
+    exclusive, so a mention that surfaces the card first leaves this nothing
+    to post, and a retry that fails again schedules the next one."""
+    delay = approvals.retry_delay(req_id)
+    if delay is None:
+        return
+    # +1s: the timer must not wake just before the deadline and find it not due.
+    timer = threading.Timer(delay + 1, _retry_cards, args=(client, channel, thread_ts))
+    timer.daemon = True
+    timer.start()
+
+
+def _retry_cards(client, channel, thread_ts):
+    try:
+        _post_pending(client, channel, thread_ts)
+    except Exception:
+        logging.exception("could not retry the cards in %s %s", channel, thread_ts)
+
+
 def _card_failed(client, channel, thread_ts, req_id, exc):
     """An approval card did not post. Retry it on a later mention when the
     failure may pass, backing off and honouring a 429's Retry-After; withdraw
@@ -212,6 +246,7 @@ def _card_failed(client, channel, thread_ts, req_id, exc):
     the withdrawal. A thread whose only request was withdrawn is not resumed:
     take_deferred() has nothing for it."""
     if not _rejected(exc) and approvals.unsurface(req_id, retry_after=_retry_after(exc)):
+        _schedule_retry(client, channel, thread_ts, req_id)
         return
     if approvals.withdraw(req_id) is None:
         return
@@ -237,7 +272,8 @@ def _post_pending(client, channel, thread_ts):
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
         # Kept on the request so a retried card does not post the command
         # twice, and so any later rendering of this card links the same reply.
-        if not slack_blocks.command_fits(req["command"]) and not req.get("full_link"):
+        # Also for one that fits but cannot be shown copy-safe on the card (#376).
+        if slack_blocks.needs_full_reply(req["command"]) and not req.get("full_link"):
             req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
         try:
             client.chat_postMessage(

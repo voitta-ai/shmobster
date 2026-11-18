@@ -795,12 +795,26 @@ def _post_pending(channel, surface):
             proposals.unsurface(key)
 
 
+def _retry_cards(channel, surface):
+    try:
+        _post_pending(channel, surface)
+    except Exception:
+        logging.exception("gateway: could not retry the cards in %s", channel)
+
+
 def _card_failed(channel, req_id, surface, rejected=False):
     """A card did not post: retry on a later turn when the failure may pass,
     with approvals.unsurface()'s backoff; withdraw it when the gateway refused
     it or it kept failing past that, as slack_app does (#356, #376), so it
     cannot hold the thread."""
     if not rejected and approvals.unsurface(req_id):
+        # Retried when the backoff ends, not only on the next message (#376);
+        # see slack_app._schedule_retry. claim_unsurfaced() keeps it single.
+        delay = approvals.retry_delay(req_id)
+        if delay is not None:
+            timer = threading.Timer(delay + 1, _retry_cards, args=(channel, surface))
+            timer.daemon = True
+            timer.start()
         return
     if approvals.withdraw(req_id) is None:
         return

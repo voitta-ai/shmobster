@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Coverage for shmobster/sandbox.py: 88%</title>
+    <title>Coverage for shmobster/sandbox.py: 87%</title>
     <link rel="icon" sizes="32x32" href="favicon_32_cb_c827f16f.png">
     <link rel="stylesheet" href="style_cb_4667309f.css" type="text/css">
     <script src="coverage_html_cb_54cfdca1.js" defer></script>
@@ -12,7 +12,7 @@
     <div class="content">
         <h1>
             <span class="text">Coverage for </span><b>shmobster<span class="sep">/</span>sandbox.py</b>:
-            <span class="pc_cov">88%</span>
+            <span class="pc_cov">87%</span>
         </h1>
         <aside id="help_panel_wrapper">
             <input id="help_panel_state" type="checkbox">
@@ -54,9 +54,9 @@
             </div>
         </aside>
         <h2>
-            <span class="text">115 statements &nbsp;</span>
+            <span class="text">116 statements &nbsp;</span>
             <button type="button" class="run button_toggle_run" value="run" data-shortcut="r" title="Toggle lines run">101<span class="text"> run</span></button>
-            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">14<span class="text"> missing</span></button>
+            <button type="button" class="mis show_mis button_toggle_mis" value="mis" data-shortcut="m" title="Toggle lines missing">15<span class="text"> missing</span></button>
             <button type="button" class="exc show_exc button_toggle_exc" value="exc" data-shortcut="x" title="Toggle lines excluded">0<span class="text"> excluded</span></button>
         </h2>
         <p class="text">
@@ -65,7 +65,7 @@
             <a id="nextFileLink" class="nav" href="z_01f3a88f31179fb9_skills_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.17.3">coverage.py v7.17.3</a>,
-            created at 2026-11-18 19:06 +0000
+            created at 2026-11-18 19:08 +0000
         </p>
         <aside class="hidden">
             <button type="button" class="button_next_chunk" data-shortcut="j"></button>
@@ -410,17 +410,19 @@
     <p class="run"><span class="n"><a id="t328" href="#t328">328</a></span><span class="t">    <span class="key">return</span> <span class="nam">retval</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t329" href="#t329">329</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t330" href="#t330">330</a></span><span class="t">&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t331" href="#t331">331</a></span><span class="t"><span class="key">def</span> <span class="nam">wrap</span><span class="op">(</span><span class="nam">command</span><span class="op">,</span> <span class="nam">pol</span><span class="op">)</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t331" href="#t331">331</a></span><span class="t"><span class="key">def</span> <span class="nam">wrap</span><span class="op">(</span><span class="nam">command</span><span class="op">,</span> <span class="nam">pol</span><span class="op">,</span> <span class="nam">network</span><span class="op">=</span><span class="key">True</span><span class="op">)</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t332" href="#t332">332</a></span><span class="t">    <span class="str">&quot;&quot;&quot;argv that runs `command` confined to the channel&#x27;s tree. Raises</span>&nbsp;</span><span class="r"></span></p>
     <p class="pln"><span class="n"><a id="t333" href="#t333">333</a></span><span class="t"><span class="str">    RuntimeError when the sandbox is unavailable -- the caller must not fall</span>&nbsp;</span><span class="r"></span></p>
-    <p class="pln"><span class="n"><a id="t334" href="#t334">334</a></span><span class="t"><span class="str">    back to running unconfined.&quot;&quot;&quot;</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t335" href="#t335">335</a></span><span class="t">    <span class="nam">exe</span> <span class="op">=</span> <span class="nam">shutil</span><span class="op">.</span><span class="nam">which</span><span class="op">(</span><span class="str">&quot;sandbox-exec&quot;</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t336" href="#t336">336</a></span><span class="t">    <span class="key">if</span> <span class="key">not</span> <span class="nam">exe</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run"><span class="n"><a id="t337" href="#t337">337</a></span><span class="t">        <span class="key">raise</span> <span class="nam">RuntimeError</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t338" href="#t338">338</a></span><span class="t">            <span class="fst">f&quot;</span><span class="fst">sandbox-exec not found on </span><span class="op">{</span><span class="nam">sys</span><span class="op">.</span><span class="nam">platform</span><span class="op">}</span><span class="fst">; refusing to run unconfined (#116)</span><span class="fst">&quot;</span>&nbsp;</span><span class="r"></span></p>
-    <p class="run run2"><span class="n"><a id="t339" href="#t339">339</a></span><span class="t">        <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t340" href="#t340">340</a></span><span class="t">    <span class="nam">retval</span> <span class="op">=</span> <span class="op">[</span><span class="nam">exe</span><span class="op">,</span> <span class="str">&quot;-p&quot;</span><span class="op">,</span> <span class="nam">profile</span><span class="op">(</span><span class="nam">pol</span><span class="op">)</span><span class="op">,</span> <span class="str">&quot;/bin/sh&quot;</span><span class="op">,</span> <span class="str">&quot;-c&quot;</span><span class="op">,</span> <span class="nam">command</span><span class="op">]</span>&nbsp;</span><span class="r"></span></p>
-    <p class="mis show_mis"><span class="n"><a id="t341" href="#t341">341</a></span><span class="t">    <span class="key">return</span> <span class="nam">retval</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t334" href="#t334">334</a></span><span class="t"><span class="str">    back to running unconfined. `network=False` also denies every socket, for</span>&nbsp;</span><span class="r"></span></p>
+    <p class="pln"><span class="n"><a id="t335" href="#t335">335</a></span><span class="t"><span class="str">    a caller that runs nothing that should reach anywhere (gitstate&#x27;s probes).&quot;&quot;&quot;</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t336" href="#t336">336</a></span><span class="t">    <span class="nam">exe</span> <span class="op">=</span> <span class="nam">shutil</span><span class="op">.</span><span class="nam">which</span><span class="op">(</span><span class="str">&quot;sandbox-exec&quot;</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t337" href="#t337">337</a></span><span class="t">    <span class="key">if</span> <span class="key">not</span> <span class="nam">exe</span><span class="op">:</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run"><span class="n"><a id="t338" href="#t338">338</a></span><span class="t">        <span class="key">raise</span> <span class="nam">RuntimeError</span><span class="op">(</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t339" href="#t339">339</a></span><span class="t">            <span class="fst">f&quot;</span><span class="fst">sandbox-exec not found on </span><span class="op">{</span><span class="nam">sys</span><span class="op">.</span><span class="nam">platform</span><span class="op">}</span><span class="fst">; refusing to run unconfined (#116)</span><span class="fst">&quot;</span>&nbsp;</span><span class="r"></span></p>
+    <p class="run run2"><span class="n"><a id="t340" href="#t340">340</a></span><span class="t">        <span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="mis show_mis"><span class="n"><a id="t341" href="#t341">341</a></span><span class="t">    <span class="nam">prof</span> <span class="op">=</span> <span class="nam">profile</span><span class="op">(</span><span class="nam">pol</span><span class="op">)</span> <span class="op">+</span> <span class="op">(</span><span class="str">&quot;&quot;</span> <span class="key">if</span> <span class="nam">network</span> <span class="key">else</span> <span class="str">&quot;(deny network*)\n&quot;</span><span class="op">)</span>&nbsp;</span><span class="r"></span></p>
+    <p class="mis show_mis"><span class="n"><a id="t342" href="#t342">342</a></span><span class="t">    <span class="nam">retval</span> <span class="op">=</span> <span class="op">[</span><span class="nam">exe</span><span class="op">,</span> <span class="str">&quot;-p&quot;</span><span class="op">,</span> <span class="nam">prof</span><span class="op">,</span> <span class="str">&quot;/bin/sh&quot;</span><span class="op">,</span> <span class="str">&quot;-c&quot;</span><span class="op">,</span> <span class="nam">command</span><span class="op">]</span>&nbsp;</span><span class="r"></span></p>
+    <p class="mis show_mis"><span class="n"><a id="t343" href="#t343">343</a></span><span class="t">    <span class="key">return</span> <span class="nam">retval</span>&nbsp;</span><span class="r"></span></p>
 </main>
 <footer>
     <div class="content">
@@ -430,7 +432,7 @@
             <a class="nav" href="z_01f3a88f31179fb9_skills_py.html">&#xbb; next</a>
             &nbsp; &nbsp; &nbsp;
             <a class="nav" href="https://coverage.readthedocs.io/en/7.17.3">coverage.py v7.17.3</a>,
-            created at 2026-11-18 19:06 +0000
+            created at 2026-11-18 19:08 +0000
         </p>
     </div>
 </footer>

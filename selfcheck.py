@@ -4115,11 +4115,16 @@ try:
         _ok, _why = grant.check(_c, _rpol)
         assert not _ok, (_c, _why)
 
-    # uniq stays out: its output destination is a bare trailing positional, which
-    # no flag check can filter -- the same shape as AWS_WRITES_OUTFILE, and the
-    # reason that one is a named-operation deny set instead
+    # uniq's output destination is a bare second operand, so it is granted only
+    # when its operands are counted exactly: literal words, at most one. A glob
+    # or brace list is one word here and two to uniq, the second overwritten.
     assert not grant.check("uniq f.txt out.txt", _rpol)[0]
-    assert not grant.check("uniq f.txt", _rpol)[0]
+    assert not grant.check("uniq -- f.txt out.txt", _rpol)[0]
+    for _c in ("uniq f*", "uniq f?.txt", "uniq {a,b}", "uniq [ab].txt"):
+        assert not grant.check(_c, _rpol)[0], _c
+    for _c in ("uniq f.txt", "uniq -c f.txt", "uniq -f 2 f.txt", "sort f | uniq -d"):
+        _ok, _why = grant.check(_c, _rpol)
+        assert _ok, (_c, _why)
 finally:
     yolt_gate.classify = _saved50
 

@@ -376,6 +376,32 @@ they are the point. If the record does not support a reusable procedure, say so
 in the Notes section rather than inventing steps."""
 
 
+def _skill_text(raw):
+    """The SKILL.md inside a model's answer, or None. Models wrap it despite
+    being told not to: a sentence first ("Here is the skill:"), a ```markdown
+    fence. So this looks for the first `---` line that opens frontmatter with
+    a `name:` in it, and drops the fence that wrapped it, if one did, along
+    with anything after that fence. A note after an UNfenced draft cannot be
+    told from the skill's last paragraph and stays in; the draft becomes a
+    pull request a person reviews, which is where it gets seen (#425 review)."""
+    lines = raw.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() != "---":
+            continue
+        close = next((j for j in range(i + 1, min(len(lines), i + 40)) if lines[j].strip() == "---"), None)
+        if close is None or not any(l.startswith("name:") for l in lines[i + 1:close]):
+            continue
+        # Trim a wrapping fence only: a skill's own code blocks are content.
+        # The wrapper opened just above the frontmatter and closes last.
+        prev = next((lines[k].strip() for k in range(i - 1, -1, -1) if lines[k].strip()), "")
+        end = len(lines)
+        if prev.startswith("```"):
+            end = next((j for j in range(len(lines) - 1, close, -1) if lines[j].strip() == "```"), len(lines))
+        retval = "\n".join(lines[i:end]).strip() + "\n"
+        return retval
+    return None
+
+
 def draft(name, why, channel, thread_ts):
     """A SKILL.md from the thread's trajectory, via the waterfall. Returns
     (text, error)."""
@@ -397,10 +423,13 @@ def draft(name, why, channel, thread_ts):
     except Exception as exc:  # noqa: BLE001
         retval = (None, f"draft failed: {exc}")
         return retval
-    text = re.sub(r"^```[a-z]*\n|\n```$", "", text).strip() + "\n"
-    if not text.startswith("---"):
+    found = _skill_text(text)
+    if found is None:
+        logging.warning("learning: draft for %s had no frontmatter; it began %r",
+                        name, redact.scrub(text[:200]))
         retval = (None, "draft did not start with frontmatter")
         return retval
+    text = found
     retval = (redact.scrub(text), None)
     return retval
 

@@ -184,6 +184,9 @@ READ_VERBS = frozenset((
     "cat", "ls", "head", "tail", "wc", "stat", "basename", "dirname",
     "realpath", "du", "df", "which", "diff", "grep", "egrep", "fgrep",
     "jq", "id", "whoami", "uname", "printenv", "ps",
+    # Field selection and sorted-file comparison: no option of either names
+    # an output file, so the verb is the whole question.
+    "cut", "comm",
     # Print-only builtins and a pause. `printf` is absent: its numeric
     # conversions are not a plain print.
     "echo", "pwd", "true", "sleep",
@@ -220,7 +223,7 @@ _FIND_WRITES = frozenset((
     "-fprint", "-fprint0", "-fprintf", "-fls",
 ))
 
-FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date", "file"))
+FLAG_CHECKED_READS = frozenset(("find", "sort", "awk", "rg", "date", "file", "uniq"))
 
 
 def _file_refusal(texts):
@@ -475,8 +478,37 @@ def _date_refusal(texts):
     return None
 
 
+# `uniq [options] [input [output]]`: a second operand is a file it writes. The
+# options take values only as `-f N`, `-s N`, `-w N` (or attached / `--x=N`).
+_UNIQ_VALUE_FLAGS = frozenset(("-f", "-s", "-w", "--skip-fields", "--skip-chars", "--check-chars"))
+
+
+def _uniq_refusal(texts):
+    """`uniq` reading its input, never naming an output file."""
+    operands = []
+    i, ended = 0, False
+    while i < len(texts):
+        t = texts[i]
+        i += 1
+        if not ended and t == "--":
+            ended = True
+        elif not ended and t in _UNIQ_VALUE_FLAGS:
+            i += 1  # its value is the next word
+        elif not ended and t.startswith("-") and len(t) > 1:
+            continue
+        else:
+            # A glob or a brace list is one word here and several to uniq,
+            # whose second is then the file it overwrites.
+            if any(ch in t for ch in "*?[{"):
+                return "uniq: an operand that expands could name the file it writes"
+            operands.append(t)
+    retval = "uniq: a second operand is the file it writes" if len(operands) > 1 else None
+    return retval
+
+
 _FLAG_REFUSAL = {"find": _find_refusal, "sort": _sort_refusal, "awk": _awk_refusal,
-                 "rg": _rg_refusal, "date": _date_refusal, "file": _file_refusal}
+                 "rg": _rg_refusal, "date": _date_refusal, "file": _file_refusal,
+                 "uniq": _uniq_refusal}
 
 # An interpreter asked only for its version runs no code: `python3 --version`.
 # Each interpreter's own spelling of the version flag: `node -v` is version,
@@ -1383,31 +1415,37 @@ class _Walker:
         else:
             self.dirs = list(dict.fromkeys(self.dirs + targets))
 
+    def _walk_children(self, node_type, children):
+        """walk() over a container's children: separators move the directory
+        bookkeeping, `&` runs its job in a subshell, first refusal wins."""
+        retval = (True, "")
+        for n, c in enumerate(children):
+            if c.type in _SKIP:
+                # Past `;`, `||`, `&` or a newline a later segment can run
+                # although an earlier `cd` failed or ran in the background,
+                # so git may be in any directory the command has named.
+                if c.type not in ("&&", "|", "comment"):
+                    self.and_chain = False
+                continue
+            saved = self.in_pipeline
+            self.in_pipeline = saved or node_type == "pipeline"
+            # Whatever precedes `&` runs in a subshell of its own: a `cd`
+            # in it moves the rest of that job, and nothing after it.
+            nxt = children[n + 1] if n + 1 < len(children) else None
+            dirs = list(self.dirs) if nxt is not None and nxt.type == "&" else None
+            retval = self.walk(c)
+            if dirs is not None:
+                self.dirs = dirs
+            self.in_pipeline = saved
+            if not retval[0]:
+                break
+        return retval
+
     def walk(self, node):
         """(ok, reason) for the subtree. First refusal wins."""
         retval = (True, "")
         if node.type in _CONTAINERS:
-            children = node.children
-            for n, c in enumerate(children):
-                if c.type in _SKIP:
-                    # Past `;`, `||`, `&` or a newline a later segment can run
-                    # although an earlier `cd` failed or ran in the background,
-                    # so git may be in any directory the command has named.
-                    if c.type not in ("&&", "|", "comment"):
-                        self.and_chain = False
-                    continue
-                saved = self.in_pipeline
-                self.in_pipeline = saved or node.type == "pipeline"
-                # Whatever precedes `&` runs in a subshell of its own: a `cd`
-                # in it moves the rest of that job, and nothing after it.
-                nxt = children[n + 1] if n + 1 < len(children) else None
-                dirs = list(self.dirs) if nxt is not None and nxt.type == "&" else None
-                retval = self.walk(c)
-                if dirs is not None:
-                    self.dirs = dirs
-                self.in_pipeline = saved
-                if not retval[0]:
-                    break
+            retval = self._walk_children(node.type, node.children)
         elif node.type == "command":
             retval = self.segment(node)
         elif node.type == "redirected_statement":
@@ -1499,8 +1537,22 @@ class _Walker:
         writes = False
         trailing = []
         redirects = []
+        # tree-sitter-bash hangs the redirects of `cd d && cat > f <<EOF` on
+        # the whole list; bash binds them to the last command alone. So the
+        # list's earlier commands are walked first, unredirected -- which also
+        # moves the directory a relative redirect target resolves against --
+        # and only the last one is judged as the redirect's body.
+        listed = next((c for c in node.children if c.type == "list"), None)
+        last = None
+        if listed is not None and listed.children and listed.children[-1].type in ("command", "pipeline"):
+            last = listed.children[-1]
+            head = self._walk_children("list", listed.children[:-1])
+            if not head[0]:
+                return head
         for c in node.children:
-            if c.type in ("command", "pipeline", "list", "for_statement"):
+            if c is listed and last is not None:
+                body = last
+            elif c.type in ("command", "pipeline", "list", "for_statement"):
                 body = c
             elif c.type == "file_redirect":
                 refusal, redirect_writes = self.redirect_write(c)

@@ -258,8 +258,10 @@ def _tokens(command):
 
 
 def _gh_segment_tokens(command):
-    """The tokens of the segments of `command` that invoke gh, or None when the
-    command cannot be split into segments.
+    """The segments of `command` that invoke gh, each a token list, or None
+    when the command cannot be split into segments. Kept apart, because each
+    segment's positional repo is its own target (#425 review): concatenated,
+    `gh repo view a/b; gh repo view c/d` read as naming only `a/b`.
 
     The repo scans in `_gh_repos` read a `-R` value and a positional
     `owner/repo`. Run over the whole command, they read other commands'
@@ -278,7 +280,7 @@ def _gh_segment_tokens(command):
     for t in tokens + [";"]:
         if t and set(t) <= set(";&|\n"):
             if _invokes(seg, "gh"):
-                out.extend(seg)
+                out.append(seg)
             seg = []
         else:
             seg.append(t)
@@ -316,13 +318,22 @@ def _check_github(command, policy):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
     if named and not is_gh:
         return (True, "")
-    gh_tokens = _gh_segment_tokens(command) if is_gh else None
-    if is_gh and gh_tokens is None:
-        gh_tokens = tokens
-    elif is_gh:
+    gh_segments = _gh_segment_tokens(command) if is_gh else None
+    if is_gh and gh_segments is None:
+        gh_segments = [tokens]
+    gh_repos, gh_unresolvable, gh_tokens = [], False, []
+    # A gh segment naming no repo reaches the checkout's origin, which then
+    # has to be in scope too, whatever the other segments name.
+    gh_bare = False
+    if is_gh:
         # `export GH_REPO=o/r; gh pr list` retargets gh from another segment.
-        gh_tokens = [t for t in tokens if t.startswith("GH_REPO=")] + gh_tokens
-    gh_repos, gh_unresolvable = _gh_repos(gh_tokens) if is_gh else ([], False)
+        exported = [t for t in tokens if t.startswith("GH_REPO=")]
+        for seg in gh_segments:
+            seg_repos, seg_bad = _gh_repos(exported + seg)
+            gh_repos += seg_repos
+            gh_unresolvable = gh_unresolvable or seg_bad
+            gh_bare = gh_bare or not seg_repos
+            gh_tokens += seg
     if gh_unresolvable:
         return (False, "gh names a repo path this policy cannot resolve; blocked by channel policy")
     # `gh api` that names no repo -- `gh api graphql`, `gh api user` -- is
@@ -336,7 +347,7 @@ def _check_github(command, policy):
     for repo in gh_repos:
         if not _in_scope(repo):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
-    if gh_repos:
+    if gh_repos and not gh_bare:
         return (True, "")
     repo = None
     if not is_gh:

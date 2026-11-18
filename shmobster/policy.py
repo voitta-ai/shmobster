@@ -257,6 +257,35 @@ def _tokens(command):
     return retval
 
 
+def _gh_segment_tokens(command):
+    """The tokens of the segments of `command` that invoke gh, or None when the
+    command cannot be split into segments.
+
+    The repo scans in `_gh_repos` read a `-R` value and a positional
+    `owner/repo`. Run over the whole command, they read other commands'
+    arguments as gh's: `jq . app/data.json` beside a `gh run list` was refused
+    as repo 'app/data.json', and `grep -R pat dir; gh pr list` would read `pat`
+    as one. A newline separates commands as `;` does, which `shlex.split` alone
+    treats as plain whitespace."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return None
+    out, seg = [], []
+    for t in tokens + [";"]:
+        if t and set(t) <= set(";&|\n"):
+            if _invokes(seg, "gh"):
+                out.extend(seg)
+            seg = []
+        else:
+            seg.append(t)
+    retval = out
+    return retval
+
+
 def _check_github(command, policy):
     allowed = policy.get("github_repos") or []
     if not allowed:
@@ -287,7 +316,13 @@ def _check_github(command, policy):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
     if named and not is_gh:
         return (True, "")
-    gh_repos, gh_unresolvable = _gh_repos(tokens) if is_gh else ([], False)
+    gh_tokens = _gh_segment_tokens(command) if is_gh else None
+    if is_gh and gh_tokens is None:
+        gh_tokens = tokens
+    elif is_gh:
+        # `export GH_REPO=o/r; gh pr list` retargets gh from another segment.
+        gh_tokens = [t for t in tokens if t.startswith("GH_REPO=")] + gh_tokens
+    gh_repos, gh_unresolvable = _gh_repos(gh_tokens) if is_gh else ([], False)
     if gh_unresolvable:
         return (False, "gh names a repo path this policy cannot resolve; blocked by channel policy")
     # `gh api` that names no repo -- `gh api graphql`, `gh api user` -- is
@@ -295,7 +330,7 @@ def _check_github(command, policy):
     # be inside a GraphQL document or absent entirely, and "I could not tell"
     # has to mean no while `github_repos` is set, or the one command that
     # reaches every repo is the one command that is never checked.
-    if is_gh and not gh_repos and "api" in tokens:
+    if is_gh and not gh_repos and "api" in gh_tokens:
         return (False, "gh api names no repo this policy can resolve; blocked by channel policy")
     # Every named target, not the first: a command naming two reaches both.
     for repo in gh_repos:

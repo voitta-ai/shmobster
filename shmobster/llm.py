@@ -198,14 +198,25 @@ def _budget_parked():
     """Vendor -> expiry, with anything already expired dropped. Pruning on read
     is what makes a vendor come back: no timer, no background task -- the first
     turn after the window simply stops seeing it as parked."""
-    raw = state.get(_STATE_KEY) or {}
     now = time.time()
-    live = {name: until for name, until in raw.items()
-            if isinstance(until, (int, float)) and until > now}
-    if len(live) != len(raw):
-        state.put(_STATE_KEY, live)
-        for name in set(raw) - set(live):
-            logging.info("waterfall: %s is out of its park window; back in the chain", name)
+    dropped = []
+
+    def _prune(raw):
+        raw = raw or {}
+        live = {name: until for name, until in raw.items()
+                if isinstance(until, (int, float)) and until > now}
+        dropped.extend(set(raw) - set(live))
+        return live
+    # Prune and write back in one locked step, so a park landing in between is
+    # not overwritten by this thread's older copy (#363). Read-only when
+    # nothing expired: the common turn should not rewrite the file.
+    raw = state.get(_STATE_KEY) or {}
+    if any(not (isinstance(u, (int, float)) and u > now) for u in raw.values()):
+        live, _ = state.update(_STATE_KEY, _prune)
+    else:
+        live = dict(raw)
+    for name in dropped:
+        logging.info("waterfall: %s is out of its park window; back in the chain", name)
     retval = live
     return retval
 
@@ -369,9 +380,13 @@ def park(exc, deployment=""):
         return retval
     text = str(getattr(exc, "message", "") or str(exc))
     until, human = _park_until(text)
-    parked = dict(_budget_parked())
-    parked[name] = until
-    state.put(_STATE_KEY, parked)
+    _budget_parked()  # prune first, so the write below carries no expired entry
+
+    def _park(parked):
+        parked = dict(parked or {})
+        parked[name] = until
+        return parked
+    state.update(_STATE_KEY, _park)  # one locked step: a concurrent park is not lost (#363)
     # The message can carry the failed request; never log it (#72 covers the
     # handlers, this keeps the vendor's prose out of the record entirely).
     logging.warning("waterfall: %s is out of budget; parked %s", name, human)

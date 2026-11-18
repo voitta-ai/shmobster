@@ -11,7 +11,10 @@ gitignored: path from SHMOBSTER_STATE, default ./shmobster-state.json.
 
 Read-modify-write per call rather than a cached dict: writes are rare (an
 upgrade, a vendor going dark), and re-reading means a second instance or a hand
-edit is not silently clobbered."""
+edit is not silently clobbered. Within this process every write holds one lock
+and lands by rename (#363), so a reader never sees a truncated file; a caller
+that derives a key's new value from its old one uses update(), not get() then
+put()."""
 import json
 import logging
 import os
@@ -20,7 +23,8 @@ import threading
 _PATH = os.getenv("SHMOBSTER_STATE", "shmobster-state.json")
 # Several threads write (the gateway poll on every page, learning, the waterfall):
 # one at a time, and through a rename, so a reader never sees a half-written file.
-_LOCK = threading.Lock()
+# Reentrant so an update() function may itself call get().
+_LOCK = threading.RLock()
 
 
 def read():
@@ -44,18 +48,63 @@ def get(key, default=None):
     return retval
 
 
+def _write(data):
+    """Replace the file with `data` atomically: a temp file in the same
+    directory, fsync'd, then renamed over it. The temp file takes the current
+    file's mode (a rename carries the temp file's permissions, so a hand-set
+    0600 must not widen); a first write gets the umask default, as before. The
+    name is unique, so a second process cannot clobber a half-written temp."""
+    try:
+        mode = os.stat(_PATH).st_mode & 0o777
+    except FileNotFoundError:
+        mode = None
+    tmp = f"{_PATH}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode is not None else 0o666)
+    try:
+        if mode is not None:
+            os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, _PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def update(key, fn, default=None):
+    """Read-modify-write one key under the module lock: `fn` gets the current
+    value (or `default`) and returns the new one, which is written. Use this,
+    not get() then put(), whenever the new value is derived from the old --
+    otherwise two concurrent callers each write their own copy and one update
+    is lost. Returns (new value, True on a successful write)."""
+    with _LOCK:
+        data = read()
+        value = fn(data.get(key, default))
+        data[key] = value
+        ok = _save(data)
+    retval = (value, ok)
+    return retval
+
+
 def put(key, value):
     """Merge one key into the file. Returns True on a successful write."""
     with _LOCK:
         data = read()
         data[key] = value
-        tmp = f"{_PATH}.tmp"
-        try:
-            with open(tmp, "w") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, _PATH)
-            retval = True
-        except OSError:
-            logging.exception("state: could not write %s", _PATH)
-            retval = False
+        retval = _save(data)
+    return retval
+
+
+def _save(data):
+    try:
+        _write(data)
+        retval = True
+    except OSError:
+        logging.exception("state: could not write %s", _PATH)
+        retval = False
     return retval

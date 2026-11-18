@@ -685,6 +685,9 @@ def _turn(data):
     _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
     text = _text(data, files=False)
+    edit = data.get("edit_event")         # a follow-up for an edit to a message already taken (#404)
+    if edit:
+        text = "[They edited a message you already answered (the quoted one); it now reads:]\n" + text
     # The message's files, read the way slack_app reads Slack's (#413): same caps,
     # same content parts, same save rules, fetched from the gateway.
     _remember_files(channel, _files(data))
@@ -702,7 +705,8 @@ def _turn(data):
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)
-    send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
+    key = f"reply:{data['message_id']}" + (f":{edit}" if edit else "")
+    send(channel, reply, reply_to=data["message_id"], key=key)
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)
 
@@ -834,6 +838,70 @@ def _run(fn, mid, started, *args):
     _guarded(fn, *args)
 
 
+# ---------------------------------------------------------------- edits (#404)
+# Some senders post a stub and edit the full text in. One message gets one turn:
+# an edit that arrives while that turn still waits in the pool replaces the text
+# it will answer; one that arrives once the turn has begun (running or done) is
+# answered by a follow-up turn quoting the message, after that turn ends, so it
+# is neither lost nor answered alongside the stub. Never an approval or /help.
+
+_EDIT_LOCK = threading.Lock()
+_TURNS = {}       # message id -> {"data", "future", "running", "edits"} while its turn is queued or running
+
+
+def _run_turn(mid, started, data):
+    """A message's turn, then a follow-up for each edit that arrived while it ran."""
+    with _EDIT_LOCK:                      # from here on an edit can no longer change `data`
+        _TURNS[mid]["running"] = True
+    try:
+        _run(_guard, mid, started, _turn, data, data)
+    finally:
+        while True:
+            with _EDIT_LOCK:
+                entry = _TURNS[mid]
+                if not entry["edits"]:
+                    del _TURNS[mid]       # an edit from now on finds it answered
+                    break
+                edit = entry["edits"].pop(0)
+            _run(_guard, edit["edit_event"], started, _turn, edit, edit)
+
+
+def _submit_turn(mid, started, data):
+    with _EDIT_LOCK:
+        entry = _TURNS[mid] = {"data": data, "running": False, "edits": []}
+        entry["future"] = retval = _pool.submit(_run_turn, mid, started, data)
+    return retval
+
+
+def _edited(e, started):
+    """Handle a `message.edited` event; the future its ack waits on, or None."""
+    data, eid = e["data"], e.get("id")
+    mid = data.get("message_id")
+    if not (isinstance(mid, str) and isinstance(eid, str)) or eid in started or not _first_time(eid):
+        return None
+    medium = str(e.get("source") or "").rpartition("/")[2] or "gateway"   # source is /gateway/<medium>
+    edit = {**data, "channel": data.get("channel") or medium, "edit_event": eid}
+    if _approval(edit) or _help(edit):    # an edit is not a way to approve, deny or ask /help
+        logging.info("gateway: not acting on an edit that reads as a command (%s)", eid)
+        return None
+    retval = None
+    with _EDIT_LOCK:
+        entry = _TURNS.get(mid)
+        if entry and not entry["running"]:          # not begun: it answers the edited text
+            entry["data"]["parts"] = data.get("parts") or []
+            entry["data"]["mentions"] = data.get("mentions") or []
+            retval = entry["future"]
+        elif entry:                                 # running: answered after it, by its worker
+            entry["edits"].append(edit)
+            retval = entry["future"]
+    if entry is None:
+        if mid in started:                          # already answered: a follow-up turn
+            retval = _pool.submit(_run, _guard, eid, started, _turn, edit, edit)
+        else:                                       # not a message this agent took: nothing to answer
+            logging.info("gateway: ignoring an edit to a message this agent did not take (%s)", eid)
+    return retval
+
+
 def _loop():
     """Poll, hand each message to a worker, and ack (persist the cursor) only
     up to the oldest message whose turn has not finished, so a restart re-reads
@@ -851,7 +919,8 @@ def _loop():
                 acked = fetched
             if acked != state.get(_CURSOR):
                 state.put(_CURSOR, acked)     # persisting the cursor is the ack (gateway README)
-            q = urllib.parse.urlencode({"after": fetched, "wait": 25, "types": "message.received"})
+            q = urllib.parse.urlencode({"after": fetched, "wait": 25,
+                                        "types": "message.received,message.edited"})
             body = _call("GET", f"/v1/events/poll?{q}", timeout=40)
             if not isinstance(body, dict):
                 raise ValueError("poll answered with something other than an object")
@@ -869,7 +938,9 @@ def _loop():
                     elif (help_in := _help(data)):   # no model: the same lane, it is as quick
                         fut = _approvals_pool.submit(_run, _guard, mid, started, _describe, data, help_in, mid)
                     else:
-                        fut = _pool.submit(_run, _guard, mid, started, _turn, data, data)
+                        fut = _submit_turn(mid, started, data)
+                elif e.get("type") == "ai.voitta.message.edited.v1":
+                    fut = _edited(e, started)
                 if isinstance(e.get("id"), str):
                     inflight.append((e["id"], fut))
             if isinstance(body.get("next"), str):

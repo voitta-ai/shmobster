@@ -82,7 +82,7 @@ import shutil  # noqa: E402
 _REAL_WRAP = sandbox.wrap
 _HAVE_SANDBOX = bool(shutil.which("sandbox-exec"))
 if not _HAVE_SANDBOX:
-    sandbox.wrap = lambda command, pol: ["/bin/sh", "-c", command]
+    sandbox.wrap = lambda command, pol, network=True: ["/bin/sh", "-c", command]
 
 # 0) config parsed: waterfall + channels + exec block
 assert [v["name"] for v in config.WATERFALL] == [

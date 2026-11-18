@@ -344,14 +344,16 @@ def profile(pol):
     return retval
 
 
-def wrap(command, pol):
+def wrap(command, pol, network=True):
     """argv that runs `command` confined to the channel's tree. Raises
     RuntimeError when the sandbox is unavailable -- the caller must not fall
-    back to running unconfined."""
+    back to running unconfined. `network=False` also denies every socket, for
+    a caller that runs nothing that should reach anywhere (gitstate's probes)."""
     exe = shutil.which("sandbox-exec")
     if not exe:
         raise RuntimeError(
             f"sandbox-exec not found on {sys.platform}; refusing to run unconfined (#116)"
         )
-    retval = [exe, "-p", profile(pol), "/bin/sh", "-c", command]
+    prof = profile(pol) + ("" if network else "(deny network*)\n")
+    retval = [exe, "-p", prof, "/bin/sh", "-c", command]
     return retval

@@ -326,10 +326,14 @@ def _check_github(command, policy):
     # has to be in scope too, whatever the other segments name.
     gh_bare = False
     if is_gh:
-        # `export GH_REPO=o/r; gh pr list` retargets gh from another segment.
-        exported = [t for t in tokens if t.startswith("GH_REPO=")]
+        # `export GH_REPO=o/r; gh pr list` may retarget gh from another
+        # segment, so such a value is one more target to check -- never the
+        # segment's own: `echo GH_REPO=o/r; gh issue list` sets nothing, and
+        # counting it would excuse that bare gh from the origin check below.
+        exported = [t.split("=", 1)[1] for t in tokens if t.startswith("GH_REPO=")]
+        gh_repos += exported
         for seg in gh_segments:
-            seg_repos, seg_bad = _gh_repos(exported + seg)
+            seg_repos, seg_bad = _gh_repos(seg)
             gh_repos += seg_repos
             gh_unresolvable = gh_unresolvable or seg_bad
             gh_bare = gh_bare or not seg_repos

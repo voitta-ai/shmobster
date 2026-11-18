@@ -101,4 +101,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    # An uncaught exception exits 1, the code for "matches", and prints none:
+    # the caller would read it as a clean scan. Any failure here is exit 2.
+    try:
+        sys.exit(main(sys.argv))
+    except Exception as e:
+        print(f"error: name check failed: {type(e).__name__}: {e}", file=sys.stderr)
+        sys.exit(2)

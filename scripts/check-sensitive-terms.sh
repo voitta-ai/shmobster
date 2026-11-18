@@ -141,7 +141,7 @@ if [ -f "$terms_file" ]; then
   # 0 clean, 1 matches; anything else (no python3, a crash, an unreadable
   # path) means the name pass did not cover the input, and the gate fails
   # closed rather than reporting it clean.
-  if [ "$rc" -gt 1 ]; then
+  if [ "$rc" -gt 1 ] || { [ "$rc" -eq 1 ] && [ -z "$matches" ]; }; then
     echo "error: name check did not run to completion (exit $rc)" >&2
     status=2
   fi

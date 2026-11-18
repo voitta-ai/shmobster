@@ -1,6 +1,6 @@
 """Who said a Slack message -- me, another agent instance, or a human (#60).
 
-Two instances (e.g. Cosima, Barrymore) can share a workspace and channel, but
+Two instances (e.g. Ada, Grace) can share a workspace and channel, but
 each is its own Slack app with a unique bot user id (config.BOT_USER_ID, from
 auth.test at startup). Labeling history by that id lets an agent recognize its
 own prior posts AND, crucially, see a sibling agent's posts as a *different*
@@ -97,7 +97,7 @@ def broadcast_turn(event):
     answer (#260).
 
     A broadcast is addressed to everyone in the room, and the agent is in the
-    room. Requiring `@Cosima` on top of `@here` is the tax #23 removed for
+    room. Requiring `@Ada` on top of `@here` is the tax #23 removed for
     DMs, one surface over: the operator's words were "the @here message should
     reach Slack", after an @here asking why nothing was happening went to
     everybody except the participant able to answer it.

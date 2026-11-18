@@ -1015,7 +1015,7 @@ takes on any restart.
 Each instance is one config file + one process. `shmobster` is just the project
 name; name each instance via `agent.label` (or let it auto-derive from the app).
 
-- **Different machines** (e.g. Barrymore here, Cosima elsewhere): nothing
+- **Different machines** (e.g. Grace here, Ada elsewhere): nothing
   special -- each machine has its own gitignored `shmobster-config.json` and
   plist, and the default launchd Label doesn't collide across machines.
 - **Ad-hoc / a second config:**
@@ -1914,7 +1914,7 @@ Point at one or more catalogs:
 
     "skills": {
       "paths": [
-        "~/g/manda/git/skillz-private/skills",
+        "~/path/to/skillz-private/skills",
         "~/g/git.voitta/skillz/skills"
       ]
     }

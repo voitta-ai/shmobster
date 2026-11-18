@@ -888,9 +888,18 @@ in-tree write on the verb alone, and `.git/` is inside the tree, so
 it already grants -- ran arbitrary code with no card. `.git/config` reaches the
 same place without a commit, since `diff.external` fires on the next
 `git diff --ext-diff`, which is a read. The sandbox denies `file-write*` on
-`.git/hooks/`, `.git/config`, any `.git` that is a file (a worktree's gitdir
-pointer) and `config.worktree`, by regex rather than by literal, because a tree
-has more than one gitdir.
+`.git/hooks/`, `.git/config` and `config.worktree`, by regex rather than by
+literal, because a tree has more than one gitdir.
+
+Those regexes match paths, and a rename moves a directory without writing any
+path beneath it: `mv d .git` with a `config` already in `d` installs one. So
+the entries that decide which repository git loads are frozen as well (#344):
+every `.git` (a checkout's directory or a worktree's pointer file), a `hooks`
+directory under one, a linked worktree's admin directory with its `commondir`
+and `gitdir`, a submodule's gitdir, and the `worktrees` and `modules`
+directories that hold them. The cost is that `git init`,
+`git clone`, `git worktree add/remove/prune` and `git submodule add` fail in a
+channel, approved or not; an operator runs those.
 
 It is deliberately not a deny on all of `.git/`: `git add` and `git commit` are
 granted and have to write `index`, `objects` and `refs`. And it is in the

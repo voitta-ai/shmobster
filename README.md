@@ -896,7 +896,8 @@ path beneath it: `mv d .git` with a `config` already in `d` installs one. So
 the entries that decide which repository git loads are frozen as well (#344):
 every `.git` (a checkout's directory or a worktree's pointer file), a `hooks`
 directory under one, a linked worktree's admin directory with its `commondir`
-and `gitdir`, and a submodule's gitdir. The cost is that `git init`,
+and `gitdir`, a submodule's gitdir, and the `worktrees` and `modules`
+directories that hold them. The cost is that `git init`,
 `git clone`, `git worktree add/remove/prune` and `git submodule add` fail in a
 channel, approved or not; an operator runs those.
 

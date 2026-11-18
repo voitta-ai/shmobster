@@ -2967,7 +2967,10 @@ try:
         for _cmd in ("echo 'gitdir: /tmp/x' > .git", "echo x > f && cp f .git", "rm .git"):
             assert _gd_run(_cmd, _gd_wt) != 0, _cmd
         for _cmd in ("echo /tmp/x > .git/worktrees/w/commondir",
-                     "mv .git/worktrees/w .git/worktrees/w_old"):
+                     "mv .git/worktrees/w .git/worktrees/w_old",
+                     # the container, swapped whole for a prebuilt one
+                     "mkdir -p pre/w && echo /tmp/x > pre/w/commondir && mv .git/worktrees .git/wt_old",
+                     "mkdir -p .git/pre && mv .git/pre .git/modules"):
             assert _gd_run(_cmd) != 0, _cmd
         # The cost: `git worktree add` writes a new pointer, so it fails in a
         # channel, approved or not; an operator runs it.

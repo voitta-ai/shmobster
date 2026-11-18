@@ -306,8 +306,9 @@ def profile(pol):
     # frozen too -- created, overwritten, deleted or renamed, never from inside
     # the sandbox: every `.git` (a checkout's directory, a worktree's pointer
     # file), a `hooks` directory under one, a linked worktree's admin
-    # directory and its `commondir` and `gitdir` files, and a submodule's
-    # gitdir. The grant layer validates a worktree's pointer before a command
+    # directory and its `commondir` and `gitdir` files, a submodule's
+    # gitdir, and the `worktrees` and `modules` directories holding them --
+    # renaming a prebuilt container over either swaps every entry inside. The grant layer validates a worktree's pointer before a command
     # runs (#344); this is what keeps it the pointer git reads when the
     # command does, including after an earlier write in the same command.
     #
@@ -329,6 +330,7 @@ def profile(pol):
             r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+$")',
             r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+/(commondir|gitdir)$")',
             r'(regex #"/\.git/(modules/.+/)?modules/[^/]+$")',
+            r'(regex #"/\.git/(modules/.+/)?(worktrees|modules)$")',
         ))
         + ")"
     )

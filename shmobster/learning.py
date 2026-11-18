@@ -377,10 +377,13 @@ in the Notes section rather than inventing steps."""
 
 
 def _skill_text(raw):
-    """The SKILL.md inside a model's answer, or None. Models wrap it: a sentence
-    first ("Here is the skill:"), a ```markdown fence, a note after. So this
-    looks for the first `---` line that opens frontmatter with a `name:` in
-    it, and drops the fence that wrapped it, if one did."""
+    """The SKILL.md inside a model's answer, or None. Models wrap it despite
+    being told not to: a sentence first ("Here is the skill:"), a ```markdown
+    fence. So this looks for the first `---` line that opens frontmatter with
+    a `name:` in it, and drops the fence that wrapped it, if one did, along
+    with anything after that fence. A note after an UNfenced draft cannot be
+    told from the skill's last paragraph and stays in; the draft becomes a
+    pull request a person reviews, which is where it gets seen (#425 review)."""
     lines = raw.splitlines()
     for i, line in enumerate(lines):
         if line.strip() != "---":

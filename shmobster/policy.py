@@ -257,7 +257,7 @@ def _tokens(command):
     return retval
 
 
-def _gh_segment_tokens(command):
+def _gh_segment_tokens(command, name="gh"):
     """The segments of `command` that invoke gh, each a token list, or None
     when the command cannot be split into segments. Kept apart, because each
     segment's positional repo is its own target (#425 review): concatenated,
@@ -279,7 +279,7 @@ def _gh_segment_tokens(command):
     out, seg = [], []
     for t in tokens + [";"]:
         if t and set(t) <= set(";&|\n"):
-            if _invokes(seg, "gh"):
+            if _invokes(seg, name):
                 out.append(seg)
             seg = []
         else:
@@ -316,8 +316,13 @@ def _check_github(command, policy):
     for repo in named:
         if not _in_scope(repo):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
-    if named and not is_gh:
-        return (True, "")
+    # A git segment that names no GitHub URL reaches its checkout's origin.
+    # Decided per segment (#425 review): an allowed URL in one segment says
+    # nothing about `git status` in the next.
+    git_segments = _gh_segment_tokens(command, "git") if is_git else []
+    if git_segments is None:
+        git_segments = [tokens]
+    git_bare = any(not any(_GITHUB_URL.match(t) for t in seg) for seg in git_segments)
     gh_segments = _gh_segment_tokens(command) if is_gh else None
     if is_gh and gh_segments is None:
         gh_segments = [tokens]
@@ -355,22 +360,22 @@ def _check_github(command, policy):
     for repo in gh_repos:
         if not _in_scope(repo):
             return (False, f"repo '{repo}' not in channel whitelist {allowed}")
-    if gh_repos and not gh_bare:
+    # Every explicit target is checked above; none of them excuses a segment
+    # that named nothing (#425 review). Only when no git or gh segment is
+    # bare is the command done.
+    if not (git_bare or (is_gh and gh_bare)):
         return (True, "")
-    repo = None
-    if not is_gh:
-        # Every directory the command names, not just the channel's cwd: a
-        # `cd` and a `-C` retarget git identically (#186). Each one's origin
-        # has to be in scope, because the command reaches all of them.
-        _base = cwd_for(policy)
-        _dirs = _git_dirs(tokens, _base)
-        for _d in _dirs:
-            _r = _git_origin(_d)
-            if _r and not _in_scope(_r):
-                return (False, f"repo '{_r}' not in channel whitelist {allowed}")
-        repo = _git_origin(_dirs[-1] if _dirs else _base)
-    else:
-        repo = _git_origin(cwd_for(policy))
+    # Every directory the command names, not just the channel's cwd: a `cd`
+    # and a `-C` retarget git identically (#186), and gh too reads the
+    # checkout it runs in. Each one's origin has to be in scope, because the
+    # command reaches all of them.
+    _base = cwd_for(policy)
+    _dirs = _git_dirs(tokens, _base)
+    for _d in _dirs:
+        _r = _git_origin(_d)
+        if _r and not _in_scope(_r):
+            return (False, f"repo '{_r}' not in channel whitelist {allowed}")
+    repo = _git_origin(_dirs[-1] if _dirs else _base)
     if not repo:
         return (False, "target github repo undeterminable; blocked by channel policy")
     if _in_scope(repo):

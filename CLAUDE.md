@@ -25,8 +25,9 @@ does:
   re-implement that check, and do pass the thread id to
   `approvals.claim_unsurfaced(channel, thread_ts)` when surfacing cards, or it
   has nothing to reason about. When a card fails for a reason that may pass,
-  `approvals.unsurface(req_id)` retries it next turn; when the surface rejects
-  the card itself, call `approvals.withdraw(req_id)`, say so in the thread, and
+  `approvals.unsurface(req_id, retry_after=...)` retries it on a later turn
+  after a backoff, and returns False once it has failed long enough to give
+  up; then, or when the surface rejects the card itself, call `approvals.withdraw(req_id)`, say so in the thread, and
   resume from `approvals.take_deferred(channel, thread_ts)` if it returns an
   outcome. A parked request no human can see still counts as parked, and holds
   the thread's resume forever.

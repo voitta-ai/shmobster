@@ -133,15 +133,24 @@ def _post_full_command(client, channel, thread_ts, req_id, command):
     its permalink, or None. Message text has no 3000-character block cap, and
     this needs only `chat:write` -- a file upload would need `files:write`,
     which the manifest leaves out on purpose. Never raises: the card must post
-    whether or not this did."""
+    whether or not this did.
+
+    Encoded like the card (#376), and past Slack's cap the label says so: a
+    reply called "Full command" that is not the full command is the one thing
+    an approver must not be told."""
     cmd = redact.scrub(command)
-    if len(cmd) > _FULL_COMMAND_MAX:
-        cmd = cmd[:_FULL_COMMAND_MAX] + "\n... (truncated)"
+    shown = slack_blocks.head(cmd, _FULL_COMMAND_MAX)
+    if len(shown) < len(cmd):
+        label = (f"Command for [{req_id}], TRUNCATED: only the first {len(shown)} of its "
+                 f"{len(cmd)} characters fit in a Slack message. Read the whole command "
+                 "on the host before approving.")
+    else:
+        label = f"Full command for [{req_id}]:"
     retval = None
     try:
         resp = client.chat_postMessage(
             channel=channel, thread_ts=thread_ts,
-            text=f"Full command for [{req_id}]:\n```{cmd}```",
+            text=f"{label}\n{slack_blocks.code_block(shown)}",
         )
         retval = client.chat_getPermalink(channel=channel, message_ts=resp["ts"]).get("permalink") or None
     except Exception:
@@ -150,10 +159,9 @@ def _post_full_command(client, channel, thread_ts, req_id, command):
 
 
 # Slack's own "try again" answers, which can arrive as ok:false at HTTP 200.
+# How long a "transient" failure may repeat before it counts as a rejection is
+# approvals.unsurface()'s call (#376).
 _TRANSIENT_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
-# A "transient" failure that repeats this many times on one card is treated as
-# a rejection: some payloads get internal_error or a 5xx every time (#356 review).
-_CARD_TRIES = 3
 
 
 def _rejected(exc):
@@ -173,10 +181,25 @@ def _rejected(exc):
     return retval
 
 
+def _retry_after(exc):
+    """Seconds a 429 asks us to wait, from its Retry-After header, or None."""
+    resp = getattr(exc, "response", None)
+    retval = None
+    if getattr(resp, "status_code", None) == 429:
+        for name, value in (getattr(resp, "headers", None) or {}).items():
+            if str(name).lower() == "retry-after":
+                try:
+                    retval = float(value[0] if isinstance(value, (list, tuple)) else value)
+                except (TypeError, ValueError, IndexError):
+                    retval = None
+    return retval
+
+
 def _card_failed(client, channel, thread_ts, req_id, exc):
-    """An approval card did not post. Retry it on the next mention when the
-    failure may pass, up to _CARD_TRIES failures; withdraw it when Slack
-    rejected the card, or the retries ran out (#356).
+    """An approval card did not post. Retry it on a later mention when the
+    failure may pass, backing off and honouring a 429's Retry-After; withdraw
+    it when Slack rejected the card, or it has kept failing long enough that it
+    is not an outage (#356, #376).
 
     A rejected card is rejected again on every mention, and a request no human
     can see holds the thread's resume forever. Withdrawn, it never runs, and
@@ -188,7 +211,7 @@ def _card_failed(client, channel, thread_ts, req_id, exc):
     resumed from that outcome now, after the note, so the resumed turn reads
     the withdrawal. A thread whose only request was withdrawn is not resumed:
     take_deferred() has nothing for it."""
-    if not _rejected(exc) and approvals.unsurface(req_id) < _CARD_TRIES:
+    if not _rejected(exc) and approvals.unsurface(req_id, retry_after=_retry_after(exc)):
         return
     if approvals.withdraw(req_id) is None:
         return

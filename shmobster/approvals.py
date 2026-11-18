@@ -53,6 +53,7 @@ import itertools
 import logging
 import secrets
 import threading
+import time
 
 from . import redact
 
@@ -77,6 +78,18 @@ _MAX = 50
 # that did run.
 _INFLIGHT = {}  # request id -> the request dict
 _LOCK = threading.Lock()
+# A card that failed for a reason that may pass is retried on a later mention,
+# not the next one regardless (#376): the wait doubles from the first value up
+# to the cap, and a 429's Retry-After is honoured when it asks for longer. It
+# is withdrawn only once it has failed at least _CARD_MIN_TRIES times AND has
+# been failing for _CARD_GIVE_UP seconds -- three mentions inside a short
+# Slack outage used to withdraw a valid request. A rate limit never withdraws
+# one: Slack is saying when to come back, not that the card is bad.
+_CARD_RETRY_FIRST = 30
+_CARD_RETRY_MAX = 600
+_CARD_MIN_TRIES = 3
+_CARD_GIVE_UP = 900
+_clock = time.monotonic
 
 
 def canonical(key):
@@ -326,6 +339,7 @@ def claim_unsurfaced(channel, thread_ts=None):
     out the reply that was about to show the buttons. The snapshot is built and
     marked under the lock, then posted outside it."""
     out = []
+    now = _clock()
     with _LOCK:
         for key, req in list(_PENDING.items()):
             if req.get("channel") != channel or req.get("surfaced"):
@@ -335,8 +349,14 @@ def claim_unsurfaced(channel, thread_ts=None):
             # Taking it here posted a card into a conversation that never
             # asked for it: two turns ran at once in one channel, and the one
             # that finished first carried the other's cards off with it.
-            if (thread_ts is not None and req.get("thread_ts") is not None
-                    and req["thread_ts"] != thread_ts):
+            # A caller with no thread is no exception (#376): it gets only the
+            # requests that have none either, so a card that failed in one
+            # thread can never come back in another, whose resume would then
+            # be the one to run while the first held the deferred outcome.
+            if req.get("thread_ts") is not None and req["thread_ts"] != thread_ts:
+                continue
+            # A failed card waits out its backoff (#376); it stays parked.
+            if req.get("card_retry_at", 0) > now:
                 continue
             req["surfaced"] = True
             # Since #266 add() records the thread at park time, so this is the
@@ -348,26 +368,38 @@ def claim_unsurfaced(channel, thread_ts=None):
     return retval
 
 
-def unsurface(key):
+def unsurface(key, retry_after=None):
     """The ingest could not post the card for a reason that may pass -- a rate
     limit, a Slack outage, the network (#129 review): make the request
-    eligible for another one on the next mention, rather than pending with no
+    eligible for another one on a later mention, rather than pending with no
     surface and no id anyone was ever shown. A card Slack rejects outright is
     withdrawn instead (#356).
 
-    Returns how many times this request's card has now failed this way, or 0
-    when it is no longer pending. Counted on the request, under the lock, so
-    the ingest can stop retrying: Slack can answer some payloads with
-    internal_error or a 5xx every time, and an endless retry is the same
-    permanent thread hold that withdraw() exists to end (#356 review)."""
+    Returns True while the request stays parked for another try, and False
+    when it is no longer pending or should now be withdrawn: Slack can answer
+    some payloads with internal_error or a 5xx every time, and an endless
+    retry is the same permanent thread hold that withdraw() exists to end
+    (#356 review). That call is made on time, not on a count of mentions
+    (#376): the next try waits out a doubling backoff, or `retry_after`
+    seconds when a 429 asked for longer, and the request is given up only
+    after _CARD_MIN_TRIES failures spanning _CARD_GIVE_UP seconds. A failure
+    carrying a Retry-After never gives it up. Counted on the request, under
+    the lock."""
+    now = _clock()
     with _LOCK:
         req = _PENDING.get(canonical(key))
         if req is None:
-            retval = 0
+            retval = False
         else:
             req["surfaced"] = False
-            req["card_failures"] = req.get("card_failures", 0) + 1
-            retval = req["card_failures"]
+            failures = req["card_failures"] = req.get("card_failures", 0) + 1
+            first = req.setdefault("card_failed_at", now)
+            wait = min(_CARD_RETRY_FIRST * 2 ** (failures - 1), _CARD_RETRY_MAX)
+            if retry_after is not None:
+                wait = max(wait, retry_after)
+            req["card_retry_at"] = now + wait
+            retval = (retry_after is not None or failures < _CARD_MIN_TRIES
+                      or now - first < _CARD_GIVE_UP)
     return retval
 
 

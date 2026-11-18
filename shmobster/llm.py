@@ -41,7 +41,16 @@ repeat (`_DEAD_PARK_FIRST` up to `_DEAD_PARK_MAX`), rather than lasting until
 restart: the watchdog restarts this process routinely, which would re-learn
 (and re-pay) the failure every few minutes. Short first, because a rung can be
 fixed vendor-side (access enabled, credit added) with no config edit to notice;
-growing, because a rung that really is gone should not be re-dialled hourly."""
+growing, because a rung that really is gone should not be re-dialled hourly.
+
+A short wait before falling over (#351). A 429 that says when to come back --
+Gemini's RetryInfo `retryDelay`, or a Retry-After header -- is a per-minute
+quota, not an outage, and litellm does not wait it out: it cools the deployment
+and falls over at once. When every rung after it is dead too, a 29-second
+quota ends the turn. So `complete()` asks the primary alone first, and on a
+429 with a stated delay of at most `_RETRY_WAIT_CAP` waits and asks it once
+more, directly, before handing the request to the rest of the chain. The
+Router's fallbacks therefore start at `fb0`: the primary is never in them."""
 import datetime
 import logging
 import math
@@ -74,6 +83,8 @@ for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
 _ROUTER = None
 _RUNG_VENDORS = {}
 _ROUTER_VENDORS = None  # the vendor names the live router was built from
+_ROUTER_RUNGS = None    # [(id, vendor, litellm_params)] of the live router (#351)
+_BUILT_RUNGS = None     # the same, as the last `_build()` left it
 
 _STATE_KEY = "parked_vendors"  # {vendor name: epoch seconds when it may be used again}
 
@@ -133,6 +144,19 @@ _DEAD_400 = re.compile(
 # nothing but a model slug can ride out of the vendor's body into a log or a
 # channel; the body itself carries account and function ids and is never echoed.
 _SUGGESTED_SLUG = re.compile(r"use this slug instead:\s*([A-Za-z0-9][A-Za-z0-9._:/-]{0,119})")
+
+# The longest stated 429 delay worth waiting out on the primary (#351). A
+# per-minute quota names a delay under a minute; anything longer is an hourly or
+# daily quota, where the asker is better served by the next rung now than by
+# the primary much later. 60s is also what litellm cools a 429 for here
+# (`cooldown_time` below), so it is the window the Router already treats as
+# transient, and it stays well inside a turn nobody would call hung.
+_RETRY_WAIT_CAP = 60
+
+# Gemini's RetryInfo detail, as it appears in the error text: `"retryDelay":
+# "29s"` in the JSON body, `retryDelay: 29s` once flattened. Bounded digits, so
+# a malformed body cannot become a huge float.
+_RETRY_DELAY = re.compile(r"retryDelay\W{0,4}(\d{1,6}(?:\.\d{1,6})?)s\b")
 
 
 # Every read-modify-write of the dead-rung records, so two turns finishing
@@ -400,6 +424,38 @@ def dead_reason(exc):
     return retval
 
 
+def retry_delay(exc):
+    """Seconds a 429 asks the caller to wait before asking again, or None when
+    it is not a 429 or names no delay. RetryInfo's `retryDelay` in the error
+    text first (Gemini), then a `retry-after-ms` / `retry-after` header in
+    seconds; an HTTP-date Retry-After is not parsed. Never below 1s."""
+    if getattr(exc, "status_code", None) != 429:
+        retval = None
+        return retval
+    seconds = None
+    match = _RETRY_DELAY.search(str(getattr(exc, "message", "") or str(exc)))
+    if match:
+        seconds = float(match.group(1))
+    else:
+        headers = getattr(exc, "litellm_response_headers", None)
+        if headers is None:
+            headers = getattr(getattr(exc, "response", None), "headers", None)
+        try:
+            ms = headers.get("retry-after-ms") if headers is not None else None
+            sec = headers.get("retry-after") if headers is not None else None
+            if ms is not None:
+                seconds = float(ms) / 1000
+            elif sec is not None:
+                seconds = float(sec)
+        except (AttributeError, TypeError, ValueError):
+            seconds = None
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        retval = None
+        return retval
+    retval = max(1, math.ceil(seconds))
+    return retval
+
+
 def _hours(sec):
     """A park length for people, rounded up: "45m", "2h"."""
     retval = f"{math.ceil(sec / 60)}m" if sec < 3600 else f"{math.ceil(sec / 3600)}h"
@@ -530,6 +586,16 @@ def _on_failure(kwargs):
     if dead_reason(exc) is not None:
         kill(exc, _deployment_of(kwargs))  # logs itself: ERROR when new, WARNING when again
         return
+    if getattr(exc, "status_code", None) == 404:
+        # A 404 the dead-rung rules do not recognise (#351): litellm cools it
+        # for 60s and the chain moves on, so it costs nothing visible -- which
+        # is how a retired slug sat in the chain unnoticed. No network check at
+        # startup can tell a dead slug from a live one, so say it here, where
+        # the vendor has just said it.
+        logging.warning("waterfall: %s answered 404 (%s); failing over. If this repeats, "
+                        "check its model slug in the waterfall config",
+                        _deployment_of(kwargs) or "unknown rung", type(exc).__name__)
+        return
     # Named too. When a fallback covers the failure nothing raises and
     # litellm logs nothing at WARNING, so a rung that was rate-limited,
     # erroring or holding a bad key left no trace at all. Type and status
@@ -549,8 +615,8 @@ def _watch():
 
 
 def _invalidate():
-    global _ROUTER, _ROUTER_VENDORS
-    _ROUTER, _ROUTER_VENDORS = None, None
+    global _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS
+    _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS = None, None, None
 
 
 def _deployment(model_name, vendor):
@@ -590,7 +656,13 @@ def _build():
     _RUNG_VENDORS = {m["model_name"]: (wf[0] if m["model_name"] == "primary"
                                        else rest[int(m["model_name"][2:])]).get("name")
                      for m in model_list}
-    fallbacks = [{"primary": [f"fb{i}" for i in range(len(rest))]}] if rest else []
+    # The chain starts at fb0, not at the primary (#351): `complete()` asks the
+    # primary alone, so it can wait out a short 429 before anything falls over,
+    # and then hands the request to fb0 with the rest behind it.
+    global _BUILT_RUNGS
+    _BUILT_RUNGS = [(m["model_name"], _RUNG_VENDORS[m["model_name"]], dict(m["litellm_params"]))
+                    for m in model_list]
+    fallbacks = [{"fb0": [f"fb{i}" for i in range(1, len(rest))]}] if len(rest) > 1 else []
     retval = Router(
         model_list=model_list,
         fallbacks=fallbacks,
@@ -607,33 +679,94 @@ def _build():
 
 def _ensure():
     """Build the router, or rebuild it when the set of usable vendors changed --
-    a park added one, or a park expired and gave one back."""
-    global _ROUTER, _ROUTER_VENDORS
+    a park added one, or a park expired and gave one back. Returns the router
+    and its rungs as built, `[(id, vendor, litellm_params), ...]`, together:
+    a rebuild renumbers the rungs, so they are only meaningful for that router."""
+    global _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS
     vendors = tuple(v.get("name") for v in _live_waterfall())
     if _ROUTER is None or vendors != _ROUTER_VENDORS:
         if _ROUTER_VENDORS is not None:
             logging.info("waterfall: rebuilding, chain is now %s", " -> ".join(vendors))
-        _ROUTER = _build()
-        _ROUTER_VENDORS = vendors
-    return _ROUTER
+        router = _build()
+        _ROUTER, _ROUTER_RUNGS, _ROUTER_VENDORS = router, _BUILT_RUNGS, vendors
+    retval = (_ROUTER, _ROUTER_RUNGS)
+    return retval
+
+
+def _retry_primary(exc, rung, kwargs):
+    """Wait out a short 429 on the primary and ask it once more (#351). Returns
+    the response, or None when there is nothing to wait for or the retry failed
+    too -- either way the caller falls over to the rest of the chain.
+
+    The retry goes to litellm directly, not through the Router: the Router has
+    already cooled the deployment for `cooldown_time`, longer than the delay
+    being honoured, and would refuse it without dialling. The failure callback
+    still sees a failed retry -- `metadata.deployment` is what it identifies the
+    rung by -- so a budget or dead-rung error here parks as it would anywhere."""
+    delay = retry_delay(exc)
+    _rung_id, vendor, params = rung
+    if delay is None:
+        retval = None
+        return retval
+    if delay > _RETRY_WAIT_CAP:
+        logging.warning("waterfall: %s is rate-limited for %ss, past the %ss wait cap; "
+                        "failing over", vendor, delay, _RETRY_WAIT_CAP)
+        retval = None
+        return retval
+    logging.warning("waterfall: %s is rate-limited; retrying it in %ss before failing over",
+                    vendor, delay)
+    time.sleep(delay)
+    try:
+        resp = litellm.completion(**params, **kwargs, metadata={"deployment": params.get("model")})
+    except Exception as again:  # noqa: BLE001 -- the chain is still there to try
+        logging.warning("waterfall: %s failed again after the wait (%s %s); failing over",
+                        vendor, type(again).__name__,
+                        getattr(again, "status_code", None) or "no status")
+        retval = None
+        return retval
+    logging.info("waterfall: %s answered after the wait", vendor)
+    # The Router still has the primary cooled for the rest of `cooldown_time`,
+    # so every later step of this turn would skip a rung that just answered.
+    # A rebuild drops that cooldown (and the other rungs' 60s ones -- see the
+    # module docstring for why that is a rounding error).
+    _invalidate()
+    retval = resp
+    return retval
 
 
 def complete(messages, tools=None):
     """Return the raw assistant message (has .content and .tool_calls).
+
+    The primary is asked alone first, so a short 429 can be waited out on it
+    before anything falls over (#351); then fb0, with the rest of the chain as
+    its fallbacks. Everything else is the Router's, as before.
 
     No try/except for budget errors here on purpose: when a fallback covers the
     failure nothing is raised, so parking lives in the failure callback instead.
     An exception reaching this caller means the whole chain failed, which parking
     cannot rescue -- the vendors are already parked by the callback, and the next
     turn rebuilds without them."""
-    kwargs = {"model": "primary", "messages": messages}
+    kwargs = {"messages": messages}
     if tools:
         kwargs["tools"] = tools
-    resp = _ensure().completion(**kwargs)
+    router, rungs = _ensure()
+    try:
+        # num_retries=0: with no fallbacks behind it the Router would re-dial a
+        # 429'd primary at once, which is neither the wait nor the failover.
+        resp = router.completion(model=rungs[0][0], num_retries=0, **kwargs)
+        vendor = None
+    except Exception as exc:
+        resp = _retry_primary(exc, rungs[0], kwargs)
+        if resp is None and len(rungs) < 2:
+            raise
+        vendor = rungs[0][1] if resp is not None else None
+        if resp is None:
+            resp = router.completion(model=rungs[1][0], **kwargs)
     # What it cost, on the rung that actually answered (#190). The Router may
     # have failed over, so the vendor is read back off the response rather than
-    # assumed to be the primary.
-    cost.note(resp, _answering_vendor(resp))
+    # assumed to be the primary. A direct retry carries no Router id, so it is
+    # credited to the rung it was sent to.
+    cost.note(resp, vendor or _answering_vendor(resp))
     retval = resp.choices[0].message
     return retval
 

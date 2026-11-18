@@ -80,11 +80,16 @@ litellm.telemetry = False
 for _name in ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
-_ROUTER = None
 _RUNG_VENDORS = {}
-_ROUTER_VENDORS = None  # the vendor names the live router was built from
-_ROUTER_RUNGS = None    # [(id, vendor, litellm_params)] of the live router (#351)
-_BUILT_RUNGS = None     # the same, as the last `_build()` left it
+# The live router, its rungs `[(id, vendor, litellm_params)]` and the vendor
+# names it was built from, as ONE tuple (#351): a reader takes all three in a
+# single read, so a concurrent rebuild can never pair one build's router with
+# another build's rungs. None until built, and after `_invalidate()`.
+_LIVE = None
+# Serialises the check-and-build in `_ensure()`. Never taken by `_invalidate()`,
+# which runs under `_DEAD_LOCK` while `_build()` takes `_DEAD_LOCK` under this
+# one -- that order would deadlock. An unlocked swap to None is atomic.
+_BUILD_LOCK = threading.Lock()
 
 _STATE_KEY = "parked_vendors"  # {vendor name: epoch seconds when it may be used again}
 
@@ -615,8 +620,8 @@ def _watch():
 
 
 def _invalidate():
-    global _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS
-    _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS = None, None, None
+    global _LIVE
+    _LIVE = None
 
 
 def _deployment(model_name, vendor):
@@ -636,6 +641,14 @@ def _deployment(model_name, vendor):
 
 
 def _build():
+    """The Router alone; see `_build_with_rungs`."""
+    retval = _build_with_rungs()[0]
+    return retval
+
+
+def _build_with_rungs():
+    """(Router, its rungs as `[(id, vendor, litellm_params)]`), from one read of
+    the live waterfall, so the two always describe the same chain (#351)."""
     _watch()
     # Registered before the Router is built, not at import: a `codex/` row is
     # optional, and litellm must know the prefix by the time it resolves one.
@@ -659,11 +672,12 @@ def _build():
     # The chain starts at fb0, not at the primary (#351): `complete()` asks the
     # primary alone, so it can wait out a short 429 before anything falls over,
     # and then hands the request to fb0 with the rest behind it.
-    global _BUILT_RUNGS
-    _BUILT_RUNGS = [(m["model_name"], _RUNG_VENDORS[m["model_name"]], dict(m["litellm_params"]))
-                    for m in model_list]
+    rungs = [(m["model_name"], (wf[0] if m["model_name"] == "primary"
+                                else rest[int(m["model_name"][2:])]).get("name"),
+              dict(m["litellm_params"]))
+             for m in model_list]
     fallbacks = [{"fb0": [f"fb{i}" for i in range(1, len(rest))]}] if len(rest) > 1 else []
-    retval = Router(
+    router = Router(
         model_list=model_list,
         fallbacks=fallbacks,
         num_retries=1,
@@ -674,6 +688,7 @@ def _build():
         # every fail in it was a wasted round-trip.
         allowed_fails=0,
     )
+    retval = (router, rungs)
     return retval
 
 
@@ -682,14 +697,19 @@ def _ensure():
     a park added one, or a park expired and gave one back. Returns the router
     and its rungs as built, `[(id, vendor, litellm_params), ...]`, together:
     a rebuild renumbers the rungs, so they are only meaningful for that router."""
-    global _ROUTER, _ROUTER_VENDORS, _ROUTER_RUNGS
-    vendors = tuple(v.get("name") for v in _live_waterfall())
-    if _ROUTER is None or vendors != _ROUTER_VENDORS:
-        if _ROUTER_VENDORS is not None:
-            logging.info("waterfall: rebuilding, chain is now %s", " -> ".join(vendors))
-        router = _build()
-        _ROUTER, _ROUTER_RUNGS, _ROUTER_VENDORS = router, _BUILT_RUNGS, vendors
-    retval = (_ROUTER, _ROUTER_RUNGS)
+    global _LIVE
+    with _BUILD_LOCK:
+        live = _LIVE
+        vendors = tuple(v.get("name") for v in _live_waterfall())
+        if live is None or vendors != live[2]:
+            if live is not None:
+                logging.info("waterfall: rebuilding, chain is now %s", " -> ".join(vendors))
+            router, rungs = _build_with_rungs()
+            # The vendors key is what was actually built, not the read above:
+            # a park landing in between would otherwise mislabel this router.
+            live = (router, rungs, tuple(vendor for _id, vendor, _params in rungs))
+            _LIVE = live
+    retval = (live[0], live[1])
     return retval
 
 

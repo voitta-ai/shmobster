@@ -2894,9 +2894,15 @@ try:
                 r'(regex #"/\.git/(.+/)?config$")',
                 r'(regex #"/config\.worktree$")'):
         assert _rx in _gd_prof, _rx
-    assert r'(regex #"/\.git$")' not in _gd_prof, (
-        "denying the gitdir pointer breaks `git worktree add` (#186)"
-    )
+    # ...and the entries that choose the repository are frozen, because a
+    # rename installs a directory without writing any path beneath it (#344).
+    # #186 left the pointer writable while TMPDIR offered the same door; #344
+    # pins git to the channel's checkout, so freezing it now closes one.
+    for _rx in (r'(regex #"/\.git$")',
+                r'(regex #"/\.git/(modules/.+/)?hooks$")',
+                r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+$")',
+                r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+/(commondir|gitdir)$")'):
+        assert _rx in _gd_prof, _rx
     if _HAVE_SANDBOX:
 
         def _gd_run(cmd, cwd=_gd_root):
@@ -2948,9 +2954,24 @@ try:
         for _cmd in ("echo x > .GIT/hooks/pre-commit", "echo x > .git/HOOKS/pre-commit",
                      "echo x > .git/CONFIG", "ln f.txt .git/hooks/pre-commit"):
             assert _gd_run(_cmd) != 0, _cmd
-        # `git worktree add` must keep working -- it writes the worktree's `.git`
-        # pointer file, and it is how work is done in this repo
-        assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") == 0
+        # Renaming a directory into place is a write to the entry, not to the
+        # config or hooks beneath it, so each of these was allowed before #344.
+        for _cmd in ("mkdir -p r/d && echo x > r/d/config && mv r/d r/.git",
+                     "mkdir -p r2/d && echo x > r2/d/config && mv r2/d r2/.GIT",
+                     "mkdir -p h && mv h .git/hooks2 && mv .git/hooks .git/hooks_old",
+                     "mv .git gitold",
+                     "mkdir -p z/.git"):
+            assert _gd_run(_cmd) != 0, _cmd
+        # a worktree's pointer and its admin entry cannot be swapped either,
+        # including after an earlier write in the same command
+        for _cmd in ("echo 'gitdir: /tmp/x' > .git", "echo x > f && cp f .git", "rm .git"):
+            assert _gd_run(_cmd, _gd_wt) != 0, _cmd
+        for _cmd in ("echo /tmp/x > .git/worktrees/w/commondir",
+                     "mv .git/worktrees/w .git/worktrees/w_old"):
+            assert _gd_run(_cmd) != 0, _cmd
+        # The cost: `git worktree add` writes a new pointer, so it fails in a
+        # channel, approved or not; an operator runs it.
+        assert _gd_run("git worktree add -q " + _gd_root + ".worktrees/w3 -b w3") != 0
         for _cmd in ("git stash", "git stash pop", "git gc --quiet", "git fetch --all"):
             assert _gd_run(_cmd) == 0, _cmd
         # the pattern matches a gitdir and nothing that merely looks like one: a

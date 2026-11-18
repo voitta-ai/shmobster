@@ -299,12 +299,21 @@ def profile(pol):
     # whose hooks and config are a second copy of exactly this hazard one level
     # down -- hence `(.+/)?` rather than an anchored `hooks/`.
     #
-    # A worktree's own `.git` -- a *file* naming its real gitdir -- is NOT
-    # denied, although overwriting it repoints the repository. Denying it breaks
-    # `git worktree add`, which is how work is done in this repo, and it buys
-    # little: TMPDIR is writable, so `git init /tmp/x` plus a hook there plus a
-    # commit reaches the same place without touching any pointer. That is a
-    # wider question than this deny, and it is recorded rather than solved.
+    # The regexes above match paths, and a rename moves a directory without
+    # writing any path beneath it: `mv d .git` with `d/config` and `d/hooks/`
+    # already inside installs both, and so does `mv d .git/hooks`. So the
+    # entries that decide WHICH repository, config and hooks git loads are
+    # frozen too -- created, overwritten, deleted or renamed, never from inside
+    # the sandbox: every `.git` (a checkout's directory, a worktree's pointer
+    # file), a `hooks` directory under one, a linked worktree's admin
+    # directory and its `commondir` and `gitdir` files, and a submodule's
+    # gitdir. The grant layer validates a worktree's pointer before a command
+    # runs (#344); this is what keeps it the pointer git reads when the
+    # command does, including after an earlier write in the same command.
+    #
+    # The cost: `git init`, `git clone`, `git worktree add/remove/prune` and
+    # `git submodule add` fail in a channel, approved or not. An operator runs
+    # those. (clone already failed here: it writes `.git/config`.)
     #
     # Deliberately NOT all of `.git/`: `git add` and `git commit` are granted
     # and have to write `index`, `objects` and `refs`. Denying those would
@@ -315,6 +324,11 @@ def profile(pol):
             r'(regex #"/\.git/(.+/)?hooks/")',
             r'(regex #"/\.git/(.+/)?config$")',
             r'(regex #"/config\.worktree$")',
+            r'(regex #"/\.git$")',
+            r'(regex #"/\.git/(modules/.+/)?hooks$")',
+            r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+$")',
+            r'(regex #"/\.git/(modules/.+/)?worktrees/[^/]+/(commondir|gitdir)$")',
+            r'(regex #"/\.git/(modules/.+/)?modules/[^/]+$")',
         ))
         + ")"
     )

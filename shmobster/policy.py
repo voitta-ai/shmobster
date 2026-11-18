@@ -325,6 +325,7 @@ def _check_github(command, policy):
     # A gh segment naming no repo reaches the checkout's origin, which then
     # has to be in scope too, whatever the other segments name.
     gh_bare = False
+    gh_api_bare = False
     if is_gh:
         # `export GH_REPO=o/r; gh pr list` may retarget gh from another
         # segment, so such a value is one more target to check -- never the
@@ -337,6 +338,9 @@ def _check_github(command, policy):
             gh_repos += seg_repos
             gh_unresolvable = gh_unresolvable or seg_bad
             gh_bare = gh_bare or not seg_repos
+            # Per segment, like the targets: an allowed repo named elsewhere
+            # says nothing about where this segment's `gh api` goes.
+            gh_api_bare = gh_api_bare or ("api" in seg and not seg_repos)
             gh_tokens += seg
     if gh_unresolvable:
         return (False, "gh names a repo path this policy cannot resolve; blocked by channel policy")
@@ -345,7 +349,7 @@ def _check_github(command, policy):
     # be inside a GraphQL document or absent entirely, and "I could not tell"
     # has to mean no while `github_repos` is set, or the one command that
     # reaches every repo is the one command that is never checked.
-    if is_gh and not gh_repos and "api" in gh_tokens:
+    if is_gh and gh_api_bare:
         return (False, "gh api names no repo this policy can resolve; blocked by channel policy")
     # Every named target, not the first: a command naming two reaches both.
     for repo in gh_repos:

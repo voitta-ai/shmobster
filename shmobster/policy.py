@@ -257,6 +257,40 @@ def _tokens(command):
     return retval
 
 
+# What ends a command for the segment scan: the list and pipe separators, a
+# newline, and the edges of a subshell, a `$( )` or a backquote, so that
+# `echo ok;gh ...` and `echo $(gh ...)` each give gh a segment of its own.
+_SEG_PUNCT = ";&|\n()`"
+
+
+def _shell_tokens(command):
+    """shlex tokens with the separators split out even where they touch a word
+    (`ok;git`, `x&&cd d`), each run as its own token, a newline read as `;`.
+    `_git_dirs` walks segments by those tokens, and `shlex.split` leaves them
+    glued, which hid a `-C` or `cd` from it. None if the text will not lex."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        lex.whitespace = " \t\r"
+        lex.whitespace_split = True
+        raw = list(lex)
+    except ValueError:
+        return None
+    retval = []
+    for t in raw:
+        if t and set(t) <= set(";&|\n"):
+            t = t if t in _SEGMENT_BREAK else ";"
+        retval.append(t)
+    return retval
+
+
+def _mentions(command, name):
+    """True when `name` appears as a word anywhere in the raw text, glued to a
+    separator or not. Over-reports on purpose (`grep gh f` counts): it only
+    decides whether the repo checks run, and shlex keeps `ok;gh` one word."""
+    retval = re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w.-])", command) is not None
+    return retval
+
+
 def _gh_segment_tokens(command, name="gh"):
     """The segments of `command` that invoke gh, each a token list, or None
     when the command cannot be split into segments. Kept apart, because each
@@ -270,7 +304,7 @@ def _gh_segment_tokens(command, name="gh"):
     as one. A newline separates commands as `;` does, which `shlex.split` alone
     treats as plain whitespace."""
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+        lex = shlex.shlex(command, posix=True, punctuation_chars=_SEG_PUNCT)
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
@@ -278,7 +312,7 @@ def _gh_segment_tokens(command, name="gh"):
         return None
     out, seg = [], []
     for t in tokens + [";"]:
-        if t and set(t) <= set(";&|\n"):
+        if t and set(t) <= set(_SEG_PUNCT):
             if _invokes(seg, name):
                 out.append(seg)
             seg = []
@@ -297,8 +331,8 @@ def _check_github(command, policy):
     # as `git` and `gh`, and an exact token match answered "no git here" to
     # both, skipping the whitelist entirely. Pre-dates #150 and #186; found by
     # the third adversarial pass on #195.
-    is_gh = _invokes(tokens, "gh")
-    is_git = _invokes(tokens, "git")
+    is_gh = _invokes(tokens, "gh") or _mentions(command, "gh")
+    is_git = _invokes(tokens, "git") or _mentions(command, "git")
     if not (is_gh or is_git):
         return (True, "")
     # A git command that names a GitHub URL outright (`git ls-remote
@@ -370,7 +404,7 @@ def _check_github(command, policy):
     # checkout it runs in. Each one's origin has to be in scope, because the
     # command reaches all of them.
     _base = cwd_for(policy)
-    _dirs = _git_dirs(tokens, _base)
+    _dirs = _git_dirs(_shell_tokens(command) or tokens, _base)
     for _d in _dirs:
         _r = _git_origin(_d)
         if _r and not _in_scope(_r):

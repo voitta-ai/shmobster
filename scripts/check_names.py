@@ -43,7 +43,8 @@ def boundary_ok(text, start, end):
     """Start: beginning of text, a non-alphanumeric before it, or the match
     starts uppercase right after a lowercase letter or digit (myAcmeCorp).
     End: end of text, a non-alphanumeric after it, or the next character is
-    uppercase while the match ended lowercase or on a digit (AcmeCorpThing)."""
+    uppercase while the match ended lowercase or on a digit (AcmeCorpThing), or
+    an uppercase match is followed by a capitalised word (ACMEClient)."""
     if end <= start:
         return False
     before = text[start - 1] if start > 0 else ""
@@ -52,8 +53,11 @@ def boundary_ok(text, start, end):
     last = text[end - 1]
     start_ok = (not before or not before.isalnum()
                 or (first.isupper() and (before.islower() or before.isdigit())))
+    after2 = text[end + 1] if end + 1 < len(text) else ""
     end_ok = (not after or not after.isalnum()
-              or (after.isupper() and (last.islower() or last.isdigit())))
+              or (after.isupper() and (last.islower() or last.isdigit()))
+              # An acronym followed by the next word: ACMEClient, myACMEClient.
+              or (after.isupper() and last.isupper() and after2.islower()))
     retval = start_ok and end_ok
     return retval
 

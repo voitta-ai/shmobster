@@ -68,6 +68,26 @@ def boundary_ok(text, start, end):
     return retval
 
 
+_LOOK = {}  # pattern -> zero-width search for every position it can start at
+
+
+def hit(pattern, text):
+    """True when `pattern` matches some span of `text` that boundary_ok
+    accepts. Python stops at the first alternative that matches (foo|foobar
+    finds only "foo" in "foobar"), where grep -E takes the longest. So for
+    every position the pattern can start at, try each end that the whole
+    pattern matches exactly, longest first, rather than only the span
+    finditer happened to pick."""
+    starts = _LOOK.setdefault(
+        pattern, re.compile(f"(?=(?:{pattern.pattern}))", pattern.flags))
+    for m in starts.finditer(text):
+        start = m.start()
+        for end in range(len(text), start, -1):
+            if boundary_ok(text, start, end) and pattern.fullmatch(text, start, end):
+                return True
+    return False
+
+
 def compile_terms(path):
     retval = []
     with open(path, encoding="utf-8", errors="replace") as f:
@@ -118,8 +138,7 @@ def main(argv):
         if b"\0" in data:
             continue  # binary, like grep -I
         for number, text in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
-            if any(boundary_ok(text, m.start(), m.end())
-                   for p in patterns for m in p.finditer(text)):
+            if any(hit(p, text) for p in patterns):
                 print(f"{path}:{number}:{text}")
                 retval = 1
     # 2 = the scan did not cover everything it was given; the caller fails

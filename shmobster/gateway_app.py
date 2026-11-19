@@ -874,7 +874,9 @@ def _took(mid):
         with _ANSWERED_LOCK:
             kept = {k: t for k, t in _answered().items() if now - t < _ANSWERED_TTL}
             kept[mid] = now
-            state.put(_ANSWERED, kept)
+            saved = state.put(_ANSWERED, kept)
+        if not saved:
+            logging.error("gateway: could not save %s as answered; an edit after its turn will be ignored", mid)
     except Exception:  # noqa: BLE001
         logging.exception("gateway: could not record %s as answered", mid)
 
@@ -910,7 +912,7 @@ def _run_turn(mid, started):
                 _begin(eid, started)
             edit = data.get("edit_event")
             _run(_guard, edit or mid, started, _turn if edit else _owned_turn, data, data)
-            if not edit and not _taken(mid):  # _guard refused it: its edits are not ours either
+            if not edit and not entry.get("admitted"):   # _guard refused it: its edits are not ours either
                 with _EDIT_LOCK:
                     entry["refused"], entry["next"] = True, None
         except Exception:  # noqa: BLE001 -- the worker must reach the del above, or edits pile up
@@ -919,8 +921,12 @@ def _run_turn(mid, started):
 
 def _owned_turn(data):
     """The message's own turn, once _guard admitted it: from here on its edits are
-    this agent's to answer (a refused message's are not)."""
-    _took(data["message_id"])
+    this agent's to answer (a refused message's are not). Admission is kept in
+    memory for the edits queued meanwhile; the saved record is for later ones."""
+    mid = data["message_id"]
+    with _EDIT_LOCK:
+        _TURNS[mid]["admitted"] = True
+    _took(mid)
     _turn(data)
 
 

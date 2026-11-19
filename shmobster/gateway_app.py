@@ -856,19 +856,39 @@ _ANSWERED_TTL = 2 * 86400
 _ANSWERED_LOCK = threading.Lock()
 
 
+def _answered():
+    """Under _ANSWERED_LOCK: the saved record, its well-formed entries only. Anything
+    else saved there reads as empty, and the next write replaces it."""
+    raw = state.get(_ANSWERED)
+    retval = ({k: t for k, t in raw.items()
+               if isinstance(k, str) and isinstance(t, (int, float)) and not isinstance(t, bool)}
+              if isinstance(raw, dict) else {})
+    return retval
+
+
 def _took(mid):
-    """Record that this message's own turn began; drop records past the window."""
-    now = time.time()
-    with _ANSWERED_LOCK:
-        kept = {k: t for k, t in (state.get(_ANSWERED) or {}).items() if now - t < _ANSWERED_TTL}
-        kept[mid] = now
-        state.put(_ANSWERED, kept)
+    """Record that this message's own turn began; drop records past the window.
+    Bookkeeping only: a failure is logged and never stops the turn."""
+    try:
+        now = time.time()
+        with _ANSWERED_LOCK:
+            kept = {k: t for k, t in _answered().items() if now - t < _ANSWERED_TTL}
+            kept[mid] = now
+            state.put(_ANSWERED, kept)
+    except Exception:  # noqa: BLE001
+        logging.exception("gateway: could not record %s as answered", mid)
 
 
 def _taken(mid):
-    with _ANSWERED_LOCK:
-        t = (state.get(_ANSWERED) or {}).get(mid)
-    retval = t is not None and time.time() - t < _ANSWERED_TTL
+    """Whether this agent answered the message within the edit window; False
+    when the record cannot be read."""
+    try:
+        with _ANSWERED_LOCK:
+            t = _answered().get(mid)
+        retval = t is not None and time.time() - t < _ANSWERED_TTL
+    except Exception:  # noqa: BLE001
+        logging.exception("gateway: could not read the answered record")
+        retval = False
     return retval
 # message id -> {"next": the turn waiting (data) or None while one runs and none
 # waits, "folded": edit event ids it absorbed, "future"}; gone once idle

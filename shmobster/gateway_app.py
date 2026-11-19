@@ -848,6 +848,28 @@ def _run(fn, mid, started, *args):
 # or /help.
 
 _EDIT_LOCK = threading.Lock()
+# The messages this agent took, by when their turn began, so a later edit is known
+# to be ours. Separate from `gateway_started` (event-id dedupe, capped by count)
+# and kept by age instead: Signal allows edits for 24 hours, so two days covers it.
+_ANSWERED = "gateway_answered"
+_ANSWERED_TTL = 2 * 86400
+_ANSWERED_LOCK = threading.Lock()
+
+
+def _took(mid):
+    """Record that this message's own turn began; drop records past the window."""
+    now = time.time()
+    with _ANSWERED_LOCK:
+        kept = {k: t for k, t in (state.get(_ANSWERED) or {}).items() if now - t < _ANSWERED_TTL}
+        kept[mid] = now
+        state.put(_ANSWERED, kept)
+
+
+def _taken(mid):
+    with _ANSWERED_LOCK:
+        t = (state.get(_ANSWERED) or {}).get(mid)
+    retval = t is not None and time.time() - t < _ANSWERED_TTL
+    return retval
 # message id -> {"next": the turn waiting (data) or None while one runs and none
 # waits, "folded": edit event ids it absorbed, "future"}; gone once idle
 _TURNS = {}
@@ -866,6 +888,8 @@ def _run_turn(mid, started):
         try:
             for eid in folded:            # superseded: answered by this turn, never run on their own
                 _begin(eid, started)
+            if not data.get("edit_event"):
+                _took(mid)
             _run(_guard, data.get("edit_event") or mid, started, _turn, data, data)
         except Exception:  # noqa: BLE001 -- the worker must reach the del above, or edits pile up
             logging.exception("gateway: a turn for %s failed", mid)
@@ -911,7 +935,7 @@ def _edited(e, started):
         elif entry:                                  # a turn runs: a follow-up after it
             entry["next"] = edit
             retval = entry["future"]
-        elif mid in started:                         # answered: a follow-up now
+        elif _taken(mid) or mid in started:          # answered: a follow-up now
             retval = _queue_turn(mid, started, edit)
         else:                                        # not a message this agent took: nothing to answer
             logging.info("gateway: ignoring an edit to a message this agent did not take (%s)", eid)

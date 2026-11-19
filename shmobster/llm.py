@@ -182,8 +182,11 @@ def _dead_records():
         _kept, changed = _prune_dead(state.get(_DEAD_KEY) or {}, now, [])
         if changed:
             notes = []
-            retval, _ = state.update(_DEAD_KEY, lambda raw: _prune_dead(raw or {}, now, notes)[0])
-            for line in notes:
+            pruned, ok = state.update(_DEAD_KEY, lambda raw: _prune_dead(raw or {}, now, notes)[0])
+            # A failed write hands back the unpruned value; keep using the
+            # pruned view computed above, and retry the write on the next read.
+            retval = pruned if ok else _kept
+            for line in (notes if ok else []):
                 logging.info(line)
         else:
             retval = _kept

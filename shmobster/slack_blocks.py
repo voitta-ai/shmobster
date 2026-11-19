@@ -18,10 +18,91 @@ _HEAD = 1200
 _TAIL = 500
 
 
+_ZWSP = "\u200b"
+
+
+def escape(text):
+    """Text as Slack mrkdwn shows it literally (#376). Slack reads `<...>` as a
+    link, a user mention or a broadcast, and `&` as the start of an entity --
+    inside a code block too -- so a command carrying `<@U...>`, `<!here>` or
+    `<https://x|label>` would ping people or show a label of its choosing next to
+    the Approve button. Slack's own rule: escape these three, nothing else."""
+    retval = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return retval
+
+
+def _inert(text):
+    """The body of a code block that nothing in `text` can end early (#376).
+    Escaped, and every run of backticks broken with a zero-width space, so a
+    fence in the command cannot close the block and leave the rest rendered as
+    mrkdwn; one at either edge is padded so it cannot join the block's own
+    fence. Only what is shown changes -- the command that runs is untouched."""
+    body = escape(text)
+    while "``" in body:
+        body = body.replace("``", "`" + _ZWSP + "`")
+    if body.startswith("`"):
+        body = _ZWSP + body
+    if body.endswith("`"):
+        body = body + _ZWSP
+    retval = body
+    return retval
+
+
+def altered(text):
+    """Whether _inert() has to put a zero-width space into `text` to keep it
+    inert: a run of backticks, or one at either edge. Escaping alone does not
+    alter what a copy yields -- Slack shows and copies `&lt;` as `<` -- but a
+    zero-width space is copied along with the command."""
+    retval = "``" in text or text.startswith("`") or text.endswith("`")
+    return retval
+
+
+def needs_full_reply(command):
+    """Whether a card's command also needs the full-command reply: it does not
+    fit on the card, or the card cannot show it in a form that copies exactly."""
+    cmd = redact.scrub(command)
+    retval = not command_fits(cmd) or altered(cmd)
+    return retval
+
+
+def code_block(text):
+    """`text` in a mrkdwn code block, inert (#376)."""
+    retval = f"```{_inert(text)}```"
+    return retval
+
+
+def _cost(ch):
+    """Characters `ch` takes once inert: its entity, or a backtick and the
+    zero-width space that may follow it. An upper bound, so a cut never runs
+    over."""
+    retval = {"&": 5, "<": 4, ">": 4, "`": 2}.get(ch, 1)
+    return retval
+
+
+def head(text, budget):
+    """The longest prefix of `text` whose inert form fits in `budget`
+    characters. Cut on the raw text, not the encoded one, so a cut never lands
+    inside an entity."""
+    used, end = 2, 0   # room for the edge padding
+    for ch in text:
+        used += _cost(ch)
+        if used > budget:
+            break
+        end += 1
+    retval = text[:end]
+    return retval
+
+
+def tail(text, budget):
+    """The longest suffix of `text` whose inert form fits in `budget`."""
+    retval = head(text[::-1], budget)[::-1]
+    return retval
+
+
 def command_fits(command):
-    """Whether a command can go on a card whole. Measured after scrubbing,
-    because that is the text the card actually carries."""
-    retval = len(redact.scrub(command)) <= CARD_COMMAND_MAX
+    """Whether a command can go on a card whole. Measured after scrubbing and
+    encoding, because that is the text the card actually carries."""
+    retval = len(_inert(redact.scrub(command))) <= CARD_COMMAND_MAX
     return retval
 
 
@@ -30,26 +111,37 @@ def _command(req):
     tail around a link to the full text.
 
     Scrubbed before it is cut, not after: cutting first could split a
-    credential so the redactor no longer recognizes either half."""
+    credential so the redactor no longer recognizes either half. Encoded after
+    it is cut, so the cut is measured in the characters Slack counts."""
     cmd = redact.scrub(req["command"])
-    if len(cmd) <= CARD_COMMAND_MAX:
-        retval = f"```{cmd}```"
+    link = req.get("full_link")
+    if command_fits(cmd):
+        changed = altered(cmd)
+        retval = code_block(cmd)
     else:
-        link = req.get("full_link")
+        first, last = head(cmd, _HEAD), tail(cmd, _TAIL)
+        changed = altered(first) or altered(last)
         where = (f"<{link}|full command ({len(cmd)} chars)>" if link else
                  f"full command ({len(cmd)} chars) could not be linked -- "
                  f"look for it just above in this thread")
-        retval = f"```{cmd[:_HEAD]}\n...\n{cmd[-_TAIL:]}```\n{where}"
+        retval = f"```{_inert(first)}\n...\n{_inert(last)}```\n{where}"
+    if changed:
+        # A zero-width space went into the shown text, and a copy carries it
+        # (#376): say so, and point at the reply that copies exactly.
+        reply = f"<{link}|the full-command reply>" if link else "the full-command reply in this thread"
+        retval += (f"\n_Display altered to keep it inert: copy the command from {reply}, "
+                   f"not from this card._")
     return retval
 
 
 def approval_text(req_id, req):
     """The notification fallback for an approval card: short, because the
-    full command is on the card or linked from it."""
+    full command is on the card or linked from it. Escaped like the card: a
+    mention in the fallback text notifies as well as one on the card."""
     cmd = redact.scrub(req["command"])
-    if len(cmd) > CARD_COMMAND_MAX:
+    if not command_fits(cmd):
         cmd = cmd[:200] + " ..."
-    retval = f"Needs approval [{req_id}]: {cmd}"
+    retval = f"Needs approval [{req_id}]: {escape(cmd)}"
     return retval
 
 
@@ -62,6 +154,7 @@ def approval(req_id, req):
     message that outlives the process, and both ways of acting on it -- the
     button and a human typing the id -- must resolve to nothing after a restart
     rather than to whichever request inherited its number."""
+    reason = escape(redact.scrub(req["reason"]))
     retval = [
         {
             "type": "section",
@@ -75,11 +168,13 @@ def approval(req_id, req):
                 # that the classifier refused this one rather than queued it.
                 # The buttons stay either way -- a human is still the last word
                 # (#105) -- but overriding a refusal should read as a decision.
+                # The reason is escaped like the command (#376): yolt_gate
+                # renders its own failures with the command inside.
                 "text": redact.scrub(
                     (f":no_entry: *Refused by the classifier* -- approve only if you "
-                     f"are sure [{req_id}] ({req['reason']})\n"
+                     f"are sure [{req_id}] ({reason})\n"
                      if req.get("refused") else
-                     f":lock: *Needs approval* [{req_id}] ({req['reason']})\n")
+                     f":lock: *Needs approval* [{req_id}] ({reason})\n")
                 ) + _command(req),
             },
         },

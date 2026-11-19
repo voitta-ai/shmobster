@@ -34,9 +34,15 @@ _POSIX = {
 }
 
 
+# GNU grep's own anchors, which Python reads as literal characters.
+_GNU = {r"\<": r"\b", r"\>": r"\b", "\\`": r"\A", "\\'": r"\Z"}
+
+
 def _posix(pattern):
     for cls, py in _POSIX.items():
         pattern = pattern.replace(cls, py)
+    for gnu, py in _GNU.items():
+        pattern = pattern.replace(gnu, py)
     return pattern
 
 def boundary_ok(text, start, end):

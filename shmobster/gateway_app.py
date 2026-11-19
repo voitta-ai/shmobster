@@ -823,12 +823,15 @@ _STARTED_MAX = 500
 _STARTED_LOCK = threading.Lock()
 
 
-def _begin(mid, started):
+def _begin(mid, started, folded=()):
     """Record that this message's turn is starting, before anything runs. A turn
     that began is never run again after a restart -- not even one that ended the
-    process -- while one still waiting in the queue is (#386 review)."""
+    process -- while one still waiting in the queue is (#386 review). `folded` are
+    edit ids whose text this turn carries (#404): saved in the same write, so no
+    crash leaves one recorded without the turn that answers it."""
     with _STARTED_LOCK:                   # append and save together: no older copy saved last
         started.append(mid)
+        started.extend(folded)
         del started[:-_STARTED_MAX]
         state.put(_STARTED, list(started))
 
@@ -908,10 +911,10 @@ def _run_turn(mid, started):
                 return
             entry["next"], entry["folded"] = None, []
         try:
-            for eid in folded:            # superseded: answered by this turn, never run on their own
-                _begin(eid, started)
             edit = data.get("edit_event")
-            _run(_guard, edit or mid, started, _turn if edit else _owned_turn, data, data)
+            # The turn and the edits it absorbed are recorded in one write
+            _begin(edit or mid, started, folded)
+            _guarded(_guard, _turn if edit else _owned_turn, data, data)
             if not edit and not entry.get("admitted"):   # _guard refused it: its edits are not ours either
                 with _EDIT_LOCK:
                     entry["refused"], entry["next"] = True, None

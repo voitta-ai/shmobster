@@ -124,11 +124,13 @@ def thread_state(thread_ts):
 
 
 def mark_thread(thread_ts, status):
-    data = state.get(_STATE_KEY) or {}
-    data[str(thread_ts)] = status
-    while len(data) > _STATE_MAX:
-        del data[next(iter(data))]
-    state.put(_STATE_KEY, data)
+    def _mark(data):
+        data = dict(data or {})
+        data[str(thread_ts)] = status
+        while len(data) > _STATE_MAX:
+            del data[next(iter(data))]
+        return data
+    state.update(_STATE_KEY, _mark)  # one locked step: concurrent threads both land (#363)
 
 
 # Scope is a property of the SKILL, not of where it was learned (#210). The

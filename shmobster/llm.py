@@ -164,9 +164,12 @@ _RETRY_WAIT_CAP = 60
 _RETRY_DELAY = re.compile(r"retryDelay\W{0,4}(\d{1,6}(?:\.\d{1,6})?)s\b")
 
 
-# Every read-modify-write of the dead-rung records, so two turns finishing
-# together neither both announce a rung nor drop a fresh record (#358 review).
-# Reentrant: kill and claim_dead_notices read through _dead_records.
+# Orders dead-rung work within the process (a kill's `_invalidate()` after its
+# record lands). The records themselves are only ever rewritten inside
+# `state.update(_DEAD_KEY, ...)`, so two turns -- or two processes during a
+# restart overlap -- neither both announce a rung nor drop a fresh record
+# (#358 review, #363). Lock order: _BUILD_LOCK, then this, then state's lock;
+# nothing inside a state.update callback takes another lock.
 _DEAD_LOCK = threading.RLock()
 
 
@@ -175,13 +178,24 @@ def _dead_records():
     against the model the rung is configured with now, and not yet past its
     history window. Pruned on read; a park running out is logged once."""
     with _DEAD_LOCK:
-        retval = _dead_records_locked()
+        now = time.time()
+        _kept, changed = _prune_dead(state.get(_DEAD_KEY) or {}, now, [])
+        if changed:
+            notes = []
+            pruned, ok = state.update(_DEAD_KEY, lambda raw: _prune_dead(raw or {}, now, notes)[0])
+            # A failed write hands back the unpruned value; keep using the
+            # pruned view computed above, and retry the write on the next read.
+            retval = pruned if ok else _kept
+            for line in (notes if ok else []):
+                logging.info(line)
+        else:
+            retval = _kept
     return retval
 
 
-def _dead_records_locked():
-    raw = state.get(_DEAD_KEY) or {}
-    now = time.time()
+def _prune_dead(raw, now, notes):
+    """(kept records, whether anything changed). Pure apart from appending log
+    lines to `notes`, so it can run inside a state.update callback."""
     models = {v.get("name"): v.get("model") for v in config.WATERFALL}
     kept, changed = {}, False
     for name, rec in raw.items():
@@ -191,7 +205,7 @@ def _dead_records_locked():
         if rec.get("model") != models.get(name):
             changed = True
             if rec["until"] > now:
-                logging.info("waterfall: %s's config changed; out of its dead-rung park", name)
+                notes.append(f"waterfall: {name}'s config changed; out of its dead-rung park")
             continue
         if rec["until"] + _DEAD_PARK_MAX <= now:
             changed = True
@@ -199,11 +213,9 @@ def _dead_records_locked():
         if rec["until"] <= now and not rec.get("back"):
             rec = dict(rec, back=True)
             changed = True
-            logging.info("waterfall: %s is out of its dead-rung park; back in the chain", name)
+            notes.append(f"waterfall: {name} is out of its dead-rung park; back in the chain")
         kept[name] = rec
-    if changed:
-        state.put(_DEAD_KEY, kept)
-    retval = kept
+    retval = (kept, changed)
     return retval
 
 
@@ -227,14 +239,25 @@ def _budget_parked():
     """Vendor -> expiry, with anything already expired dropped. Pruning on read
     is what makes a vendor come back: no timer, no background task -- the first
     turn after the window simply stops seeing it as parked."""
-    raw = state.get(_STATE_KEY) or {}
     now = time.time()
-    live = {name: until for name, until in raw.items()
-            if isinstance(until, (int, float)) and until > now}
-    if len(live) != len(raw):
-        state.put(_STATE_KEY, live)
-        for name in set(raw) - set(live):
-            logging.info("waterfall: %s is out of its park window; back in the chain", name)
+    dropped = []
+
+    def _prune(raw):
+        raw = raw or {}
+        live = {name: until for name, until in raw.items()
+                if isinstance(until, (int, float)) and until > now}
+        dropped.extend(set(raw) - set(live))
+        return live
+    # Prune and write back in one locked step, so a park landing in between is
+    # not overwritten by this thread's older copy (#363). Read-only when
+    # nothing expired: the common turn should not rewrite the file.
+    raw = state.get(_STATE_KEY) or {}
+    if any(not (isinstance(u, (int, float)) and u > now) for u in raw.values()):
+        live, _ = state.update(_STATE_KEY, _prune)
+    else:
+        live = dict(raw)
+    for name in dropped:
+        logging.info("waterfall: %s is out of its park window; back in the chain", name)
     retval = live
     return retval
 
@@ -398,9 +421,19 @@ def park(exc, deployment=""):
         return retval
     text = str(getattr(exc, "message", "") or str(exc))
     until, human = _park_until(text)
-    parked = dict(_budget_parked())
-    parked[name] = until
-    state.put(_STATE_KEY, parked)
+    _budget_parked()  # prune first, so the write below carries no expired entry
+
+    def _park(parked):
+        parked = dict(parked or {})
+        parked[name] = until
+        return parked
+    _, ok = state.update(_STATE_KEY, _park)  # one locked step: a concurrent park is not lost (#363)
+    if not ok:
+        # Nothing persisted, so a rebuilt router would still call it; say so
+        # rather than log a park that did not happen.
+        logging.error("waterfall: %s is out of budget but the park could not be recorded", name)
+        retval = None
+        return retval
     # The message can carry the failed request; never log it (#72 covers the
     # handlers, this keeps the vendor's prose out of the record entirely).
     logging.warning("waterfall: %s is out of budget; parked %s", name, human)
@@ -495,28 +528,44 @@ def kill(exc, deployment=""):
 
 
 def _kill_locked(name, reason, suggest, hint):
-    records = dict(_dead_records())
-    prior = records.get(name)
     now = time.time()
     parking = bool(config.BUDGET_PARK_SEC)
-    if prior and (prior["until"] > now or not parking):
-        # Dialled while parked (every rung parked, so the full chain is tried;
-        # or a call already in flight), or parking is off. Already announced.
+    model = next((v.get("model") for v in config.WATERFALL if v.get("name") == name), "")
+    notes, outcome = [], {}
+
+    def _kill(raw):
+        records, _ = _prune_dead(raw or {}, now, notes)
+        prior = records.get(name)
+        if prior and (prior["until"] > now or not parking):
+            # Dialled while parked (every rung parked, so the full chain is
+            # tried; or a call already in flight), or parking is off. Already
+            # announced.
+            outcome["again"] = True
+            return records
+        strikes = (prior.get("strikes") or 1) + 1 if prior else 1
+        window = min(_DEAD_PARK_FIRST * 2 ** (strikes - 1), _DEAD_PARK_MAX) if parking else 0
+        records[name] = {"until": now + window, "model": model, "reason": reason,
+                         "suggest": suggest, "told": False, "strikes": strikes,
+                         "back": not parking}  # nothing parked, so nothing to come back from
+        outcome["window"] = window
+        return records
+    # The whole read, decision and write in one state transaction (#363).
+    _, ok = state.update(_DEAD_KEY, _kill)
+    for line in notes:
+        logging.info(line)
+    if outcome.get("again"):
         logging.warning("waterfall: %s failed again and is still dead: %s", name, reason)
         retval = name
         return retval
-    model = next((v.get("model") for v in config.WATERFALL if v.get("name") == name), "")
-    strikes = (prior.get("strikes") or 1) + 1 if prior else 1
-    window = min(_DEAD_PARK_FIRST * 2 ** (strikes - 1), _DEAD_PARK_MAX) if parking else 0
-    records[name] = {"until": now + window, "model": model, "reason": reason,
-                     "suggest": suggest, "told": False, "strikes": strikes,
-                     "back": not parking}  # nothing parked, so nothing to come back from
-    state.put(_DEAD_KEY, records)
-    action = (f"skipping it for {_hours(window)}" if parking
-              else "not parking it (budget_park_sec is 0)")
+    if not ok:
+        action = "could not record it in the state file, so not parking it"
+    elif parking:
+        action = f"skipping it for {_hours(outcome['window'])}"
+    else:
+        action = "not parking it (budget_park_sec is 0)"
     logging.error("waterfall: DEAD RUNG %s (%s): %s%s; %s -- fix or remove it in the "
                   "waterfall config", name, model, reason, hint, action)
-    if parking:
+    if parking and ok:
         _invalidate()
     retval = name
     return retval
@@ -538,27 +587,40 @@ def claim_dead_notices():
 
 
 def _claim_locked():
-    records = dict(_dead_records())
     now = time.time()
-    lines = []
-    for name, rec in records.items():
-        if rec.get("told"):
-            continue
-        records[name] = dict(rec, told=True)
-        if not config.BUDGET_PARK_SEC:
-            action = "Parking is off, so it is still being tried"
-        elif rec["until"] > now:
-            action = f"Skipping it for {_hours(rec['until'] - now)}"
-        else:
-            action = "Its park has run out, so it is being tried again"
-        line = (f"\U0001F6A8 LLM rung **{name}** is dead: {rec.get('reason')}. "
-                f"{action}; fix or remove it in the waterfall config.")
-        if rec.get("suggest"):
-            line += f" The vendor suggests `{rec['suggest']}`."
-        lines.append(line)
-    if lines:
-        state.put(_DEAD_KEY, records)
-    retval = lines
+    notes, lines = [], []
+
+    def _claim(raw):
+        records, _ = _prune_dead(raw or {}, now, notes)
+        del lines[:]
+        for name, rec in records.items():
+            if rec.get("told"):
+                continue
+            records[name] = dict(rec, told=True)
+            if not config.BUDGET_PARK_SEC:
+                action = "Parking is off, so it is still being tried"
+            elif rec["until"] > now:
+                action = f"Skipping it for {_hours(rec['until'] - now)}"
+            else:
+                action = "Its park has run out, so it is being tried again"
+            line = (f"\U0001F6A8 LLM rung **{name}** is dead: {rec.get('reason')}. "
+                    f"{action}; fix or remove it in the waterfall config.")
+            if rec.get("suggest"):
+                line += f" The vendor suggests `{rec['suggest']}`."
+            lines.append(line)
+        return records
+    # Mark and claim in one state transaction: of two processes claiming at
+    # once, the second sees told=True and gets nothing (#363). Nothing to
+    # announce unless the mark landed, or a later claim would repeat it. Skip
+    # the write entirely when there is nothing unannounced.
+    pending = any(isinstance(r, dict) and not r.get("told")
+                  for r in (state.get(_DEAD_KEY) or {}).values())
+    retval = []
+    if pending:
+        _, ok = state.update(_DEAD_KEY, _claim)
+        for line in notes:
+            logging.info(line)
+        retval = list(lines) if ok else []
     return retval
 
 

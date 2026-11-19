@@ -10,6 +10,6 @@ logs/
 shmobster-config.json*
 shmobster-policies.json*
 deploy/ai.shmobster.plist
-shmobster-state.json
+shmobster-state.json*
 trajectories/
 .coverage

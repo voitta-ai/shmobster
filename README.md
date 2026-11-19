@@ -1077,8 +1077,10 @@ only the messages addressed to this one.
   stub and then the full text: ignored, the full text would never be answered,
   and an edit made mid-turn would be lost. An edit never approves, denies or
   asks `/help`; it passes the same closed-group gate and agent loop guard as
-  any message, and an edit to a message this agent did not take is ignored,
-  as is one to a message it answered more than two days earlier (Signal
+  any message. An edit is ignored when the agent did not take the message
+  as a turn (not addressed to it, refused by that gate or guard, or an
+  `approve`/`deny`/`/help`),
+  and so is one to a message it answered more than two days earlier (Signal
   allows edits for 24 hours).
 - **Policy.** A conversation's own entry applies; one with a `link` shares that
   Slack channel's policy (any other keys in it are ignored, with a boot

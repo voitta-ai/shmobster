@@ -908,11 +908,20 @@ def _run_turn(mid, started):
         try:
             for eid in folded:            # superseded: answered by this turn, never run on their own
                 _begin(eid, started)
-            if not data.get("edit_event"):
-                _took(mid)
-            _run(_guard, data.get("edit_event") or mid, started, _turn, data, data)
+            edit = data.get("edit_event")
+            _run(_guard, edit or mid, started, _turn if edit else _owned_turn, data, data)
+            if not edit and not _taken(mid):  # _guard refused it: its edits are not ours either
+                with _EDIT_LOCK:
+                    entry["refused"], entry["next"] = True, None
         except Exception:  # noqa: BLE001 -- the worker must reach the del above, or edits pile up
             logging.exception("gateway: a turn for %s failed", mid)
+
+
+def _owned_turn(data):
+    """The message's own turn, once _guard admitted it: from here on its edits are
+    this agent's to answer (a refused message's are not)."""
+    _took(data["message_id"])
+    _turn(data)
 
 
 def _queue_turn(mid, started, data):
@@ -942,7 +951,9 @@ def _edited(e, started):
     retval = None
     with _EDIT_LOCK:
         entry = _TURNS.get(mid)
-        if entry and entry["next"] is not None:     # a turn waits: it answers the newest text
+        if entry and entry.get("refused"):          # _guard refused the message: not ours
+            logging.info("gateway: ignoring an edit to a message this agent refused (%s)", eid)
+        elif entry and entry["next"] is not None:   # a turn waits: it answers the newest text
             waiting = entry["next"]
             waiting["parts"] = data.get("parts") or []
             waiting["mentions"] = data.get("mentions") or []
@@ -955,7 +966,7 @@ def _edited(e, started):
         elif entry:                                  # a turn runs: a follow-up after it
             entry["next"] = edit
             retval = entry["future"]
-        elif _taken(mid) or mid in started:          # answered: a follow-up now
+        elif _taken(mid):                            # answered: a follow-up now
             retval = _queue_turn(mid, started, edit)
         else:                                        # not a message this agent took: nothing to answer
             logging.info("gateway: ignoring an edit to a message this agent did not take (%s)", eid)

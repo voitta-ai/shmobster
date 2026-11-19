@@ -1066,6 +1066,22 @@ only the messages addressed to this one.
   conversation. The agent quotes the message, so a follow-up that quotes the
   answer comes back to this agent. Long answers are split to Signal's limit,
   and Markdown becomes Signal's bold, italic, strikethrough and monospace.
+- **Edits.** A message gets one turn. If it is edited before that turn starts
+  (still queued), the turn answers the edited text. If it is edited once the
+  turn has started or finished, the edit is answered as a follow-up turn that
+  quotes the message and tells the model it is an edit of something already
+  answered. A message's turns run one at a time, in order: an edit made while
+  one runs waits for it to end, and edits that pile up while a turn waits
+  collapse into one, on the latest text. A follow-up
+  rather than ignoring the edit, because the usual edit is a sender posting a
+  stub and then the full text: ignored, the full text would never be answered,
+  and an edit made mid-turn would be lost. An edit never approves, denies or
+  asks `/help`; it passes the same closed-group gate and agent loop guard as
+  any message. An edit is ignored when the agent did not take the message
+  as a turn (not addressed to it, refused by that gate or guard, or an
+  `approve`/`deny`/`/help`),
+  and so is one to a message it answered more than two days earlier (Signal
+  allows edits for 24 hours).
 - **Policy.** A conversation's own entry applies; one with a `link` shares that
   Slack channel's policy (any other keys in it are ignored, with a boot
   warning). A conversation with no entry, or an entry holding only `mirror`,

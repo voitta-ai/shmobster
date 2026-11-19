@@ -684,6 +684,9 @@ def _turn(data):
     _CONVERSATIONS[channel] = data["conversation_id"]
     surface = GatewaySurface(medium)
     text = _text(data, files=False)
+    edit = data.get("edit_event")         # a follow-up for an edit to a message already taken (#404)
+    if edit:
+        text = "[They edited a message you already answered (the quoted one); it now reads:]\n" + text
     # The message's files, read the way slack_app reads Slack's (#413): same caps,
     # same content parts, same save rules, fetched from the gateway.
     _remember_files(channel, _files(data))
@@ -701,7 +704,8 @@ def _turn(data):
     except Exception as exc:  # one short line; the exception goes to the log only (#352)
         logging.exception("gateway: handler failed: channel=%s message=%s", channel, data["message_id"])
         reply = handler.failure_line(exc)
-    send(channel, reply, reply_to=data["message_id"], key=f"reply:{data['message_id']}")
+    key = f"reply:{data['message_id']}" + (f":{edit}" if edit else "")
+    send(channel, reply, reply_to=data["message_id"], key=key)
     _post_pending(channel, surface)
     mirror_out(channel, identity.handle(user), text, reply)
 
@@ -833,12 +837,15 @@ _STARTED_MAX = 500
 _STARTED_LOCK = threading.Lock()
 
 
-def _begin(mid, started):
+def _begin(mid, started, folded=()):
     """Record that this message's turn is starting, before anything runs. A turn
     that began is never run again after a restart -- not even one that ended the
-    process -- while one still waiting in the queue is (#386 review)."""
+    process -- while one still waiting in the queue is (#386 review). `folded` are
+    edit ids whose text this turn carries (#404): saved in the same write, so no
+    crash leaves one recorded without the turn that answers it."""
     with _STARTED_LOCK:                   # append and save together: no older copy saved last
         started.append(mid)
+        started.extend(folded)
         del started[:-_STARTED_MAX]
         state.put(_STARTED, list(started))
 
@@ -846,6 +853,155 @@ def _begin(mid, started):
 def _run(fn, mid, started, *args):
     _begin(mid, started)
     _guarded(fn, *args)
+
+
+# ---------------------------------------------------------------- edits (#404)
+# Some senders post a stub and edit the full text in. Every turn for one message
+# -- its own and any follow-up for an edit -- runs on one worker, one after the
+# other, so two never overlap or answer out of order. A turn still waiting takes
+# the newest text: an edit before the message's turn starts replaces what it
+# answers, and edits after it has begun collapse into one follow-up quoting the
+# message, on the latest text, after the turn under way ends. Never an approval
+# or /help.
+
+_EDIT_LOCK = threading.Lock()
+# The messages this agent took, by when their turn began, so a later edit is known
+# to be ours. Separate from `gateway_started` (event-id dedupe, capped by count)
+# and kept by age instead: Signal allows edits for 24 hours, so two days covers it.
+_ANSWERED = "gateway_answered"
+_ANSWERED_TTL = 2 * 86400
+_ANSWERED_LOCK = threading.Lock()
+
+
+def _answered():
+    """Under _ANSWERED_LOCK: the saved record, its well-formed entries only. Anything
+    else saved there reads as empty, and the next write replaces it."""
+    retval = _clean(state.get(_ANSWERED))
+    return retval
+
+
+def _clean(raw):
+    """The well-formed entries of a saved answered record; anything else is empty."""
+    retval = ({k: t for k, t in raw.items()
+               if isinstance(k, str) and isinstance(t, (int, float)) and not isinstance(t, bool)}
+              if isinstance(raw, dict) else {})
+    return retval
+
+
+def _took(mid):
+    """Record that this message's own turn began; drop records past the window.
+    Bookkeeping only: a failure is logged and never stops the turn."""
+    try:
+        now = time.time()
+        def _add(raw):
+            kept = {k: t for k, t in _clean(raw).items() if now - t < _ANSWERED_TTL}
+            kept[mid] = now
+            return kept
+        with _ANSWERED_LOCK:
+            # One locked read-modify-write, across processes too (#363).
+            _, saved = state.update(_ANSWERED, _add)
+        if not saved:
+            logging.error("gateway: could not save %s as answered; an edit after its turn will be ignored", mid)
+    except Exception:  # noqa: BLE001
+        logging.exception("gateway: could not record %s as answered", mid)
+
+
+def _taken(mid):
+    """Whether this agent answered the message within the edit window; False
+    when the record cannot be read."""
+    try:
+        with _ANSWERED_LOCK:
+            t = _answered().get(mid)
+        retval = t is not None and time.time() - t < _ANSWERED_TTL
+    except Exception:  # noqa: BLE001
+        logging.exception("gateway: could not read the answered record")
+        retval = False
+    return retval
+# message id -> {"next": the turn waiting (data) or None while one runs and none
+# waits, "folded": edit event ids it absorbed, "future"}; gone once idle
+_TURNS = {}
+
+
+def _run_turn(mid, started):
+    """Run the message's waiting turn, then whatever was queued behind it, in order."""
+    while True:
+        with _EDIT_LOCK:
+            entry = _TURNS[mid]
+            data, folded = entry["next"], entry["folded"]
+            if data is None:
+                del _TURNS[mid]           # idle: an edit from now on starts a new follow-up
+                return
+            entry["next"], entry["folded"] = None, []
+        try:
+            edit = data.get("edit_event")
+            # The turn and the edits it absorbed are recorded in one write
+            _begin(edit or mid, started, folded)
+            _guarded(_guard, _turn if edit else _owned_turn, data, data)
+            if not edit and not entry.get("admitted"):   # _guard refused it: its edits are not ours either
+                with _EDIT_LOCK:
+                    entry["refused"], entry["next"] = True, None
+        except Exception:  # noqa: BLE001 -- the worker must reach the del above, or edits pile up
+            logging.exception("gateway: a turn for %s failed", mid)
+
+
+def _owned_turn(data):
+    """The message's own turn, once _guard admitted it: from here on its edits are
+    this agent's to answer (a refused message's are not). Admission is kept in
+    memory for the edits queued meanwhile; the saved record is for later ones."""
+    mid = data["message_id"]
+    with _EDIT_LOCK:
+        _TURNS[mid]["admitted"] = True
+    _took(mid)
+    _turn(data)
+
+
+def _queue_turn(mid, started, data):
+    """Under _EDIT_LOCK: queue a turn for a message with no worker yet."""
+    entry = _TURNS[mid] = {"next": data, "folded": []}
+    entry["future"] = retval = _pool.submit(_run_turn, mid, started)
+    return retval
+
+
+def _submit_turn(mid, started, data):
+    with _EDIT_LOCK:
+        retval = _queue_turn(mid, started, data)
+    return retval
+
+
+def _edited(e, started):
+    """Handle a `message.edited` event; the future its ack waits on, or None."""
+    data, eid = e["data"], e.get("id")
+    mid = data.get("message_id")
+    if not (isinstance(mid, str) and isinstance(eid, str)) or eid in started or not _first_time(eid):
+        return None
+    medium = str(e.get("source") or "").rpartition("/")[2] or "gateway"   # source is /gateway/<medium>
+    edit = {**data, "channel": data.get("channel") or medium, "edit_event": eid}
+    if _approval(edit) or _help(edit):    # an edit is not a way to approve, deny or ask /help
+        logging.info("gateway: not acting on an edit that reads as a command (%s)", eid)
+        return None
+    retval = None
+    with _EDIT_LOCK:
+        entry = _TURNS.get(mid)
+        if entry and entry.get("refused"):          # _guard refused the message: not ours
+            logging.info("gateway: ignoring an edit to a message this agent refused (%s)", eid)
+        elif entry and entry["next"] is not None:   # a turn waits: it answers the newest text
+            waiting = entry["next"]
+            waiting["parts"] = data.get("parts") or []
+            waiting["mentions"] = data.get("mentions") or []
+            if waiting.get("edit_event"):            # a waiting follow-up now answers this edit
+                entry["folded"].append(waiting["edit_event"])
+                waiting["edit_event"] = eid
+            else:                                    # the message's own turn absorbs it
+                entry["folded"].append(eid)
+            retval = entry["future"]
+        elif entry:                                  # a turn runs: a follow-up after it
+            entry["next"] = edit
+            retval = entry["future"]
+        elif _taken(mid):                            # answered: a follow-up now
+            retval = _queue_turn(mid, started, edit)
+        else:                                        # not a message this agent took: nothing to answer
+            logging.info("gateway: ignoring an edit to a message this agent did not take (%s)", eid)
+    return retval
 
 
 def _loop():
@@ -865,7 +1021,8 @@ def _loop():
                 acked = fetched
             if acked != state.get(_CURSOR):
                 state.put(_CURSOR, acked)     # persisting the cursor is the ack (gateway README)
-            q = urllib.parse.urlencode({"after": fetched, "wait": 25, "types": "message.received"})
+            q = urllib.parse.urlencode({"after": fetched, "wait": 25,
+                                        "types": "message.received,message.edited"})
             body = _call("GET", f"/v1/events/poll?{q}", timeout=40)
             if not isinstance(body, dict):
                 raise ValueError("poll answered with something other than an object")
@@ -883,7 +1040,9 @@ def _loop():
                     elif (help_in := _help(data)):   # no model: the same lane, it is as quick
                         fut = _approvals_pool.submit(_run, _guard, mid, started, _describe, data, help_in, mid)
                     else:
-                        fut = _pool.submit(_run, _guard, mid, started, _turn, data, data)
+                        fut = _submit_turn(mid, started, data)
+                elif e.get("type") == "ai.voitta.message.edited.v1":
+                    fut = _edited(e, started)
                 if isinstance(e.get("id"), str):
                     inflight.append((e["id"], fut))
             if isinstance(body.get("next"), str):

@@ -77,12 +77,10 @@ def compile_terms(path):
                 if len(words) > 1:
                     variants |= {sep.join(words) for sep in ("", "_", "-", " ")}
             for variant in variants:
-                try:
-                    retval.append(re.compile(_posix(variant), re.IGNORECASE))
-                except re.error:
-                    # grep -E and Python regex differ at the edges; a term
-                    # Python cannot compile still counts, as a literal.
-                    retval.append(re.compile(re.escape(variant), re.IGNORECASE))
+                # A term that does not compile is a broken rule, not a
+                # literal: re.error propagates and the scan exits 2, as
+                # grep -E does on a bad pattern.
+                retval.append(re.compile(_posix(variant), re.IGNORECASE))
     return retval
 
 

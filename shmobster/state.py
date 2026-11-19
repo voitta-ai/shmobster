@@ -32,6 +32,10 @@ _LOCK = threading.RLock()
 _DEPTH = 0
 
 
+class _Unlocked(Exception):
+    """The interprocess lock could not be taken; the write is refused."""
+
+
 @contextlib.contextmanager
 def _locked():
     """The thread lock plus an flock on `<state>.lock`, held around a whole
@@ -39,7 +43,9 @@ def _locked():
     sharing the file (a second instance, or the old process still finishing
     during a restart) would otherwise each rename their own copy and the last
     one wins, losing the other's key. Readers stay lock-free. Reentrant within
-    a thread: only the outermost entry takes the flock."""
+    a thread: only the outermost entry takes the flock. Fails closed: when the
+    lock file cannot be opened or locked, raises _Unlocked and nothing is
+    written -- an unguarded write is exactly the lost update this prevents."""
     global _DEPTH
     with _LOCK:
         fd = None
@@ -48,10 +54,10 @@ def _locked():
                 fd = os.open(f"{_PATH}.lock", os.O_RDWR | os.O_CREAT, 0o600)
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError:
-                logging.exception("state: could not lock %s.lock; other processes unguarded", _PATH)
+                logging.exception("state: could not lock %s.lock; not writing", _PATH)
                 if fd is not None:
                     os.close(fd)
-                fd = None
+                raise _Unlocked() from None
         _DEPTH += 1
         try:
             yield
@@ -115,22 +121,29 @@ def update(key, fn, default=None):
     value (or `default`) and returns the new one, which is written. Use this,
     not get() then put(), whenever the new value is derived from the old --
     otherwise two concurrent callers each write their own copy and one update
-    is lost. Returns (new value, True on a successful write)."""
-    with _locked():
-        data = read()
-        value = fn(data.get(key, default))
-        data[key] = value
-        ok = _save(data)
+    is lost. Returns (new value, True on a successful write); when the lock
+    cannot be taken, `fn` is not called and this returns (current value, False)."""
+    try:
+        with _locked():
+            data = read()
+            value = fn(data.get(key, default))
+            data[key] = value
+            ok = _save(data)
+    except _Unlocked:
+        value, ok = get(key, default), False
     retval = (value, ok)
     return retval
 
 
 def put(key, value):
     """Merge one key into the file. Returns True on a successful write."""
-    with _locked():
-        data = read()
-        data[key] = value
-        retval = _save(data)
+    try:
+        with _locked():
+            data = read()
+            data[key] = value
+            retval = _save(data)
+    except _Unlocked:
+        retval = False
     return retval
 
 

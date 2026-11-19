@@ -1341,14 +1341,16 @@ try:
     config.WATERFALL = [
         {"name": "primary-v", "model": "openai/gpt-4o", "api_key": "k"},
         {"name": "fallback-v", "model": "gemini/gemini-flash-latest", "api_key": "k"},
+        {"name": "fallback-w", "model": "openrouter/openai/gpt-4o", "api_key": "k"},
     ]
     llm._invalidate()
     _router = llm._build()
     _names = [m["model_name"] for m in _router.model_list]
-    assert _names == ["primary", "fb0"], _names
+    assert _names == ["primary", "fb0", "fb1"], _names
     # the fallback wiring is positional, and a rename here is a silent
-    # single-vendor waterfall rather than an error
-    assert _router.fallbacks == [{"primary": ["fb0"]}], _router.fallbacks
+    # single-vendor waterfall rather than an error. The chain starts at fb0:
+    # complete() asks the primary alone first (#351).
+    assert _router.fallbacks == [{"fb0": ["fb1"]}], _router.fallbacks
     # the failure callback is what parks a vendor (#80); it hangs off litellm's
     # global callback list, so the base class has to keep resolving
     llm._watch()

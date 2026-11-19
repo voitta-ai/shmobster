@@ -422,8 +422,11 @@ def draft(name, why, channel, thread_ts):
     ]
     try:
         text = (llm.complete(messages).content or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        retval = (None, f"draft failed: {exc}")
+    except Exception:  # noqa: BLE001
+        # The error goes to the log only (#351, #352): a router failure's text
+        # is the whole multi-provider dump, and this line lands in the channel.
+        logging.exception("learning: drafting %s failed", name)
+        retval = (None, "the language model call failed; the details are in my log")
         return retval
     found = _skill_text(text)
     if found is None:

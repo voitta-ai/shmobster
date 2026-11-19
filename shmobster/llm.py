@@ -424,7 +424,13 @@ def park(exc, deployment=""):
         parked = dict(parked or {})
         parked[name] = until
         return parked
-    state.update(_STATE_KEY, _park)  # one locked step: a concurrent park is not lost (#363)
+    _, ok = state.update(_STATE_KEY, _park)  # one locked step: a concurrent park is not lost (#363)
+    if not ok:
+        # Nothing persisted, so a rebuilt router would still call it; say so
+        # rather than log a park that did not happen.
+        logging.error("waterfall: %s is out of budget but the park could not be recorded", name)
+        retval = None
+        return retval
     # The message can carry the failed request; never log it (#72 covers the
     # handlers, this keeps the vendor's prose out of the record entirely).
     logging.warning("waterfall: %s is out of budget; parked %s", name, human)

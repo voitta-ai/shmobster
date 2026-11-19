@@ -18,7 +18,26 @@ also matches as one identifier: `SeedsOfFog`, `seeds_of_fog`, `seeds-of-fog`.
 import os
 import re
 import sys
+import warnings
 
+
+
+# Terms are documented as grep -E patterns. POSIX bracket classes mean nothing
+# to Python ("[[:digit:]]" is a set of the characters ":digt" plus a warning),
+# so translate the ones grep users write; any other construct Python would
+# read differently warns, and that warning is made an error (exit 2) instead
+# of a pattern that silently matches something else.
+_POSIX = {
+    "[:digit:]": "0-9", "[:alpha:]": "A-Za-z", "[:alnum:]": "A-Za-z0-9",
+    "[:upper:]": "A-Z", "[:lower:]": "a-z", "[:space:]": r"\s",
+    "[:blank:]": r" \t", "[:xdigit:]": "0-9A-Fa-f",
+}
+
+
+def _posix(pattern):
+    for cls, py in _POSIX.items():
+        pattern = pattern.replace(cls, py)
+    return pattern
 
 def boundary_ok(text, start, end):
     """Start: beginning of text, a non-alphanumeric before it, or the match
@@ -55,7 +74,7 @@ def compile_terms(path):
                     variants |= {sep.join(words) for sep in ("", "_", "-", " ")}
             for variant in variants:
                 try:
-                    retval.append(re.compile(variant, re.IGNORECASE))
+                    retval.append(re.compile(_posix(variant), re.IGNORECASE))
                 except re.error:
                     # grep -E and Python regex differ at the edges; a term
                     # Python cannot compile still counts, as a literal.
@@ -103,6 +122,7 @@ def main(argv):
 if __name__ == "__main__":
     # An uncaught exception exits 1, the code for "matches", and prints none:
     # the caller would read it as a clean scan. Any failure here is exit 2.
+    warnings.simplefilter("error", FutureWarning)
     try:
         sys.exit(main(sys.argv))
     except Exception as e:

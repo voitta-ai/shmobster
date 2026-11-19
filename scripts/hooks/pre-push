@@ -41,19 +41,30 @@ fi
 # <remote sha>. A new branch has an all-zero remote sha; its commits are the
 # ones not already on any remote branch.
 remote="${1:-}"
+# What the destination has now, from the server itself rather than local
+# remote-tracking refs, which can be stale (a branch deleted or rewound there
+# would otherwise vouch for commits the server no longer has). Only commits
+# present locally can be excluded.
+published=""
+if [ -n "$remote" ]; then
+    for sha in $(git ls-remote "$remote" 2>/dev/null | awk '{print $1}' | sort -u); do
+        git cat-file -e "$sha^{commit}" 2>/dev/null && published="$published $sha"
+    done
+fi
 msgs="$(mktemp)"
 trap 'rm -f "$msgs"' EXIT
 zero="0000000000000000000000000000000000000000"
 while read -r _lref lsha _rref rsha; do
     [ "$lsha" = "$zero" ] && continue   # a delete pushes no commits
-    # Only commits the destination remote does not have yet: after merging
-    # master into a branch, "$rsha..$lsha" also lists every master commit the
-    # merge brought in, whose messages are already public there. Exclude only
-    # that remote's refs -- a commit another remote (a private one) has seen
-    # is still new to this one. A push to a bare URL has no tracking refs, so
-    # it keeps the old ranges.
-    if [ -n "$remote" ] && git remote | grep -qxF "$remote"; then
-        git log --format=%B "$lsha" --not --remotes="$remote" >> "$msgs"
+    # Only commits the destination does not have yet: after merging master
+    # into a branch, "$rsha..$lsha" also lists every master commit the merge
+    # brought in, whose messages are already public there. Exclude only what
+    # the destination advertises -- a commit another remote (a private one)
+    # has seen is still new to this one. If the destination can't be listed,
+    # keep the old ranges.
+    if [ -n "$remote" ] && [ -n "$published" ]; then
+        # shellcheck disable=SC2086
+        git log --format=%B "$lsha" --not $published >> "$msgs"
     elif [ "$rsha" = "$zero" ]; then
         git log --format=%B "$lsha" --not --remotes >> "$msgs"
     else

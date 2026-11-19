@@ -40,15 +40,40 @@ fi
 # git hands pre-push one line per ref: <local ref> <local sha> <remote ref>
 # <remote sha>. A new branch has an all-zero remote sha; its commits are the
 # ones not already on any remote branch.
+remote="${1:-}"
+# What the destination has now, from the server itself rather than local
+# remote-tracking refs, which can be stale (a branch deleted or rewound there
+# would otherwise vouch for commits the server no longer has). Only commits
+# present locally can be excluded.
+published=""
+listed=0
+if [ -n "$remote" ] && refs="$(git ls-remote "$remote" 2>/dev/null)"; then
+    listed=1
+    for sha in $(printf '%s\n' "$refs" | awk 'NF {print $1}' | sort -u); do
+        git cat-file -e "$sha^{commit}" 2>/dev/null && published="$published $sha"
+    done
+fi
 msgs="$(mktemp)"
 trap 'rm -f "$msgs"' EXIT
 zero="0000000000000000000000000000000000000000"
 while read -r _lref lsha _rref rsha; do
     [ "$lsha" = "$zero" ] && continue   # a delete pushes no commits
-    if [ "$rsha" = "$zero" ]; then
-        git log --format=%B "$lsha" --not --remotes >> "$msgs"
-    else
+    # Only commits the destination does not have yet: after merging master
+    # into a branch, "$rsha..$lsha" also lists every master commit the merge
+    # brought in, whose messages are already public there. Exclude only what
+    # the destination advertises -- a commit another remote (a private one)
+    # has seen is still new to this one. If the destination can't be listed,
+    # an update to an existing branch falls back to the range git reports for
+    # it; a new branch is refused rather than guessed.
+    if [ "$listed" -eq 1 ]; then
+        # An empty destination advertises nothing, so everything is new to it.
+        # shellcheck disable=SC2086
+        git log --format=%B "$lsha" --not $published >> "$msgs"
+    elif [ "$rsha" != "$zero" ]; then
         git log --format=%B "$rsha..$lsha" >> "$msgs"
+    else
+        echo "pre-push: refused. Could not list $remote to tell which commits are new to it." >&2
+        exit 1
     fi
 done
 if [ -s "$msgs" ] && ! bash scripts/check-sensitive-terms.sh "$msgs"; then

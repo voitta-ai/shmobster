@@ -41,7 +41,6 @@ from .surface import Surface
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
 _CURSOR = "gateway_cursor"  # the poll position, persisted on every page (state.py)
 _HISTORY = 25
-_CARD_TRIES = 3
 # Only for command output now; cards are bounded by _card_command below.
 _CARD_COMMAND_MAX = 20000
 _APPROVAL = re.compile(r"^\s*(approve|deny)\s+\[?([\w-]+)\]?\s*[.!]?\s*$", re.IGNORECASE)
@@ -796,11 +795,26 @@ def _post_pending(channel, surface):
             proposals.unsurface(key)
 
 
+def _retry_cards(channel, surface):
+    try:
+        _post_pending(channel, surface)
+    except Exception:
+        logging.exception("gateway: could not retry the cards in %s", channel)
+
+
 def _card_failed(channel, req_id, surface, rejected=False):
-    """A card did not post: retry on the next turn when the failure may pass,
-    up to _CARD_TRIES; withdraw it when the gateway refused it or the retries
-    ran out, as slack_app does (#356), so it cannot hold the thread."""
-    if not rejected and approvals.unsurface(req_id) < _CARD_TRIES:
+    """A card did not post: retry on a later turn when the failure may pass,
+    with approvals.unsurface()'s backoff; withdraw it when the gateway refused
+    it or it kept failing past that, as slack_app does (#356, #376), so it
+    cannot hold the thread."""
+    if not rejected and approvals.unsurface(req_id):
+        # Retried when the backoff ends, not only on the next message (#376);
+        # see slack_app._schedule_retry. claim_unsurfaced() keeps it single.
+        delay = approvals.retry_delay(req_id)
+        if delay is not None:
+            timer = threading.Timer(delay + 1, _retry_cards, args=(channel, surface))
+            timer.daemon = True
+            timer.start()
         return
     if approvals.withdraw(req_id) is None:
         return

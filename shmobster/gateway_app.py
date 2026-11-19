@@ -876,7 +876,12 @@ _ANSWERED_LOCK = threading.Lock()
 def _answered():
     """Under _ANSWERED_LOCK: the saved record, its well-formed entries only. Anything
     else saved there reads as empty, and the next write replaces it."""
-    raw = state.get(_ANSWERED)
+    retval = _clean(state.get(_ANSWERED))
+    return retval
+
+
+def _clean(raw):
+    """The well-formed entries of a saved answered record; anything else is empty."""
     retval = ({k: t for k, t in raw.items()
                if isinstance(k, str) and isinstance(t, (int, float)) and not isinstance(t, bool)}
               if isinstance(raw, dict) else {})
@@ -888,10 +893,13 @@ def _took(mid):
     Bookkeeping only: a failure is logged and never stops the turn."""
     try:
         now = time.time()
-        with _ANSWERED_LOCK:
-            kept = {k: t for k, t in _answered().items() if now - t < _ANSWERED_TTL}
+        def _add(raw):
+            kept = {k: t for k, t in _clean(raw).items() if now - t < _ANSWERED_TTL}
             kept[mid] = now
-            saved = state.put(_ANSWERED, kept)
+            return kept
+        with _ANSWERED_LOCK:
+            # One locked read-modify-write, across processes too (#363).
+            _, saved = state.update(_ANSWERED, _add)
         if not saved:
             logging.error("gateway: could not save %s as answered; an edit after its turn will be ignored", mid)
     except Exception:  # noqa: BLE001

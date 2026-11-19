@@ -131,10 +131,15 @@ _FULL_COMMAND_MAX = 39000
 
 def _post_full_command(client, channel, thread_ts, req_id, command):
     """Post a command too long for its card as a plain thread reply and return
-    its permalink, or None. Message text has no 3000-character block cap, and
-    this needs only `chat:write` -- a file upload would need `files:write`,
-    which the manifest leaves out on purpose. Never raises: the card must post
-    whether or not this did.
+    its permalink, or None when the reply posted but no permalink came back.
+    Message text has no 3000-character block cap, and this needs only
+    `chat:write` -- a file upload would need `files:write`, which the manifest
+    leaves out on purpose.
+
+    Raises when the reply itself did not post (#376 review). The card points
+    the approver at this reply, so a card without it would offer Approve on a
+    command nobody can read in full or copy; the caller treats it as the
+    card's own failure, and the pair is retried together.
 
     Encoded like the card (#376), and past Slack's cap the label says so: a
     reply called "Full command" that is not the full command is the one thing
@@ -159,12 +164,13 @@ def _post_full_command(client, channel, thread_ts, req_id, command):
                             f"{slack_blocks.escape(shown)}"), "mrkdwn": False}
     else:
         message = {"text": f"{label}\n{slack_blocks.code_block(shown)}"}
+    resp = client.chat_postMessage(channel=channel, thread_ts=thread_ts, **message)
     retval = None
     try:
-        resp = client.chat_postMessage(channel=channel, thread_ts=thread_ts, **message)
         retval = client.chat_getPermalink(channel=channel, message_ts=resp["ts"]).get("permalink") or None
     except Exception:
-        logging.exception("could not post the full command for %s", req_id)
+        # Posted, only not linkable: the card says to look in the thread.
+        logging.exception("could not link the full command for %s", req_id)
     return retval
 
 
@@ -270,12 +276,16 @@ def _card_failed(client, channel, thread_ts, req_id, exc):
 def _post_pending(client, channel, thread_ts):
     """Render any newly parked commands as button messages in this thread."""
     for req_id, req in approvals.claim_unsurfaced(channel, thread_ts):
-        # Kept on the request so a retried card does not post the command
-        # twice, and so any later rendering of this card links the same reply.
-        # Also for one that fits but cannot be shown copy-safe on the card (#376).
-        if slack_blocks.needs_full_reply(req["command"]) and not req.get("full_link"):
-            req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
         try:
+            # Also for one that fits but cannot be shown copy-safe on the card
+            # (#376). Inside the try: a reply that did not post fails the card
+            # with it (#376 review), so no card ever points at a missing reply.
+            # `full_posted` is kept on the request so a retry after a card
+            # failure does not post the reply twice, and any later rendering
+            # of this card links the same one.
+            if slack_blocks.needs_full_reply(req["command"]) and not req.get("full_posted"):
+                req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
+                req["full_posted"] = True
             client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,

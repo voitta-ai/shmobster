@@ -113,13 +113,24 @@ def _resolve(host):
     return (pinned, "")
 
 
+_MAX_ADDRESSES = 4            # records tried before giving up
+
+
 def _connect(addresses, port, timeout, source_address):
     """A socket to the first of the checked addresses that answers, the way
-    `socket.create_connection` falls back across the records of a name."""
-    err = None
-    for addr in addresses:
+    `socket.create_connection` falls back across the records of a name -- but
+    within one deadline for all of them, and over the first few only. A name
+    can return any number of public, blackholed records, and a full timeout
+    per record would let a page's owner hold the turn for as long as it likes."""
+    budget = timeout if isinstance(timeout, (int, float)) else _TIMEOUT
+    deadline = time.monotonic() + budget
+    err = OSError(f"no address answered within {budget}s")
+    for addr in addresses[:_MAX_ADDRESSES]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            return socket.create_connection((addr, port), timeout, source_address)
+            return socket.create_connection((addr, port), remaining, source_address)
         except OSError as exc:
             err = exc
     raise err

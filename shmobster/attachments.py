@@ -92,16 +92,21 @@ def _fetch(url):
 
 # What the model is told about an attached image (#437). A bare image part left
 # the model to guess, and it guessed from its own earlier "I cannot read
-# images" in the thread. The text-only rung (codex_llm) drops the pixels, so it
-# swaps each SHOWN wording for its NOT SHOWN twin: telling a model that gets no
-# image that it can see one would have it invent a description.
-IMAGE_SHOWN = " -- shown to you directly below; you can see it]"
+# images" in the thread. The wording says the image was SENT, not that the
+# model can see it: some routes accept the image and silently drop it (README,
+# "image dropped; confidently names a colour anyway"), and telling such a route
+# it can see pixels it never got would push it to invent them. The text-only
+# rung (codex_llm) is known to drop them, so it swaps each SENT wording for its
+# NOT SHOWN twin.
+IMAGE_SENT = " -- sent to you as an image, below]"
 IMAGE_NOT_SHOWN = (" -- NOT shown to you: the model answering now is text-only; do not "
                    "describe or guess at it]")
-IMAGES_SHOWN = ("## Attached images\nThe images attached to this message are shown to "
-                "you directly, and you can see them. Describe what you see. If an "
-                "earlier answer in this conversation said you could not read images, "
-                "that was before image attachments reached you; do not repeat it.")
+IMAGES_SENT = ("## Attached images\nThe images attached to this message were sent to "
+               "you as image input. If you can see them, describe what you see. If "
+               "you cannot, say so plainly and do not guess at their content. An "
+               "earlier answer in this conversation saying you could not read images "
+               "was written before image attachments reached the model; it is no "
+               "evidence either way, so judge from what you were given now.")
 IMAGES_NOT_SHOWN = ("## Attached images\nThe images attached to this message were NOT "
                     "shown to you: the model answering now is text-only. Say you cannot "
                     "see them this time, and do not describe or guess at their content.")
@@ -319,7 +324,7 @@ def to_parts(files, save_under=None, no_save=None, source=slack_source):
             notes.append(f"{name}: larger than the {_MAX_BYTES} byte cap")
             continue
         if mime.startswith("image/"):
-            parts.append({"type": "text", "text": f"[attached image: {name}{IMAGE_SHOWN}"})
+            parts.append({"type": "text", "text": f"[attached image: {name}{IMAGE_SENT}"})
         parts.append(_part(name, mime, blob))
         if no_save:
             parts.append(_unsaved(name, no_save))

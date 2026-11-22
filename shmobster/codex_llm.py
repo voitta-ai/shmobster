@@ -196,8 +196,8 @@ def _text_of(content):
     else:
         retval = str(content)
     # The pixels never reach this rung, so neither may the claim that they do.
-    retval = (retval.replace(attachments.IMAGE_SHOWN, attachments.IMAGE_NOT_SHOWN)
-                    .replace(attachments.IMAGES_SHOWN, attachments.IMAGES_NOT_SHOWN))
+    retval = (retval.replace(attachments.IMAGE_SENT, attachments.IMAGE_NOT_SHOWN)
+                    .replace(attachments.IMAGES_SENT, attachments.IMAGES_NOT_SHOWN))
     return retval
 
 

@@ -284,7 +284,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         # After the thread, so it is the last word on the subject (#437): an
         # answer in that history saying you could not read images was true
         # when it was written and is not now.
-        system += "\n\n" + attachments_mod.IMAGES_SHOWN
+        system += "\n\n" + attachments_mod.IMAGES_SENT
     # A plain string when there's nothing attached -- multimodal content lists
     # are the exception, and not every vendor in the waterfall accepts one.
     # ponytail: if a fallback rejects images the Router just moves on; add a

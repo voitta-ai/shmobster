@@ -625,10 +625,33 @@ def host_of_url(url):
 def host_allowed(host, policy):
     """Is this host in the channel's `allow_domains` (#149)?
 
-    One rule, two callers: the textual guard over a shell command, and the
-    web_fetch tool (#62). A second copy of the matching would be a second
-    answer to "may this channel reach that host", and the two would drift."""
-    allowed = [p.lower() for p in (policy.get("allow_domains") or [])]
+    The shell's answer: every route that fetches from a command line asks
+    this. `web_fetch` asks `read_allowed`, which falls back to this same list
+    and the same matching when a policy sets no `read_domains` (#62, #434)."""
+    retval = _matches(host, policy.get("allow_domains"))
+    return retval
+
+
+def read_key(policy):
+    """The policy key that decides which hosts `web_fetch` may read (#434):
+    `read_domains` when the policy sets it, even to an empty list, else
+    `allow_domains`, so a policy that never names it behaves as before."""
+    retval = "read_domains" if "read_domains" in (policy or {}) else "allow_domains"
+    return retval
+
+
+def read_allowed(host, policy):
+    """May `web_fetch` read this host (#434)? A separate list from the shell's,
+    because the two routes are not equally dangerous: `web_fetch` refuses
+    inward addresses, connects to the address it checked, follows no redirect
+    and sends no body, while a shell `curl` does none of that. Only
+    `web_fetch` reads this; every shell route stays on `host_allowed`."""
+    retval = _matches(host, (policy or {}).get(read_key(policy)))
+    return retval
+
+
+def _matches(host, patterns):
+    allowed = [p.lower() for p in (patterns or [])]
     retval = any(fnmatch.fnmatch((host or "").lower(), pat) for pat in allowed)
     return retval
 

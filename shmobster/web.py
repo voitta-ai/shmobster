@@ -2,11 +2,18 @@
 
 The shell route already exists and is gated: `curl` is read-only to YOLT, so
 #149 demoted a fetch to mutating unless every host it names is in the channel's
-`allow_domains`. This is the same capability with a tool-shaped front door --
-it obeys the same list, through the same function, so there is one answer to
-"may this channel reach that host" rather than two that drift.
+`allow_domains`. This is the same capability with a tool-shaped front door. It
+reads `read_domains` when the policy sets one and `allow_domains` otherwise
+(`policy.read_allowed`, #434), with the same matching either way.
 
-Three things it does that `curl` in a shell does not:
+The separate list exists because the two routes are not equally dangerous. A
+channel may want to read any public page somebody pastes without opening its
+shell to every host: a `curl` reaches loopback and LAN services by name, picks
+up credentials from places a text check has to enumerate, and can send a body.
+This tool does none of that, so `"read_domains": ["*"]` is a reasonable setting
+where `"allow_domains": ["*"]` is not.
+
+Four things it does that `curl` in a shell does not:
 
 **It refuses to be pointed inward.** A hostname is resolved before the request
 and refused if it lands on loopback, link-local, or private space. That is the
@@ -24,20 +31,30 @@ instead, for the model to fetch again on purpose and be checked again.
 arrives fenced and labelled, the same construction #140 uses for memory. A page
 that says "ignore your instructions" is a page that says that.
 
-One residue, named rather than implied: the address is checked at resolution
-and the connection is made by name, so a record that answers publicly on the
-first lookup and privately on the second is not caught -- classic DNS
-rebinding. Closing it means resolving once and connecting to that address,
-which fights TLS hostname verification and is a bigger change than this.
-Reaching it requires a host already in the channel's `allow_domains` to be
-attacker-controlled, which is a narrower door than the one this closes; it is
-recorded here rather than left for somebody to discover.
+**It connects to the address it checked.** The name is resolved once, every
+address it returns must be public, and the connection goes to that address:
+TLS still verifies the certificate against the hostname, and the Host header
+still names it. Connecting by name would resolve a second time, and a record
+that answers publicly on the first lookup and privately on the second (DNS
+rebinding) would walk past the check. That residue was tolerable while the
+list held only named hosts; with `read_domains: ["*"]` any hostname an
+attacker owns qualifies, so it is closed rather than recorded. Proxies from
+the environment are ignored for the same reason: a proxy resolves the name
+itself, after the check.
+
+What it does not stop: a page is data, but a model that reads injected text
+can still be led to fetch a URL with something it knows in the query string.
+The fence below is the defence; a channel that cannot accept that residue
+keeps its read list narrow.
 """
+import functools
 import html
+import http.client
 import ipaddress
 import logging
 import re
 import socket
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -70,22 +87,71 @@ def _safe_url(url):
     return retval
 
 
-def _private(host):
-    """(refused, reason). True when the host resolves anywhere inward."""
+def _resolve(host):
+    """(address, reason). The one public address to connect to, or None and
+    why not. Every address the name returns must be public: a name with one
+    inward record is refused, not narrowed to its public ones."""
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError as exc:
-        return (True, f"could not resolve {host!r}: {exc}")
+        return (None, f"could not resolve {host!r}: {exc}")
+    pinned = None
     for info in infos:
-        addr = info[4][0]
         try:
-            ip = ipaddress.ip_address(addr.split("%")[0])
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
         except ValueError:
-            continue
-        if (ip.is_loopback or ip.is_private or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            return (True, f"{host} resolves to {ip}, which is not a public address")
-    return (False, "")
+            return (None, f"{host} resolves to {info[4][0]!r}, which is not an address I can check")
+        if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified or not ip.is_global):
+            return (None, f"{host} resolves to {ip}, which is not a public address")
+        pinned = pinned or str(ip)
+    if pinned is None:
+        return (None, f"could not resolve {host!r}: no addresses")
+    return (pinned, "")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Connects to the address that was checked, not to a second lookup."""
+
+    def __init__(self, *args, pinned, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pinned = pinned
+
+    def connect(self):
+        self.sock = socket.create_connection((self._pinned, self.port), self.timeout,
+                                             self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """The same, with TLS verified against the hostname, not the address."""
+
+    def __init__(self, *args, pinned, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pinned = pinned
+
+    def connect(self):
+        sock = socket.create_connection((self._pinned, self.port), self.timeout,
+                                        self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTP(urllib.request.HTTPHandler):
+    def __init__(self, pinned):
+        super().__init__()
+        self._pinned = pinned
+
+    def http_open(self, req):
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned=self._pinned), req)
+
+
+class _PinnedHTTPS(urllib.request.HTTPSHandler):
+    def __init__(self, pinned):
+        super().__init__(context=ssl.create_default_context())
+        self._pinned = pinned
+
+    def https_open(self, req):
+        return self.do_open(functools.partial(_PinnedHTTPSConnection, pinned=self._pinned), req,
+                            context=self._context)
 
 
 def _text_from(body, content_type):
@@ -114,13 +180,17 @@ def fetch(url, policy):
     host = (parts.hostname or "").lower()
     if not host:
         return (None, "that URL names no host")
-    if not policy_mod.host_allowed(host, policy):
-        return (None, f"'{host}' is not in this channel's allow_domains, so I did not fetch it")
-    refused, why = _private(host)
-    if refused:
+    if not policy_mod.read_allowed(host, policy):
+        return (None, f"'{host}' is not in this channel's {policy_mod.read_key(policy)}, "
+                      "so I did not fetch it")
+    pinned, why = _resolve(host)
+    if pinned is None:
         return (None, f"refusing to fetch {_safe_url(url)}: {why}")
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "text/*, */*"})
-    opener = urllib.request.build_opener(_NoRedirect)
+    # Each handler replaces its default: no proxy from the environment, no
+    # redirect followed, and both schemes connect to the checked address.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect,
+                                         _PinnedHTTP(pinned), _PinnedHTTPS(pinned))
     try:
         with opener.open(req, timeout=_TIMEOUT) as resp:
             ctype = resp.headers.get("Content-Type", "")

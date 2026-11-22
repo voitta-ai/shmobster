@@ -301,6 +301,13 @@ def to_parts(files, save_under=None, no_save=None, source=slack_source):
         if len(blob) > _MAX_BYTES:
             notes.append(f"{name}: larger than the {_MAX_BYTES} byte cap")
             continue
+        if mime.startswith("image/"):
+            # Named, and said to be visible (#437): a bare image part leaves the
+            # model to guess, and it guessed from its own earlier "I cannot
+            # read images" in the thread instead of from what it was shown.
+            parts.append({"type": "text", "text": (
+                f"[attached image: {name} -- shown to you directly below; you can "
+                f"see it]")})
         parts.append(_part(name, mime, blob))
         if no_save:
             parts.append(_unsaved(name, no_save))

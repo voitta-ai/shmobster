@@ -280,6 +280,15 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         system += "\n\n" + _proj
     if thread_context:
         system += "\n\n## Conversation so far in this thread\n" + thread_context
+    if any(isinstance(p, dict) and p.get("type") == "image_url" for p in attachments or ()):
+        # After the thread, so it is the last word on the subject (#437): an
+        # answer in that history saying you could not read images was true
+        # when it was written and is not now.
+        system += ("\n\n## Attached images\nThe images attached to this message are "
+                   "shown to you directly, and you can see them. Describe what you "
+                   "see. If an earlier answer in this conversation said you could "
+                   "not read images, that was before image attachments reached you; "
+                   "do not repeat it.")
     # A plain string when there's nothing attached -- multimodal content lists
     # are the exception, and not every vendor in the waterfall accepts one.
     # ponytail: if a fallback rejects images the Router just moves on; add a

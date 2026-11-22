@@ -746,6 +746,14 @@ machine's channel layout is versioned separately from the token/key config:
     it, not the approver's. Values must be `${VAR}` references -- a literal
     stops startup, and a reload refuses it. Names `env` sets and no entry maps
     stay channel-wide. Policy-file only.
+
+    A channel with `user_env` also loses the keychain and gh's hosts file in
+    its sandbox. Otherwise `gh`, and git through its gh credential helper, fall
+    back to the operator's own login whenever `GH_TOKEN` is absent, and a
+    command can unset any variable meant to stop that. Credentials in such a
+    channel come from the environment only; a tool that keeps its own login in
+    a file under `$HOME` is not covered by this and should not be logged in on
+    the deployment host.
   - `project_docs` -- extra files from the channel's own repo to read as the
     project's instructions (#259), on top of `CLAUDE.md`, `AGENTS.md`,
     `docs/CLAUDE.md` and `docs/AGENTS.md`, which are read when they exist. This

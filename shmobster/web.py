@@ -88,14 +88,16 @@ def _safe_url(url):
 
 
 def _resolve(host):
-    """(address, reason). The one public address to connect to, or None and
-    why not. Every address the name returns must be public: a name with one
-    inward record is refused, not narrowed to its public ones."""
+    """(addresses, reason). The public addresses to connect to, in the order
+    the resolver gave them, or None and why not. Every address the name returns
+    must be public: a name with one inward record is refused, not narrowed to
+    its public ones. All of them are kept so a connection can fall back, as one
+    by name would, without a second lookup."""
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except OSError as exc:
         return (None, f"could not resolve {host!r}: {exc}")
-    pinned = None
+    pinned = []
     for info in infos:
         try:
             ip = ipaddress.ip_address(info[4][0].split("%")[0])
@@ -104,10 +106,23 @@ def _resolve(host):
         if (ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved
                 or ip.is_multicast or ip.is_unspecified or not ip.is_global):
             return (None, f"{host} resolves to {ip}, which is not a public address")
-        pinned = pinned or str(ip)
-    if pinned is None:
+        if str(ip) not in pinned:
+            pinned.append(str(ip))
+    if not pinned:
         return (None, f"could not resolve {host!r}: no addresses")
     return (pinned, "")
+
+
+def _connect(addresses, port, timeout, source_address):
+    """A socket to the first of the checked addresses that answers, the way
+    `socket.create_connection` falls back across the records of a name."""
+    err = None
+    for addr in addresses:
+        try:
+            return socket.create_connection((addr, port), timeout, source_address)
+        except OSError as exc:
+            err = exc
+    raise err
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
@@ -118,8 +133,7 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self._pinned = pinned
 
     def connect(self):
-        self.sock = socket.create_connection((self._pinned, self.port), self.timeout,
-                                             self.source_address)
+        self.sock = _connect(self._pinned, self.port, self.timeout, self.source_address)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -130,8 +144,7 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._pinned = pinned
 
     def connect(self):
-        sock = socket.create_connection((self._pinned, self.port), self.timeout,
-                                        self.source_address)
+        sock = _connect(self._pinned, self.port, self.timeout, self.source_address)
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 

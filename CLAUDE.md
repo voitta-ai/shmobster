@@ -78,6 +78,15 @@ Config values are `${VAR}` references (#73), never literals -- including in a
 running deployment's own `shmobster-config.json`, not just the example. Never
 print a config value, and never echo one into a log, a commit, or a channel.
 
+## Deploy only a release
+
+The live deployment runs a released version, never master between releases.
+To ship a merged change, cut a release first (the version-bump PR with its
+`docs/release-notes/vX.Y.Z.md`; `release.yml` tags it on merge), then move the
+live clone to that commit and restart. A master-only deploy also skips the
+upgrade announcement, which is keyed on `__version__` (#77), so channels never
+hear what changed.
+
 ## Signal groups: shmobster serves only closed groups
 
 This is decided, not a setting, and not open to argument in a PR. shmobster is

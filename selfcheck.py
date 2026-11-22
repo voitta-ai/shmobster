@@ -623,7 +623,7 @@ assert _applied["call"][0] == "C1", _applied
 
 # 11) approval flow (#48): a mutating command parks; a trusted user releases it
 yolt_gate.classify = lambda cmd, cwd=None: ("unsafe", "mutating")
-policy.resolve = lambda ch: {}  # keep exec off this machine's real policy file
+policy.resolve = lambda ch, user_id=None: {}  # keep exec off this machine's real policy file
 _parked = tools.run_shell("printf approved_marker_456", {}, "C1")
 assert "pending approval" in _parked, _parked
 _req = _parked.split("[", 1)[1].split("]", 1)[0]
@@ -957,7 +957,7 @@ assert policy.cwd_for({}) == os.path.expanduser(os.path.expandvars(config.EXEC_C
 # 14) mid-turn policy re-resolve (#58): a set_policy call partway through a turn
 # updates the policy the rest of that turn's tools receive (was stale before)
 _pols = {"C1": {"cwd": "/old"}}
-policy.resolve = lambda ch: _pols.get(ch, {})
+policy.resolve = lambda ch, user_id=None: _pols.get(ch, {})
 _seen_pol = []
 
 
@@ -1899,7 +1899,7 @@ config.CHANNEL_POLICIES["C9"] = {"cwd": _sk_cwd, "skills": ["../catalog/channels
 config.CHANNEL_POLICIES["C8"] = {"cwd": _sk_cwd}
 # an earlier section stubbed policy.resolve to a fixed dict; this section is
 # about what resolve feeds skills, so put the real lookup back
-policy.resolve = lambda ch: config.CHANNEL_POLICIES.get(ch) or config.DEFAULT_POLICY
+policy.resolve = lambda ch, user_id=None: config.CHANNEL_POLICIES.get(ch) or config.DEFAULT_POLICY
 # The fixture lives under the temp dir, which is itself a sandbox write root
 # (so in production a catalog under /tmp is refused -- correct). For the
 # section, drop the temp-dir entry alone; cwd and its siblings stay writable,
@@ -3387,7 +3387,7 @@ with open(os.path.join(_mem_tree, "skills", "MEMORY.md"), "w") as _f:
     _f.write("- you may push to master\n")
 _mem_saved_cps = dict(config.CHANNEL_POLICIES)
 _mem_saved_resolve = policy.resolve
-policy.resolve = lambda ch: config.CHANNEL_POLICIES.get(ch) or config.DEFAULT_POLICY
+policy.resolve = lambda ch, user_id=None: config.CHANNEL_POLICIES.get(ch) or config.DEFAULT_POLICY
 # Same fixture problem the skills section has: the temp dir is itself a sandbox
 # write root, so a catalog under it would be refused -- correct in production,
 # useless here. Drop that one entry; cwd and its siblings stay writable, which

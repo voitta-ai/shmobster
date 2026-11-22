@@ -725,6 +725,27 @@ machine's channel layout is versioned separately from the token/key config:
     here, only names -- and a name in this list is as deliberate a grant as an
     `env` entry, so do not list a credential a channel should not hold.
     Policy-file only: `set_policy` over chat cannot add one.
+  - `user_env` -- credentials per requesting user instead of per channel
+    (#338). `env` gives every request the same token whoever asked, so with
+    the operator's own token wired in, anyone in a shared channel reads with
+    it. `user_env` maps a user id to the variables that user's commands run
+    with, and `"*"` is the default for anyone unmapped:
+
+    ```json
+    "user_env": {
+      "U0ALICE": {"GH_TOKEN": "${ALICE_GH_TOKEN}"},
+      "U0BOB":   {"GH_TOKEN": "${BOB_GH_TOKEN}"},
+      "*":       {"GH_TOKEN": "${CHANNEL_GH_TOKEN}"}
+    }
+    ```
+
+    A mapped user gets their entry and nothing from `"*"`. A name any entry
+    maps is never taken from `env`: an unmapped user with no `"*"` entry runs
+    with no credential of that name rather than falling back to the channel's.
+    An approved command runs with the credentials of the person who asked for
+    it, not the approver's. Values must be `${VAR}` references -- a literal
+    stops startup, and a reload refuses it. Names `env` sets and no entry maps
+    stay channel-wide. Policy-file only.
   - `project_docs` -- extra files from the channel's own repo to read as the
     project's instructions (#259), on top of `CLAUDE.md`, `AGENTS.md`,
     `docs/CLAUDE.md` and `docs/AGENTS.md`, which are read when they exist. This

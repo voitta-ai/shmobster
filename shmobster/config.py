@@ -265,6 +265,38 @@ _POLICIES_PATH = os.getenv("SHMOBSTER_POLICIES", "shmobster-policies.json")
 _WRITE_LOCK = threading.RLock()
 
 
+def _check_user_env(raw):
+    """Refuse a `user_env` (#338) that is not {user: {NAME: "${VAR}"}}.
+
+    On the RAW policies, for the reason _literal_secrets is: after
+    interpolation a reference and a pasted token look the same. Enforced
+    rather than warned, unlike `env`, because the key is new -- no running
+    deployment can be holding a literal here to be bricked by it. Raises
+    SystemExit like an unset ${VAR}: boot stops, and reload_policies turns it
+    into a refused reload. Names paths, never values."""
+    pols = dict(raw.get("channel_policies") or {})
+    pols["(default_policy)"] = raw.get("default_policy") or {}
+    bad = []
+    for channel, pol in pols.items():
+        per_user = (pol or {}).get("user_env")
+        if per_user is None:
+            continue
+        if not isinstance(per_user, dict):
+            bad.append(f"{channel}/user_env")
+            continue
+        for user, entry in per_user.items():
+            if not isinstance(entry, dict):
+                bad.append(f"{channel}/user_env/{user}")
+                continue
+            for name, value in entry.items():
+                if not (isinstance(value, str) and _ENV_REF.fullmatch(value.strip())):
+                    bad.append(f"{channel}/user_env/{user}/{name}")
+    if bad:
+        raise SystemExit(
+            "user_env values must be ${VAR} references, one per name, under a user "
+            "id or \"*\": " + ", ".join(bad))
+
+
 def _load_policies(cfg=None):
     """Load the policy source. `cfg` is the main config to fall back to when no
     policy file exists -- passed explicitly rather than read from the global,
@@ -275,8 +307,10 @@ def _load_policies(cfg=None):
     if os.path.exists(_POLICIES_PATH):
         with open(_POLICIES_PATH, "r") as f:
             raw = json.load(f)
+        _check_user_env(raw)
         retval = _interpolate(raw)
         return retval
+    _check_user_env(_RAW)
     src = _cfg if cfg is None else cfg
     retval = {
         "channel_policies": src.get("channel_policies", {}),

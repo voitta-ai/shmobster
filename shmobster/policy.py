@@ -1,6 +1,8 @@
 """Per-channel policy (Iter #4): the capability envelope keyed by channel.
 
-resolve(channel) -> policy dict {cwd, aws_profile, github_repos}.
+resolve(channel, user_id) -> policy dict {cwd, aws_profile, github_repos, ...},
+with `env` resolved for the requesting user when the channel maps credentials
+per user (`user_env`, #338).
 check(command, policy) -> (ok, reason): enforces the parts that need command
 inspection -- github repo whitelist and aws-profile override guard. cwd and
 AWS_PROFILE themselves are applied at exec time (tools.run_shell)."""
@@ -13,7 +15,7 @@ import subprocess
 from . import config, spine
 
 
-def resolve(channel):
+def resolve(channel, user_id=None):
     # A gateway conversation linked to a Slack channel shares that channel's
     # policy (#336): one capability envelope, set in one place.
     # `link` and `mirror` are routing, not envelope. A `link` is followed first,
@@ -23,7 +25,45 @@ def resolve(channel):
     # envelope -- no github_repos bound at all -- which is wider than the default.
     channel = linked(channel) or channel
     own = {k: v for k, v in (config.CHANNEL_POLICIES.get(channel) or {}).items() if k not in ROUTING_KEYS}
-    retval = own or config.DEFAULT_POLICY
+    retval = for_user(own or config.DEFAULT_POLICY, user_id)
+    return retval
+
+
+USER_DEFAULT = "*"
+
+
+def for_user(policy, user_id):
+    """`policy` with its credentials resolved for the person whose request runs
+    the command (#338).
+
+    A channel's `env` gives every request the same token, whoever asked, and the
+    token easiest to wire in is the operator's own -- so anyone in a shared
+    channel could read with it. `user_env` maps a user id to the credentials
+    that user's commands get, with `"*"` as the default for anyone unmapped:
+
+        "user_env": {"U0ALICE": {"GH_TOKEN": "${ALICE_GH_TOKEN}"},
+                     "*":       {"GH_TOKEN": "${CHANNEL_GH_TOKEN}"}}
+
+    A mapped user gets their own entry and nothing from `"*"`. A name any entry
+    maps is never taken from the channel `env`, even if it is also there: an
+    unmapped user with no default gets no credential of that name, never the
+    channel's -- which is where the operator's token would have been.
+
+    The result is an ordinary policy with no `user_env`, so the grant layer,
+    child_env and describe_capabilities all see one `env` -- the one this user's
+    commands run with. A policy without `user_env` is returned unchanged."""
+    per_user = policy.get("user_env")
+    if not per_user:
+        return policy
+    managed = {name for entry in per_user.values() for name in (entry or {})}
+    entry = per_user[user_id] if user_id in per_user else per_user.get(USER_DEFAULT)
+    env = {k: v for k, v in (policy.get("env") or {}).items() if k not in managed}
+    env.update(entry or {})
+    retval = {k: v for k, v in policy.items() if k != "user_env"}
+    retval["env"] = env
+    # Kept so describe_capabilities can say the names are this asker's, not
+    # everyone's here.
+    retval["per_user_env"] = sorted(managed)
     return retval
 
 

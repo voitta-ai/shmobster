@@ -79,6 +79,10 @@ def known_values():
     for policy in list(config.CHANNEL_POLICIES.values()) + [config.DEFAULT_POLICY]:
         for value in (policy.get("env") or {}).values():
             values.append(value)
+        # Every user's credentials (#338), not only the asker's: a command
+        # run for one user can still print a token someone else's turn holds.
+        for entry in (policy.get("user_env") or {}).values():
+            values.extend((entry or {}).values())
         # MCP servers carry their credentials in per-server request headers
         # (#299), a second place a secret lives besides `env` -- scrub those too.
         for server in (policy.get("mcp") or {}).values():

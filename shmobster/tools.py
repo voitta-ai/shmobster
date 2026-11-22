@@ -372,6 +372,11 @@ def capabilities(policy, channel=None):
         "any public host" if "*" in (_read or []) else _listed(_read, "none")))
     lines.append("- credentials injected (names only, values never shown): " + _listed(
         sorted(policy.get("env") or {}), "none"))
+    if policy.get("per_user_env"):
+        # #338: the line above is the asker's set; someone else here may differ.
+        lines.append("- resolved per requesting user, so the list above is this turn's "
+                     "asker's and another person here may differ: "
+                     + _listed(policy["per_user_env"], "none"))
     lines.append("- host variables passed through (names only): " + _listed(
         sorted(policy.get("env_passthrough") or []), "none"))
     lines.append("- readable beyond the tree: " + _listed(policy.get("allow_read"), "nothing"))

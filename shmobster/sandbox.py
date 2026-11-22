@@ -205,8 +205,22 @@ def profile(pol):
     writes, reads, deny = roots(pol)
     cwd = _real(policy.cwd_for(pol))
     excludes = [_real(p, cwd) for p in (pol.get("exclude") or [])]
-    if gh_file_backed():
+    # Credentials per user (#338) are only per user if nothing on the host
+    # answers for the operator instead. Without GH_TOKEN, gh -- and git, whose
+    # helper is gh (gitcfg.py) -- falls back to the operator's login, read from
+    # the keychain through securityd; dropping a name from `env` does not stop
+    # that, and the command can unset any variable that tried to. So a channel
+    # with `user_env` loses the keychain itself, and gh's hosts file with it.
+    # Measured on Darwin 25: `security find-generic-password` goes from found
+    # to "not found" (44); gh with GH_TOKEN, curl, git and python over https
+    # are unaffected (trust evaluation is trustd, not securityd).
+    # The keychain files are under /Users, already denied, but an `allow_read`
+    # could reopen them; the exclude deny is last and wins.
+    per_user = bool(pol.get("per_user_env") or pol.get("user_env"))
+    if gh_file_backed() or per_user:
         excludes.append(_real(_GH_HOSTS))
+    if per_user:
+        excludes.append(_real("~/Library/Keychains"))
     meta = set()
     for p in writes + reads:
         for root in deny:
@@ -334,6 +348,9 @@ def profile(pol):
         ))
         + ")"
     )
+    if per_user:
+        lines.append('(deny mach-lookup (global-name "com.apple.SecurityServer") '
+                     '(global-name "com.apple.securityd.xpc"))')
     if excludes:
         lines.append(
             "(deny file-read* file-write* "

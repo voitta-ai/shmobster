@@ -173,7 +173,9 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     # One turn, one bill (#190). Clearing first matters: a turn that raised
     # before draining must not charge the next one.
     cost.start()
-    policy = policy_mod.resolve(channel)
+    # Resolved for the asker (#338): with `user_env`, the credentials a command
+    # runs with are that person's, not the channel's.
+    policy = policy_mod.resolve(channel, user_id)
     flagging = False
     tool_schemas = list(tools.TOOLS)
     if surface is not None:
@@ -355,7 +357,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                 # An admin tool (set_policy) may have just changed this channel's
                 # policy; re-resolve so the rest of THIS turn's tool calls see the
                 # new scope instead of the stale dict from turn start (#58).
-                policy = policy_mod.resolve(channel)
+                policy = policy_mod.resolve(channel, user_id)
             elif name in learning.NAMES:
                 ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "surface": surface}
                 result = learning.dispatch(name, args, ctx)

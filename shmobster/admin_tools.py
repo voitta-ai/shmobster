@@ -443,7 +443,10 @@ def run_approved(request_id, req, ctx):
         # server's credentials from the live policy; they never lived in req.
         out = mcp.run_payload(payload, ctx.get("channel"))
     else:
-        policy = policy_mod.resolve(ctx.get("channel"))
+        # With the REQUESTER's credentials, not the approver's (#338): an
+        # approval is permission to run what was asked, not a loan of the
+        # approver's token.
+        policy = policy_mod.resolve(ctx.get("channel"), req.get("requester"))
         out = tools.execute(req["command"], policy)
     retval = f"APPROVED by {identity.mention(ctx.get('user_id'))} and ran: {req['command']}\n{out}"
     return retval

@@ -56,6 +56,7 @@ import logging
 import re
 import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -129,7 +130,52 @@ def _interleave(addresses):
 _MAX_ADDRESSES = 4            # records tried before giving up
 
 
-def _connect(addresses, port, timeout, source_address):
+class _Watch:
+    """One absolute deadline for a fetch. `timeout` bounds each socket
+    operation, not the transfer, so a server dripping a byte every few seconds
+    satisfies every one of them -- in the TLS handshake, the headers or the
+    body -- and holds the turn for as long as it likes. When the deadline
+    passes, this shuts the fetch's socket down, which ends whatever read is
+    blocked on it. The name lookup happens before it starts: `getaddrinfo`
+    cannot be interrupted, and the system resolver bounds it."""
+
+    def __init__(self, seconds):
+        self.expired = False
+        self._socks = []
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+
+    def __enter__(self):
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._timer.cancel()
+
+    def add(self, sock):
+        with self._lock:
+            self._socks.append(sock)
+            expired = self.expired
+        if expired:
+            _shut(sock)
+
+    def _expire(self):
+        with self._lock:
+            self.expired = True
+            socks = list(self._socks)
+        for sock in socks:
+            _shut(sock)
+
+
+def _shut(sock):
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+
+
+def _connect(addresses, port, timeout, source_address, watch):
     """A socket to the first of the checked addresses that answers, the way
     `socket.create_connection` falls back across the records of a name -- but
     within one deadline for all of them, and over the first few only (both
@@ -144,52 +190,62 @@ def _connect(addresses, port, timeout, source_address):
         if remaining <= 0:
             break
         try:
-            return socket.create_connection((addr, port), remaining, source_address)
+            sock = socket.create_connection((addr, port), remaining, source_address)
         except OSError as exc:
             err = exc
+            continue
+        watch.add(sock)
+        return sock
     raise err
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
     """Connects to the address that was checked, not to a second lookup."""
 
-    def __init__(self, *args, pinned, **kwargs):
+    def __init__(self, *args, pinned, watch, **kwargs):
         super().__init__(*args, **kwargs)
         self._pinned = pinned
+        self._watch = watch
 
     def connect(self):
-        self.sock = _connect(self._pinned, self.port, self.timeout, self.source_address)
+        self.sock = _connect(self._pinned, self.port, self.timeout, self.source_address,
+                             self._watch)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """The same, with TLS verified against the hostname, not the address."""
 
-    def __init__(self, *args, pinned, **kwargs):
+    def __init__(self, *args, pinned, watch, **kwargs):
         super().__init__(*args, **kwargs)
         self._pinned = pinned
+        self._watch = watch
 
     def connect(self):
-        sock = _connect(self._pinned, self.port, self.timeout, self.source_address)
+        sock = _connect(self._pinned, self.port, self.timeout, self.source_address,
+                        self._watch)
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
 class _PinnedHTTP(urllib.request.HTTPHandler):
-    def __init__(self, pinned):
+    def __init__(self, pinned, watch):
         super().__init__()
         self._pinned = pinned
+        self._watch = watch
 
     def http_open(self, req):
-        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned=self._pinned), req)
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned=self._pinned,
+                                              watch=self._watch), req)
 
 
 class _PinnedHTTPS(urllib.request.HTTPSHandler):
-    def __init__(self, pinned):
+    def __init__(self, pinned, watch):
         super().__init__(context=ssl.create_default_context())
         self._pinned = pinned
+        self._watch = watch
 
     def https_open(self, req):
-        return self.do_open(functools.partial(_PinnedHTTPSConnection, pinned=self._pinned), req,
-                            context=self._context)
+        return self.do_open(functools.partial(_PinnedHTTPSConnection, pinned=self._pinned,
+                                              watch=self._watch), req, context=self._context)
 
 
 def _text_from(body, content_type):
@@ -227,27 +283,27 @@ def fetch(url, policy):
     req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "text/*, */*"})
     # Each handler replaces its default: no proxy from the environment, no
     # redirect followed, and both schemes connect to the checked address.
+    watch = _Watch(_DEADLINE)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect,
-                                         _PinnedHTTP(pinned), _PinnedHTTPS(pinned))
+                                         _PinnedHTTP(pinned, watch), _PinnedHTTPS(pinned, watch))
     try:
-        with opener.open(req, timeout=_TIMEOUT) as resp:
+        with watch, opener.open(req, timeout=_TIMEOUT) as resp:
             ctype = resp.headers.get("Content-Type", "")
-            # Chunked with a total deadline. `timeout` bounds each socket
-            # operation, not the transfer, so a server dripping a byte at a
-            # time satisfies every individual read and holds the turn open for
-            # as long as it likes.
-            deadline = time.monotonic() + _DEADLINE
             chunks = []
             got = 0
             while got <= _MAX_BYTES:
-                if time.monotonic() > deadline:
-                    logging.info("web_fetch: deadline reached, using what arrived")
-                    break
-                chunk = resp.read(65536)
+                try:
+                    chunk = resp.read(65536)
+                except (OSError, http.client.HTTPException):
+                    if not watch.expired:
+                        raise
+                    chunk = b""
                 if not chunk:
                     break
                 chunks.append(chunk)
                 got += len(chunk)
+            if watch.expired:
+                logging.info("web_fetch: deadline reached, using what arrived")
             body = b"".join(chunks)
     except urllib.error.HTTPError as exc:
         if exc.code in (301, 302, 303, 307, 308):
@@ -259,6 +315,8 @@ def fetch(url, policy):
             ))
         return (None, f"{_safe_url(url)} returned HTTP {exc.code} {exc.reason}")
     except Exception as exc:
+        if watch.expired:
+            return (None, f"{_safe_url(url)} did not answer within {_DEADLINE}s")
         return (None, f"could not fetch {_safe_url(url)}: {redact.scrub(str(exc))}")
     truncated = len(body) > _MAX_BYTES
     text = _text_from(body[:_MAX_BYTES], ctype)

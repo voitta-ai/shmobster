@@ -55,6 +55,8 @@ import uuid
 import httpx
 import litellm
 from litellm import CustomLLM
+
+from . import attachments
 from litellm.utils import custom_llm_setup
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
@@ -193,6 +195,9 @@ def _text_of(content):
         retval = "\n".join(p for p in parts if p)
     else:
         retval = str(content)
+    # The pixels never reach this rung, so neither may the claim that they do.
+    retval = (retval.replace(attachments.IMAGE_SHOWN, attachments.IMAGE_NOT_SHOWN)
+                    .replace(attachments.IMAGES_SHOWN, attachments.IMAGES_NOT_SHOWN))
     return retval
 
 

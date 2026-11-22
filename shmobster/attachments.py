@@ -90,6 +90,23 @@ def _fetch(url):
     return retval
 
 
+# What the model is told about an attached image (#437). A bare image part left
+# the model to guess, and it guessed from its own earlier "I cannot read
+# images" in the thread. The text-only rung (codex_llm) drops the pixels, so it
+# swaps each SHOWN wording for its NOT SHOWN twin: telling a model that gets no
+# image that it can see one would have it invent a description.
+IMAGE_SHOWN = " -- shown to you directly below; you can see it]"
+IMAGE_NOT_SHOWN = (" -- NOT shown to you: the model answering now is text-only; do not "
+                   "describe or guess at it]")
+IMAGES_SHOWN = ("## Attached images\nThe images attached to this message are shown to "
+                "you directly, and you can see them. Describe what you see. If an "
+                "earlier answer in this conversation said you could not read images, "
+                "that was before image attachments reached you; do not repeat it.")
+IMAGES_NOT_SHOWN = ("## Attached images\nThe images attached to this message were NOT "
+                    "shown to you: the model answering now is text-only. Say you cannot "
+                    "see them this time, and do not describe or guess at their content.")
+
+
 def _part(name, mime, blob):
     """One downloaded file as an OpenAI-style content part. LiteLLM translates
     `image_url` into each vendor's own image block, so a data: URI is the one
@@ -302,12 +319,7 @@ def to_parts(files, save_under=None, no_save=None, source=slack_source):
             notes.append(f"{name}: larger than the {_MAX_BYTES} byte cap")
             continue
         if mime.startswith("image/"):
-            # Named, and said to be visible (#437): a bare image part leaves the
-            # model to guess, and it guessed from its own earlier "I cannot
-            # read images" in the thread instead of from what it was shown.
-            parts.append({"type": "text", "text": (
-                f"[attached image: {name} -- shown to you directly below; you can "
-                f"see it]")})
+            parts.append({"type": "text", "text": f"[attached image: {name}{IMAGE_SHOWN}"})
         parts.append(_part(name, mime, blob))
         if no_save:
             parts.append(_unsaved(name, no_save))

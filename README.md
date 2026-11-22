@@ -703,6 +703,11 @@ machine's channel layout is versioned separately from the token/key config:
     built-in list would be wrong for somebody. This is a textual guard like
     `exclude`, not containment: the sandbox confines the filesystem, never the
     network (#149).
+  - `read_domains` -- hosts the `web_fetch` tool may read, same globs. Omit
+    it and `web_fetch` uses `allow_domains`. Set it to let a channel read pages
+    people paste without opening its shell: `"read_domains": ["*"]` reads any
+    public page while `curl` keeps `allow_domains`. See "Reading a URL" for why
+    the two routes can carry different lists (#434).
   - `slack_channels` -- other Slack channels this channel's `slack_post` and
     `slack_read_*` tools may reach, as exact channel ids (`["C0123ABCD"]`).
     Omit the key and those tools reach **this channel only**, which is the
@@ -1844,15 +1849,26 @@ providers carries a cloud account id; the model is in the log line.
 ## Reading a URL (#62)
 
 `web_fetch` reads a page somebody pasted into a channel. It is the fetch the
-shell already had, with a tool-shaped front door: **the same `allow_domains`,
-through the same function**, so there is one answer to "may this channel reach
-that host" rather than two that drift.
+shell already had, with a tool-shaped front door. By default it obeys **the
+same `allow_domains`, with the same matching**:
 
     "allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"]
 
 A channel with no list reaches nothing, which is the same default `curl` gets.
 
-Three things it does that a shell `curl` does not:
+A channel can give it a wider list of its own (#434):
+
+    "allow_domains": ["github.com", "api.github.com", "*.githubusercontent.com"],
+    "read_domains": ["*"]
+
+That reads any public page with no card, while `curl` to anything off the
+GitHub list still parks. Widening `allow_domains` to `*` instead would open the
+shell to every host: a `curl` reaches loopback and LAN services by name (a
+local gateway, a daemon, the router, the cloud metadata endpoint), picks up
+credentials from `~/.netrc`, `-K`, cookies, client certificates or proxy
+settings, and can send a body. `web_fetch` does none of that.
+
+Four things it does that a shell `curl` does not:
 
 - **It refuses to be pointed inward.** The hostname is resolved before the
   request and refused if it lands on loopback, link-local, private or reserved
@@ -1860,6 +1876,11 @@ Three things it does that a shell `curl` does not:
   that believed it was unreachable. `allow_domains` does not cover this: a
   generous list, or a domain whose owner points a record at `169.254.169.254`,
   arrives there without the list ever being wrong.
+- **It connects to the address it checked.** The name is resolved once and
+  the connection goes to that address, with TLS still verified against the
+  hostname, so a record that answers publicly and then privately (DNS
+  rebinding) cannot slip past the inward check. Proxies from the environment
+  are ignored for the same reason.
 - **It does not follow redirects.** A redirect is a second fetch to a host
   nobody checked; following it silently would make the allow-list a first-hop
   formality. The target is reported instead, so the model can ask for it on
@@ -1868,6 +1889,10 @@ Three things it does that a shell `curl` does not:
   else's writing, the same construction per-channel memory uses (#140) and for
   the same reason. A page that says "ignore your instructions" is a page that
   says that.
+
+What remains: a page with injected text can still lead the model to fetch a
+URL with something it knows in the query string. The fence is the defence;
+a channel that cannot accept that keeps `read_domains` narrow.
 
 No new dependency and no new config key: stdlib `urllib`, tags stripped,
 entities decoded, capped at 400 KB off the wire and 12 000 characters to the

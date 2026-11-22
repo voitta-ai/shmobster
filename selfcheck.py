@@ -3665,9 +3665,10 @@ assert _rc == 1, ("a term in the wordlist must fail the gate", _rc, _out)
 # a wordlist pointed at explicitly but absent is an error, not a downgrade
 _rc, _out = _gt_run({"SHMOBSTER_SENSITIVE_TERMS_FILE": os.path.join(_gt_dir, "nope.txt")})
 assert _rc == 2, (_rc, _out)
-# 46) web_fetch is the shell fetch with a tool-shaped front door (#62), and it
-# obeys the same allow_domains through the same function -- a second copy of
-# that matching would be a second answer to "may this channel reach that host".
+# 46) web_fetch is the shell fetch with a tool-shaped front door (#62). It reads
+# read_domains when the channel sets one and allow_domains otherwise (#434),
+# through the same matcher -- a second copy of that matching would be a second
+# answer to "may this channel reach that host".
 # Offline: every case below is refused before any socket is opened, or resolves
 # only against localhost.
 _wf_pol = {"allow_domains": ["example.com", "*.githubusercontent.com"]}

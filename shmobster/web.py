@@ -51,6 +51,7 @@ import functools
 import html
 import http.client
 import ipaddress
+import itertools
 import logging
 import re
 import socket
@@ -88,8 +89,8 @@ def _safe_url(url):
 
 
 def _resolve(host):
-    """(addresses, reason). The public addresses to connect to, in the order
-    the resolver gave them, or None and why not. Every address the name returns
+    """(addresses, reason). The public addresses to connect to, families
+    interleaved, or None and why not. Every address the name returns
     must be public: a name with one inward record is refused, not narrowed to
     its public ones. All of them are kept so a connection can fall back, as one
     by name would, without a second lookup."""
@@ -110,7 +111,19 @@ def _resolve(host):
             pinned.append(str(ip))
     if not pinned:
         return (None, f"could not resolve {host!r}: no addresses")
-    return (pinned, "")
+    return (_interleave(pinned), "")
+
+
+def _interleave(addresses):
+    """The addresses with IPv6 and IPv4 alternating, each family in resolver
+    order (RFC 8305 section 4). Only the first few are tried, and a host with no
+    IPv6 route fails every AAAA record at once; alternating keeps both families
+    inside the cap."""
+    v6 = [a for a in addresses if ":" in a]
+    v4 = [a for a in addresses if ":" not in a]
+    first, second = (v6, v4) if ":" in addresses[0] else (v4, v6)
+    retval = [a for pair in itertools.zip_longest(first, second) for a in pair if a]
+    return retval
 
 
 _MAX_ADDRESSES = 4            # records tried before giving up
@@ -119,7 +132,8 @@ _MAX_ADDRESSES = 4            # records tried before giving up
 def _connect(addresses, port, timeout, source_address):
     """A socket to the first of the checked addresses that answers, the way
     `socket.create_connection` falls back across the records of a name -- but
-    within one deadline for all of them, and over the first few only. A name
+    within one deadline for all of them, and over the first few only (both
+    families, see `_interleave`). A name
     can return any number of public, blackholed records, and a full timeout
     per record would let a page's owner hold the turn for as long as it likes."""
     budget = timeout if isinstance(timeout, (int, float)) else _TIMEOUT

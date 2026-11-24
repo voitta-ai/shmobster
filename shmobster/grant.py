@@ -993,6 +993,48 @@ def _static(node):
 # operator, and several of them evaluate the value as code rather than read it.
 _PLAIN_EXPANSION = frozenset(("${", "}", "variable_name", "special_variable_name"))
 
+# Operators that read a value and evaluate nothing (#412): pattern removal,
+# pattern replacement and a default for an unset or empty name. None of them
+# assigns, fails the shell, indirects or does arithmetic; offsets, lengths,
+# subscripts, `!`, `@` transforms, `=`, `:=`, `?` and `:?` are not here.
+_INERT_OPERATORS = frozenset(("#", "##", "%", "%%", "/", "//", "/#", "/%", "-", ":-"))
+# The node types tree-sitter gives the operands of those operators. `regex` is
+# a leaf whose text tree-sitter does not parse (`${a#$(id)}` is one regex
+# node), so the operand is judged from its bytes as well (_INERT_OPERAND).
+_INERT_OPERAND_NODES = frozenset(("regex", "word", "/", "concatenation",
+                                  "simple_expansion", "$", "variable_name"))
+# An operand's bytes, from the operator to the closing brace: literal text and
+# globs, with `$` only as a bare `$name`. No backquote, backslash, quote or
+# brace, so nothing in it can substitute (`$(`, `${`), do arithmetic (`$[`),
+# hide one of those behind an escape or a quote, or end the expansion
+# somewhere other than where tree-sitter ends it.
+_INERT_OPERAND = re.compile(rb"(?:[^$`\\'\"{}]|\$[A-Za-z_][A-Za-z0-9_]*)*")
+
+
+def _inert_expansion(node):
+    """True for `${name}` or `${name OP operand}` with OP in _INERT_OPERATORS
+    and an operand that is itself inert. The operand stays an expansion, so the
+    word is no more static than `$name` is: a default such as `${d:-~/x}` is
+    never read as a path, and every check that refuses `$name` refuses it."""
+    kids = node.children
+    if all(c.type in _PLAIN_EXPANSION for c in kids):
+        return True
+    retval = (len(kids) >= 3 and kids[0].type == "${" and kids[-1].type == "}"
+              and kids[1].type in ("variable_name", "special_variable_name")
+              and kids[2].type in _INERT_OPERATORS
+              and all(_inert_operand_node(c) for c in kids[3:-1]))
+    if retval:
+        base = node.start_byte
+        operand = node.text[kids[2].end_byte - base:kids[-1].start_byte - base]
+        retval = _INERT_OPERAND.fullmatch(operand) is not None
+    return retval
+
+
+def _inert_operand_node(node):
+    retval = (node.type in _INERT_OPERAND_NODES
+              and all(_inert_operand_node(c) for c in node.children))
+    return retval
+
 
 def _evaluates(node):
     """True when expanding the node can run code although no substitution is
@@ -1001,11 +1043,12 @@ def _evaluates(node):
     named `a[$(touch P)]`, `for x in a*; do echo $((x)); done` runs `touch P`,
     and so does `echo 'a[$(touch P)]'; echo $((_))` with no loop at all. The
     same goes for `$[x]`, an offset or length (`${z:x}`), indirection
-    (`${!x}`) and `${x@P}`. So `${...}` is accepted only as a bare name -- an
-    allowlist of its parts -- and arithmetic never."""
+    (`${!x}`) and `${x@P}`. So `${...}` is accepted only as a bare name or
+    with an operator that evaluates nothing (_inert_expansion) -- an
+    allowlist -- and arithmetic never."""
     if node.type == "arithmetic_expansion":
         return True
-    if node.type == "expansion" and not all(c.type in _PLAIN_EXPANSION for c in node.children):
+    if node.type == "expansion" and not _inert_expansion(node):
         return True
     retval = any(_evaluates(c) for c in node.children)
     return retval

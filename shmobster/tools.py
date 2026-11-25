@@ -420,7 +420,7 @@ def capabilities(policy, channel=None):
             "What still parks even when it only reads: gh api; any "
             "interpreter (sh, bash, python3, node), whatever host it reaches -- the "
             "only exceptions are a bare version flag on "
-            f"{_listed(sorted(grant._VERSION_ONLY), 'none')} and node --check on one "
+            f"{'|'.join(sorted(grant._VERSION_ONLY))}, and node --check on one "
             "file; wget, git fetch/pull/push/clone, "
             "and any fetch other than web_fetch or that curl, including to the hosts "
             "listed above; a read whose output is redirected to a file; and every "

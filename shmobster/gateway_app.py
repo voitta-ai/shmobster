@@ -438,6 +438,25 @@ def _image_root(channel):
     return retval
 
 
+def _open_under(tree, rel):
+    """A read fd for `rel` inside `tree`, opened one component at a time from
+    the tree's own fd, none of them followed if it is a link. `rel` came from a
+    realpath, so it held no link when checked; a directory or file swapped for
+    one since then fails here (ELOOP or ENOTDIR) instead of leading out."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    fd = os.open(tree, flags | os.O_DIRECTORY)
+    try:
+        *dirs, leaf = rel.split(os.sep)
+        for name in dirs:
+            nxt = os.open(name, flags | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        retval = os.open(leaf, flags | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
+    return retval
+
+
 def _image_file(channel, path):
     """((bytes, mime, filename), None) for an image this conversation may
     send, or (None, why) when it may not."""
@@ -448,7 +467,8 @@ def _image_file(channel, path):
     if not raw:
         return None, "no path given"
     real = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(root, raw))
-    if not any(sandbox._under(real, t) for t in (root, root + ".worktrees")):
+    tree = next((t for t in (root, root + ".worktrees") if sandbox._under(real, t) and real != t), None)
+    if tree is None:
         return None, "the file is outside this conversation's working directory (after resolving links)"
     pol = policy.resolve(channel)
     banned = [sandbox._real(p, root) for p in (pol.get("exclude") or [])] + sandbox.self_roots()
@@ -456,9 +476,7 @@ def _image_file(channel, path):
             os.path.realpath(p) for p in tuple(config.SELF_FILES) + tuple(spine.files())}:
         return None, "that file is off-limits in this conversation"
     try:
-        # O_NOFOLLOW: the last component was a plain file when resolved; a link
-        # swapped in since then fails here instead of being followed.
-        fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        fd = _open_under(tree, os.path.relpath(real, tree))
     except OSError as exc:
         return None, f"cannot open it ({exc.strerror or type(exc).__name__})"
     try:
@@ -518,7 +536,8 @@ def send_image(channel, path, caption=""):
     if outcome != "ok":
         why = {"withheld": "this group is not closed, so nothing is posted to it",
                "rejected": "the gateway refused the message",
-               "retry": "the gateway did not take the message; it may work if tried again"}
+               "retry": ("the gateway did not confirm the message, so it may or may not have "
+                         "arrived; ask before sending it again")}
         return f"could not send: {why.get(outcome, outcome)}"
     retval = f"sent {filename} ({len(blob)} bytes, {mime}) into this conversation"
     return retval

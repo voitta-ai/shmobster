@@ -30,11 +30,15 @@ import mimetypes
 import os
 import re
 import stat
+import struct
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 from . import admin_tools, approvals, attachments, config, gateway_text, handler, identity, policy, proposals, redact, sandbox, spine, state
@@ -376,9 +380,12 @@ _MARK = "\ufffc"
 
 
 # ---------------------------------------------------------------- images out (#450)
-# A file sent out leaves the host, so this is a disclosure path. Images only,
-# recognised by their bytes: text and PDF are refused because redaction cannot
-# scrub a file on its way out (README, bare-value redaction). The file must sit
+# A file sent out leaves the host, so this is a disclosure path. Images only:
+# text and PDF are refused because redaction cannot scrub a file on its way out
+# (README, bare-value redaction). An image header is not enough -- one in front
+# of a token is still the token -- so the file is decoded and re-encoded as a
+# fresh PNG (macOS's sips), and only the chunks that hold pixels are kept:
+# no metadata, no text chunks, nothing after the image. The file must sit
 # in this conversation's own tree -- its own cwd and that cwd's worktrees, the
 # part of what the sandbox lets it write that no other conversation shares --
 # after every symlink is resolved, and outside shmobster's own files and the
@@ -393,7 +400,8 @@ SEND_IMAGE = {
             "Send an image file you made into this conversation, with an optional "
             "caption. PNG, JPEG, GIF or WebP only, recognised by content, up to the "
             "same size as an attached image, and the file must be inside your "
-            "working directory. Returns whether it was sent; on 'could not send', "
+            "working directory. It goes out re-encoded as a PNG, without metadata. "
+            "Returns whether it was sent; on 'could not send', "
             "say so rather than claiming the image went out."
         ),
         "parameters": {
@@ -408,19 +416,84 @@ SEND_IMAGE = {
     },
 }
 
-_IMAGE_MAGIC = (
-    (b"\x89PNG\r\n\x1a\n", "image/png", ".png"),
-    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
-    (b"GIF87a", "image/gif", ".gif"),
-    (b"GIF89a", "image/gif", ".gif"),
-)
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+_SIPS = "/usr/bin/sips"
+_PNG_KEEP = (b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND")
+_PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+_PNG_MAX_PIXEL_BYTES = 128 * 1024 * 1024   # decoded size: a 5 MB file must not inflate to gigabytes here
 
 
-def _sniff(blob):
-    """(mime, extension) for an image recognised by its bytes, else None."""
-    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
-        return ("image/webp", ".webp")
-    retval = next(((mime, ext) for magic, mime, ext in _IMAGE_MAGIC if blob.startswith(magic)), None)
+def _looks_like_image(blob):
+    """Whether the bytes start like a PNG, JPEG, GIF or WebP. Only a first
+    filter: _reencode is what decides."""
+    retval = blob.startswith(_IMAGE_MAGIC) or (blob[:4] == b"RIFF" and blob[8:12] == b"WEBP")
+    return retval
+
+
+def _reencode(blob):
+    """(png, None): the image decoded and written afresh as a PNG holding only
+    its pixels, or (None, why)."""
+    if not os.path.exists(_SIPS):
+        return None, "this host cannot re-encode images (no sips)"
+    with tempfile.TemporaryDirectory(prefix="shmobster-img-") as tmp:
+        src, dst = os.path.join(tmp, "in"), os.path.join(tmp, "out.png")
+        with open(src, "wb") as fh:
+            fh.write(blob)
+        try:
+            proc = subprocess.run([_SIPS, "-s", "format", "png", src, "--out", dst],
+                                  capture_output=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        except subprocess.TimeoutExpired:
+            return None, "decoding the image timed out"
+        if proc.returncode != 0 or not os.path.isfile(dst):
+            return None, "it is not a decodable image"
+        with open(dst, "rb") as fh:
+            png = fh.read(attachments._MAX_BYTES + 1)
+    if len(png) > attachments._MAX_BYTES:
+        return None, f"larger than the {attachments._MAX_BYTES} byte cap once re-encoded as PNG"
+    retval = _png_pixels_only(png)
+    return retval
+
+
+def _png_pixels_only(png):
+    """(png, None) with every chunk but the pixel-bearing ones dropped -- sips
+    carries text metadata across -- after checking each CRC and that the image
+    data inflates to exactly what the header says. (None, why) otherwise."""
+    bad = (None, "the re-encoded image did not check out")
+    if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+        return bad
+    out, at, idat, head = [png[:8]], 8, [], None
+    while at + 12 <= len(png):
+        n = struct.unpack(">I", png[at:at + 4])[0]
+        kind, data = png[at + 4:at + 8], png[at + 8:at + 8 + n]
+        if len(data) != n or png[at + 8 + n:at + 12 + n] != struct.pack(">I", zlib.crc32(kind + data)):
+            return bad
+        if kind in _PNG_KEEP:
+            out.append(png[at:at + 12 + n])
+        if kind == b"IHDR":
+            head = data
+        elif kind == b"IDAT":
+            idat.append(data)
+        at += 12 + n
+        if kind == b"IEND":
+            break
+    else:
+        return bad
+    if head is None or len(head) != 13 or not idat:
+        return bad
+    width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", head)
+    if interlace or color not in _PNG_CHANNELS:
+        return bad
+    row = (width * _PNG_CHANNELS[color] * depth + 7) // 8 + 1
+    if height * row > _PNG_MAX_PIXEL_BYTES:
+        return None, "the image is too large once decoded"
+    try:
+        inflater = zlib.decompressobj()
+        pixels = inflater.decompress(b"".join(idat), height * row + 1)
+    except zlib.error:
+        return bad
+    if len(pixels) != height * row or not inflater.eof or inflater.unused_data:
+        return bad
+    retval = (b"".join(out), None)
     return retval
 
 
@@ -493,11 +566,13 @@ def _image_file(channel, path):
             os.close(fd)
     if len(blob) > attachments._MAX_BYTES:
         return None, f"larger than the {attachments._MAX_BYTES} byte cap"
-    kind = _sniff(blob)
-    if kind is None:
+    if not _looks_like_image(blob):
         return None, "not a PNG, JPEG, GIF or WebP image by its content; only images can be sent"
-    name = os.path.splitext(os.path.basename(real))[0] + kind[1]
-    retval = ((blob, kind[0], name), None)
+    png, why = _reencode(blob)
+    if png is None:
+        return None, why
+    name = os.path.splitext(os.path.basename(real))[0] + ".png"
+    retval = ((png, "image/png", name), None)
     return retval
 
 

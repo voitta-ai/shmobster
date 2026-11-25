@@ -408,8 +408,8 @@ def capabilities(policy, channel=None):
             f"{'|'.join(sorted(grant.GH_READ_NOUNS))} "
             f"{'|'.join(sorted(grant.GH_READ_ACTIONS))} and gh auth status; aws "
             f"{'|'.join(p + '*' for p in grant.AWS_READ_PREFIXES)} and ls, except "
-            "operations that return a secret or write a file; npm ls; brew list "
-            "--versions; "
+            "operations that return a secret or write a file; npm "
+            f"{'|'.join(sorted(grant.NPM_READS))}; brew list --versions; "
             + ("vercel commands within this channel's vercel grant; " if policy.get("vercel") else "")
             + "curl to a host in the "
             "network list above, printing to stdout. Writes inside the tree "

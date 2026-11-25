@@ -62,13 +62,15 @@ def _locked():
                 if os.fstat(fd).st_nlink != 1:
                     # A second name for the lock's inode reaches it past the
                     # sandbox's pathname deny (#440): a hard link planted
-                    # before that deny existed. Nothing here makes one, so
-                    # move the lock to a fresh inode, once, before taking it.
-                    logging.warning("state: %s has another link; replacing it", lock_path())
-                    os.close(fd)
-                    fd = None
-                    os.unlink(lock_path())
-                    fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+                    # before that deny existed. Nothing here makes one.
+                    # Refused rather than repaired: two processes replacing
+                    # the inode at once can each lock a different one.
+                    logging.error(
+                        "state: %s has another hard link, so a sandboxed command "
+                        "could hold it; not writing. Stop shmobster, delete the "
+                        "lock file (it is recreated on the next write), and "
+                        "remove the other link", lock_path())
+                    raise OSError("lock file has more than one link")
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError:
                 logging.exception("state: could not lock %s; not writing", lock_path())

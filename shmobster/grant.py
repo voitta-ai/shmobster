@@ -1004,11 +1004,13 @@ _INERT_OPERATORS = frozenset(("#", "##", "%", "%%", "/", "//", "/#", "/%", "-", 
 _INERT_OPERAND_NODES = frozenset(("regex", "word", "/", "concatenation",
                                   "simple_expansion", "$", "variable_name"))
 # An operand's bytes, from the operator to the closing brace: literal text and
-# globs, with `$` only as a bare `$name`. No backquote, backslash, quote or
-# brace, so nothing in it can substitute (`$(`, `${`), do arithmetic (`$[`),
-# hide one of those behind an escape or a quote, or end the expansion
-# somewhere other than where tree-sitter ends it.
-_INERT_OPERAND = re.compile(rb"(?:[^$`\\'\"{}]|\$[A-Za-z_][A-Za-z0-9_]*)*")
+# globs, with `$` only as a bare `$name`. No backquote, backslash, quote,
+# brace or parenthesis, so nothing in it can substitute (`$(`, `${`, and
+# `<(`/`>(`, which bash runs inside a pattern or a default too), do arithmetic
+# (`$[`), hide one of those behind an escape or a quote, or end the expansion
+# somewhere other than where tree-sitter ends it. An extglob such as `@(a|b)`
+# parks with them.
+_INERT_OPERAND = re.compile(rb"(?:[^$`\\'\"{}()]|\$[A-Za-z_][A-Za-z0-9_]*)*")
 
 
 def _inert_expansion(node):

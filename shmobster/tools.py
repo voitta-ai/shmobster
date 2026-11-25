@@ -201,14 +201,21 @@ def run_shell(command, policy, channel=None, user_id=None, thread_ts=None):
         + "Your reply has two readers. Serve both, in this order:\n"
         "1. `tl;dr:` one line for the person who asked -- what you were "
         "trying to do and that it is now waiting on an approval. No "
-        "command, no flags, no id: they asked for an outcome.\n"
+        "command, no flags, no id: they asked for an outcome. "
+        # Each tag goes on its own line (#297). "Tag both" after the approver
+        # item read as "both are approvers", and an untrusted asker was told
+        # to approve a command they cannot.
+        f"Tag {_asker_tag(user_id)} on this line.\n"
         f"2. `for the approver:` what a trusted user needs to say yes "
         f"without reading the thread back -- the exact command, what it "
         f"will change, why it parked ({why}), and what to send: "
         f"`approve {req_id}` or `deny {req_id}` (or the card's button). Never name "
-        f"your own tools to people. Tag both, by id: "
-        f"{_asker_tag(user_id)} and {_trusted_tags()}.\n"
-        "Nobody should need a follow-up question to act. Do not retry the "
+        f"your own tools to people. "
+        + ("The person who asked is a trusted user and can approve it "
+           "themselves; do not tag them again.\n"
+           if user_id and user_id in config.TRUSTED_USERS else
+           f"Tag {_trusted_tags()} on this line, and only there.\n")
+        + "Nobody should need a follow-up question to act. Do not retry the "
         "command. End your turn now: once it is approved and runs, you are "
         "continued automatically with its output and can finish from there."
     )

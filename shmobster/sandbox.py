@@ -40,9 +40,20 @@ sandbox answers *where* a command may reach; approval (approvals.py) answers
 each enforced on every command.
 
 Not contained: the network. `git push`, `gh`, `aws`, `curl -X POST` are
-external effects, and they stay behind the approval card."""
+external effects, and they stay behind the approval card.
+
+...except in one variant, the offline profile (#348): `profile(pol,
+offline=True)` is the same profile with the network and the local IPC that
+amounts to it denied on top. It exists for one caller -- an inline interpreter
+program in an unattended channel (grant.check_offline), whose card used to
+carry only the agent's claim of what the program does. Under this profile the
+claim stops mattering: whatever the program does, it reaches what `cp`, `rm`
+and `tee` already reach uncarded there, and nothing off the box. See
+`_OFFLINE` for what it denies and what it leaves, and `offline_ready` for why
+it is probed before the command is granted."""
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -89,6 +100,75 @@ _DENY_READ = (
 # unauthenticated in the sandbox rather than a leak. Fixed by `gh auth login`
 # on a host with a working keychain.
 _GH_HOSTS = "~/.config/gh/hosts.yml"
+
+# The offline profile's additions (#348), appended after everything else so
+# they are the profile's last word. They are what makes an interpreter's
+# program irrelevant to its safety, so each one answers "how else could a
+# program with no socket still reach off the box, or reach a secret the
+# channel was not given?":
+#
+# - `network*`: every socket operation, inet and unix alike -- outbound
+#   TCP/UDP to anywhere including 127.0.0.1, DNS (the resolver is a unix
+#   socket to mDNSResponder), and a connect to a daemon's socket: docker, an
+#   ssh agent, a database. Also bind and listen, so nothing on the box can
+#   reach in to collect.
+# - `mach-lookup`: the other half of local IPC on Darwin. A program with no
+#   socket can still ask a daemon to act for it: the keychain (securityd),
+#   the pasteboard, AppleEvents and LaunchServices -- `open` or `osascript`
+#   start a process outside this sandbox, network and all. One service is
+#   carved back: dirhelper, which hands out the per-user temp dir, without
+#   which every Python and git start prints a confstr() warning into the
+#   output. Directory lookups (opendirectoryd's libinfo) are NOT carved back,
+#   though Python's `pwd.getpwuid` and node's `os.userInfo()` fail without
+#   them: seatbelt filters the lookup of a service, not the requests sent to
+#   it afterwards, and on a host bound to a network directory (LDAP, Active
+#   Directory) a user or group lookup with a name the program chose is a
+#   query to that server. `~` still resolves from HOME, and git works.
+# - `job-creation`: launchd jobs. `launchctl` reaches launchd through the
+#   bootstrap port, not a mach-lookup (`launchctl print` still answers under
+#   this profile), and a submitted job would run outside this sandbox. NOT
+#   measured: proving it means attempting a submit, which creates a job if
+#   the deny does not hold.
+# - `signal`, except to this sandbox's own processes: a signal could stop the
+#   agent or anything else the operator runs. `(target others)` was measured
+#   NOT to stop a signal to an unrelated process, hence deny-all plus the
+#   same-sandbox allow; the command's own children are in the same sandbox,
+#   so `subprocess` timeouts and terminate() still work.
+# - `system-socket`: PF_SYSTEM and AF_ROUTE sockets, which `network*` does
+#   not cover (measured: both open under it). They talk to kernel controls
+#   and the routing table, not to a host, but they are the kernel's own
+#   network plumbing and nothing an inline program needs; Python, git and
+#   `pwd` lookups were measured to work without them.
+#
+# Left reachable, on purpose: the filesystem exactly as the base profile
+# draws it (reads and writes are the channel's own), the channel's own `env`,
+# POSIX/SysV shared memory and semaphores (they need a cooperating process
+# that already runs outside, which this cannot start), and the rest of
+# `(allow default)`.
+#
+# Left reachable, NOT on purpose: the argv and environment of every other
+# process this user runs -- this agent's own included -- through the
+# KERN_PROCARGS2 sysctl. Measured on Darwin 25: neither `process-info*`
+# (target others), nor `sysctl-read` by name, nor `sysctl-read` denied
+# outright stops it, and `process-info*` denied outright stops the
+# interpreter from starting. A program here can therefore print any
+# credential this agent holds in its environment. This is reach the
+# interpreter grant adds, not reach a channel already had: `ps eww` is a
+# granted read, but /bin/ps is setuid and does not exec under the sandbox.
+# Open question for #348.
+_OFFLINE = (
+    "(deny network*)",
+    "(deny mach-lookup)",
+    '(allow mach-lookup (global-name "com.apple.bsd.dirhelper"))',
+    "(deny system-socket)",
+    "(deny job-creation)",
+    "(deny signal)",
+    "(allow signal (target same-sandbox))",
+)
+
+# What the probe runs: no shell, no file, nothing but the profile itself being
+# compiled and applied by the kernel.
+_PROBE = "/usr/bin/true"
 
 
 def gh_file_backed():
@@ -200,8 +280,9 @@ def roots(pol):
     return retval
 
 
-def profile(pol):
-    """The seatbelt profile for one channel policy. Later rules win."""
+def profile(pol, offline=False):
+    """The seatbelt profile for one channel policy. Later rules win. With
+    `offline`, the network and network-shaped IPC are denied too (#348)."""
     writes, reads, deny = roots(pol)
     cwd = _real(policy.cwd_for(pol))
     excludes = [_real(p, cwd) for p in (pol.get("exclude") or [])]
@@ -340,20 +421,48 @@ def profile(pol):
             + " ".join(f"(subpath {_quote(p)})" for p in excludes)
             + ")"
         )
+    if offline:
+        lines.extend(_OFFLINE)
     retval = "\n".join(lines) + "\n"
     return retval
 
 
-def wrap(command, pol, network=True):
+def wrap(command, pol, network=True, offline=False):
     """argv that runs `command` confined to the channel's tree. Raises
     RuntimeError when the sandbox is unavailable -- the caller must not fall
     back to running unconfined. `network=False` also denies every socket, for
-    a caller that runs nothing that should reach anywhere (gitstate's probes)."""
+    a caller that runs nothing that should reach anywhere (gitstate's probes).
+    `offline` applies the offline profile (#348): the network and the local
+    IPC that amounts to it, for an inline interpreter program."""
     exe = shutil.which("sandbox-exec")
     if not exe:
         raise RuntimeError(
             f"sandbox-exec not found on {sys.platform}; refusing to run unconfined (#116)"
         )
-    prof = profile(pol) + ("" if network else "(deny network*)\n")
+    prof = profile(pol, offline) + ("" if network else "(deny network*)\n")
     retval = [exe, "-p", prof, "/bin/sh", "-c", command]
+    return retval
+
+
+def offline_ready(pol):
+    """(ok, why): can this channel's offline profile be built AND applied?
+
+    Asked before a command is granted on the strength of that profile (#348),
+    so a failure parks the command as it always did instead of surfacing as an
+    exec error after the grant. Building is not enough: seatbelt rejects an
+    operation name it does not know only when the profile is applied, so a
+    Darwin that renamed one would build a profile here and refuse it in
+    sandbox-exec. Applying it to `true` is the whole question, for the cost
+    of one process."""
+    try:
+        exe = shutil.which("sandbox-exec")
+        if not exe:
+            raise RuntimeError(f"sandbox-exec not found on {sys.platform}")
+        proc = subprocess.run([exe, "-p", profile(pol, offline=True), _PROBE],
+                              capture_output=True, text=True, timeout=10, env={})
+        ok = proc.returncode == 0
+        why = "" if ok else (proc.stderr.strip() or f"exit {proc.returncode}")
+    except Exception as exc:
+        ok, why = False, str(exc)
+    retval = (ok, why)
     return retval

@@ -116,6 +116,18 @@ FS_VERBS = frozenset(("cp", "mv", "mkdir", "touch", "tee", "ln", "chmod", "sed")
 # decorative. `curl` and `wget` keep their own rule for the same reason, and
 # `sudo` is refused before this point.
 #
+# The one exception is an inline program under the offline profile (#348,
+# INLINE_INTERPRETERS below): `python3 -c`, `node -e`, `python3 -` fed by a
+# heredoc. Its card could only repeat what the agent said the program does,
+# and nothing checked that. Run with the network denied by the kernel
+# (sandbox.py, `_OFFLINE`), what the program does stops mattering: it reaches
+# the tree that `rm` and `tee` above already reach, and nothing off the box.
+# One local reach is not closed by the profile and is recorded beside it in
+# sandbox.py: other processes' argv and environment. So it is granted only by
+# `check_offline`, never by `check`, and only when the caller runs it under
+# that profile -- the grant and the profile are one decision, not two that
+# have to agree.
+#
 # `apply_patch` is the agent's own editor -- an Update/Add/Delete-File patch read
 # from a heredoc -- and it only ever writes files, the same blast radius as
 # `patch` and `tee` beside it, confined to the tree by the sandbox. It was the
@@ -552,6 +564,28 @@ def _brew_versions(args, src):
     return retval
 
 
+# Interpreters whose inline program an unattended channel runs uncarded under
+# the offline profile (#348). Per interpreter: the flags that may precede the
+# program (none of them loads code or names a file), and the flags that take
+# the program as their value. A program from stdin is the other inline form,
+# and only when stdin is a single heredoc or herestring in this command.
+#
+# The program's text is never read -- the guard is the profile, not a parse of
+# Python or JavaScript -- so what is checked here is only that it IS the
+# program: a script path, `-m module`, `-r preload`, `npx` and a piped stdin
+# all run code from disk or the registry, and those keep their card.
+INLINE_INTERPRETERS = {
+    "python": (frozenset(("-I", "-B", "-E", "-s", "-S", "-u", "-q")), frozenset(("-c",))),
+    "python3": (frozenset(("-I", "-B", "-E", "-s", "-S", "-u", "-q")), frozenset(("-c",))),
+    "node": (frozenset(("--input-type=module", "--input-type=commonjs")),
+             frozenset(("-e", "--eval", "-p", "--print"))),
+}
+# node keeps parsing its own options after the program -- `node -e P -r x.js`
+# preloads x.js -- where python hands everything after it to the program. So a
+# node argument that looks like an option is refused unless `--` came first.
+_INLINE_OPTIONS_AFTER = frozenset(("node",))
+
+
 # Fetch verbs this layer can vouch for when the host is already allow-listed
 # (#239). Only `curl`, which writes to stdout unless told otherwise; see
 # `Walker.fetch` for why `wget` is not here.
@@ -975,6 +1009,32 @@ def _reads_only(node):
     return retval
 
 
+def _feeds_stdin(node):
+    """True for a redirect that can change what a command reads on stdin: a
+    heredoc, a herestring, or a file redirect with `<` anywhere in its
+    operator (`<`, `<&`, `<>`, with or without a descriptor number -- a
+    numbered one is refused with the rest, not reasoned about)."""
+    if node.type in ("heredoc_redirect", "herestring_redirect"):
+        retval = True
+    elif node.type == "file_redirect":
+        retval = any(b"<" in c.text for c in node.children if not c.is_named)
+    else:
+        retval = False
+    return retval
+
+
+def _last_command(node):
+    """The simple command a trailing redirect binds to: bash attaches
+    `a && b <<EOF` to `b`, and `a | b <<EOF` too. None when the tail is not a
+    simple command."""
+    cur = node
+    while cur is not None and cur.type in ("list", "pipeline"):
+        kids = [c for c in cur.children if c.type not in _SKIP]
+        cur = kids[-1] if kids else None
+    retval = cur if cur is not None and cur.type == "command" else None
+    return retval
+
+
 def _text(node, src):
     retval = src[node.start_byte:node.end_byte].decode("utf-8", "replace")
     return retval
@@ -1253,7 +1313,8 @@ def _resolve(target, tracked, quoted=False):
 
 
 class _Walker:
-    def __init__(self, src, start_dir, policy=None, channel=None, thread_ts=None):
+    def __init__(self, src, start_dir, policy=None, channel=None, thread_ts=None,
+                 offline=False):
         self.src = src
         self.start_dir = start_dir
         # Directory tracking for git: every directory bash could be in at
@@ -1292,6 +1353,16 @@ class _Walker:
         # Arguments of the current segment that are `--`-guarded
         # substitutions, by byte span; `git` steps over them.
         self._opaque = frozenset()
+        # The caller runs this command under the offline profile (#348), so an
+        # inline interpreter program may be granted -- in an unattended channel
+        # only. Never true for `check`.
+        self.offline = offline and self.unattended
+        # While walking the body of a redirected statement: the simple command
+        # its trailing redirects bind to, those of them that feed stdin, and
+        # the source bytes between the body and the first redirect (#348).
+        self.stdin_target = None
+        self.stdin_feeds = []
+        self.stdin_gap = b""
 
     def read_scope(self, fn, *args):
         """fn(*args) with only read rules in force (#373).
@@ -1595,6 +1666,22 @@ class _Walker:
                         for c in kids)
             and any(c.type == "file_redirect" and _stdout_write(c) for c in kids))
         self.writes_file = self.writes_file or writes
+        saved_stdin = (self.stdin_target, self.stdin_feeds, self.stdin_gap)
+        target = _last_command(body)
+        first = next((c for c in node.children if c is not body), None)
+        self.stdin_target = (target.start_byte, target.end_byte) if target else None
+        # A redirect written after a heredoc's opening word hangs under the
+        # heredoc node (`python3 - <<EOF < script.py`), and bash reads the
+        # last stdin redirect, so those count as much as their siblings.
+        self.stdin_feeds = [c for c in node.children if _feeds_stdin(c)]
+        self.stdin_feeds += [k for c in node.children if c.type == "heredoc_redirect"
+                             for k in c.children if _feeds_stdin(k)]
+        # tree-sitter drops a lone `-` written just before a heredoc's `<<`
+        # from the command node: `python3 - <<EOF` parses as `python3` with a
+        # gap. Kept here so the interpreter rule can see it, and anything else
+        # in that gap refuses there rather than being read as nothing.
+        self.stdin_gap = (self.src[body.end_byte:first.start_byte].strip()
+                          if first is not None and first.start_byte >= body.end_byte else b"")
         if writes:
             # A redirect writes before a later segment runs, which is the same
             # hazard the result path marks for `cp`/`mv` (#328 r2):
@@ -1603,6 +1690,7 @@ class _Walker:
         retval = self.walk(body)
         self.writes_file = saved
         self.heredoc_stdin = saved_heredoc
+        self.stdin_target, self.stdin_feeds, self.stdin_gap = saved_stdin
         if retval[0]:
             # A redirect after a list opens its file once the list's `cd`s
             # have run, so the directory is judged again where it now stands.
@@ -1783,6 +1871,11 @@ class _Walker:
             retval = (True, f"{verb}: unattended channel, output to a file")
         elif self.unattended and verb in FLAG_CHECKED_READS:
             retval = self.flag_checked(verb, args)
+        elif self.offline and self.unattended and verb in INLINE_INTERPRETERS:
+            # `self.unattended` again, not only at __init__: read_scope clears
+            # it inside a loop body or a substitution, where only reads are
+            # granted (#373), and an interpreter is not a read.
+            retval = self.inline_program(verb, args, node)
         else:
             retval = None
         # Why the read rule did not apply, kept for the refusal below (#213).
@@ -1877,6 +1970,69 @@ class _Walker:
             retval = "awk: an operand is not a plain word or single-quoted string"
         elif any(t.startswith(("/inet", "/p/inet")) for t in texts[at + 1:]):
             retval = "awk: an operand names a gawk network file"
+        return retval
+
+    def inline_program(self, verb, args, node):
+        """An interpreter given its program inline, granted to run offline
+        (#348): `-c PROG` / `-e PROG`, or `-` (or nothing) with the program on
+        a heredoc or herestring. Everything else that names this interpreter
+        -- a script, a module, a preload, stdin from a pipe or a file -- is
+        refused here with the reason it parks.
+
+        Only the SHAPE of the argv is read. Whether the program is safe is not
+        this layer's question: the offline profile answers it in the kernel,
+        whatever the program says."""
+        pre, evals = INLINE_INTERPRETERS[verb]
+        # Every word must be the word the interpreter gets, or there is no
+        # telling a flag from a program from a path.
+        if not all(_static(a) for a in args):
+            return (False, f"{verb}: an argument is not a literal, so the program cannot be told from a script")
+        # Every byte of the command must belong to some word: a word the parser
+        # dropped is a word this would not have judged.
+        kids = node.children
+        for a, b in zip(kids, kids[1:]):
+            if self.src[a.end_byte:b.start_byte].strip():
+                return (False, f"{verb}: the command has a word the parser did not place")
+        texts = [_literal_word(a, self.src) for a in args]
+        i = 0
+        while i < len(args) and texts[i] in pre:
+            i += 1
+        head = texts[i] if i < len(args) else None
+        own = [c for c in kids if _feeds_stdin(c)]
+        own += [k for c in kids if c.type == "heredoc_redirect"
+                for k in c.children if _feeds_stdin(k)]
+        mine = self.stdin_target == (node.start_byte, node.end_byte)
+        feeds = own + (self.stdin_feeds if mine else [])
+        gap = self.stdin_gap if mine else b""
+        if gap not in (b"", b"-"):
+            return (False, f"{verb}: the command has a word the parser did not place")
+        if head in evals and gap == b"":
+            if i + 1 >= len(args):
+                return (False, f"{verb} {head}: no program")
+            prog = args[i + 1]
+            if prog.type not in ("raw_string", "string") and texts[i + 1] is None:
+                return (False, f"{verb} {head}: the program is not one literal word")
+            after = texts[i + 2:]
+            form = f"{verb} {head}"
+        elif (head == "-" or (head is None and i == len(args))) and (
+                len(feeds) == 1 and feeds[0].type in ("heredoc_redirect", "herestring_redirect")):
+            # `-` either survived as a word or sits in the gap; both are the
+            # same command. Bash reads the LAST stdin redirect, so exactly one
+            # may exist, or a `< script.py` beside the heredoc would win.
+            after = texts[i + 1:] if head == "-" else []
+            if gap == b"-" and head is not None:
+                return (False, f"{verb}: the command has a word the parser did not place")
+            form = f"{verb} - <<heredoc" if feeds[0].type == "heredoc_redirect" else f"{verb} - <<<"
+        else:
+            return (False, f"{verb}: not an inline program (a script, a module, a flag, "
+                           f"or stdin that is not one heredoc)")
+        if verb in _INLINE_OPTIONS_AFTER:
+            for t in after:
+                if t == "--":
+                    break
+                if t is None or t.startswith("-"):
+                    return (False, f"{verb}: an option after the program, which {verb} still reads")
+        retval = (True, f"{form}: inline program, unattended channel, run without the network")
         return retval
 
     def fetch(self, verb, text, args):
@@ -2631,11 +2787,28 @@ def _vercel_deployment_project(target, names, team):
 def check(command, policy, channel=None, thread_ts=None):
     """(granted, reason). `reason` lists every segment's grounds when granted,
     or the first refusal when not."""
+    retval = _check(command, policy, channel, thread_ts, offline=False)
+    return retval
+
+
+def check_offline(command, policy, channel=None, thread_ts=None):
+    """`check`, plus inline interpreter programs in an unattended channel
+    (#348) -- for a caller that runs the WHOLE command under the offline
+    profile (sandbox.wrap(..., offline=True)) when this grants and `check`
+    did not. A separate entry point rather than a flag on the result, so a
+    caller that ignores the difference cannot run an interpreter with the
+    network: `check` never grants one."""
+    retval = _check(command, policy, channel, thread_ts, offline=True)
+    return retval
+
+
+def _check(command, policy, channel, thread_ts, offline):
     src = command.encode("utf-8")
     tree = tree_sitter.Parser(_LANG).parse(src)
     if tree.root_node.has_error:
         return (False, "command does not parse")
-    walker = _Walker(src, policy_mod.cwd_for(policy), policy, channel, thread_ts)
+    walker = _Walker(src, policy_mod.cwd_for(policy), policy, channel, thread_ts,
+                     offline=offline)
     ok, why = walker.walk(tree.root_node)
     if ok and not walker.reasons:
         ok, why = (False, "empty command")

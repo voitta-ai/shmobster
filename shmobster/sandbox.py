@@ -131,6 +131,12 @@ _GH_HOSTS = "~/.config/gh/hosts.yml"
 #   NOT to stop a signal to an unrelated process, hence deny-all plus the
 #   same-sandbox allow; the command's own children are in the same sandbox,
 #   so `subprocess` timeouts and terminate() still work.
+# - `system-socket`: PF_SYSTEM and AF_ROUTE sockets, which `network*` does
+#   not cover (measured: both open under it). They talk to kernel controls
+#   and the routing table, not to a host, but they are the kernel's own
+#   network plumbing and nothing an inline program needs; Python, git and
+#   `pwd` lookups were measured to work without them.
+#
 # Left reachable, on purpose: the filesystem exactly as the base profile
 # draws it (reads and writes are the channel's own), the channel's own `env`,
 # POSIX/SysV shared memory and semaphores (they need a cooperating process
@@ -143,12 +149,16 @@ _GH_HOSTS = "~/.config/gh/hosts.yml"
 # (target others), nor `sysctl-read` by name, nor `sysctl-read` denied
 # outright stops it, and `process-info*` denied outright stops the
 # interpreter from starting. A program here can therefore print any
-# credential this agent holds in its environment. Open question for #348.
+# credential this agent holds in its environment. This is reach the
+# interpreter grant adds, not reach a channel already had: `ps eww` is a
+# granted read, but /bin/ps is setuid and does not exec under the sandbox.
+# Open question for #348.
 _OFFLINE = (
     "(deny network*)",
     "(deny mach-lookup)",
     '(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo")'
     ' (global-name "com.apple.bsd.dirhelper"))',
+    "(deny system-socket)",
     "(deny job-creation)",
     "(deny signal)",
     "(allow signal (target same-sandbox))",

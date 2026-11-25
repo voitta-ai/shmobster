@@ -59,6 +59,16 @@ def _locked():
         if _DEPTH == 0:
             try:
                 fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+                if os.fstat(fd).st_nlink != 1:
+                    # A second name for the lock's inode reaches it past the
+                    # sandbox's pathname deny (#440): a hard link planted
+                    # before that deny existed. Nothing here makes one, so
+                    # move the lock to a fresh inode, once, before taking it.
+                    logging.warning("state: %s has another link; replacing it", lock_path())
+                    os.close(fd)
+                    fd = None
+                    os.unlink(lock_path())
+                    fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError:
                 logging.exception("state: could not lock %s; not writing", lock_path())

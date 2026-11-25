@@ -33,6 +33,13 @@ class Surface:
     def permalink(self, channel, ts):
         return ""
 
+    def tools(self, channel):
+        """Tool schemas only this surface can serve (#450's send_image)."""
+        return []
+
+    def call_tool(self, name, args, channel):
+        return f"unknown tool: {name}"
+
 
 class SlackSurface(Surface):
     kind = "slack"

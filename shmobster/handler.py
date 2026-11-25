@@ -175,6 +175,7 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
     cost.start()
     policy = policy_mod.resolve(channel)
     flagging = False
+    surface_tools = set()
     tool_schemas = list(tools.TOOLS)
     if surface is not None:
         # The slack tools read and post through a Slack client, so only a Slack
@@ -182,6 +183,10 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
         if surface.client is not None:
             tool_schemas += slack_tools.TOOLS
         tool_schemas += admin_tools.TOOLS
+        # A tool only this surface can serve, e.g. the gateway's send_image (#450).
+        _own = surface.tools(channel)
+        surface_tools = {t["function"]["name"] for t in _own}
+        tool_schemas += _own
         # The flag is offered only where a PR can follow it (#129).
         if learning.enabled():
             tool_schemas += learning.TOOLS
@@ -359,6 +364,8 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
             elif name in learning.NAMES:
                 ctx = {"user_id": user_id, "channel": channel, "thread_ts": thread_ts, "surface": surface}
                 result = learning.dispatch(name, args, ctx)
+            elif name in surface_tools:
+                result = surface.call_tool(name, args, channel)
             elif name in skills.NAMES:
                 result = skills.dispatch(name, args, channel)
             elif name in mcp.names(channel, policy):

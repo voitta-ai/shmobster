@@ -190,7 +190,7 @@ assert blocked.startswith("NOT RUN"), blocked
 # person who asked wants the outcome, the trusted user who can act wants the
 # command, what it changes and the id. One reply used to serve neither.
 assert "tl;dr:" in blocked and "for the approver:" in blocked, blocked
-assert "Tag both, by id" in blocked, blocked
+assert "Tag the person who asked on this line." in blocked, blocked
 # The asker's id is rendered here, not left to the model: on a root message it
 # appears nowhere in the model's context, so "tag the person who asked" was an
 # instruction it could only guess at.

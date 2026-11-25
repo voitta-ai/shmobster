@@ -32,6 +32,13 @@ _LOCK = threading.RLock()
 _DEPTH = 0
 
 
+def lock_path():
+    """The interprocess lock's path, `<state>.lock`. The one place it is
+    derived: the sandbox denies this same path to every channel (#440)."""
+    retval = f"{_PATH}.lock"
+    return retval
+
+
 class _Unlocked(Exception):
     """The interprocess lock could not be taken; the write is refused."""
 
@@ -51,10 +58,22 @@ def _locked():
         fd = None
         if _DEPTH == 0:
             try:
-                fd = os.open(f"{_PATH}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                fd = os.open(lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+                if os.fstat(fd).st_nlink != 1:
+                    # A second name for the lock's inode reaches it past the
+                    # sandbox's pathname deny (#440): a hard link planted
+                    # before that deny existed. Nothing here makes one.
+                    # Refused rather than repaired: two processes replacing
+                    # the inode at once can each lock a different one.
+                    logging.error(
+                        "state: %s has another hard link, so a sandboxed command "
+                        "could hold it; not writing. Stop shmobster, delete the "
+                        "lock file (it is recreated on the next write), and "
+                        "remove the other link", lock_path())
+                    raise OSError("lock file has more than one link")
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError:
-                logging.exception("state: could not lock %s.lock; not writing", _PATH)
+                logging.exception("state: could not lock %s; not writing", lock_path())
                 if fd is not None:
                     os.close(fd)
                 raise _Unlocked() from None

@@ -744,11 +744,14 @@ def _resume(channel, req_id, req, approved, result, user, surface):
                                channel=channel, thread_ts=_THREAD,
                                user_id=user, surface=surface, requester=req.get("requester"))
         if reply is None:
-            waiting = approvals.pending_in(channel, _THREAD)
-            if waiting:
+            pending = approvals.pending_ids(channel, _THREAD)
+            waiting = len(pending)
+            if waiting:   # named, so a stale one is visible (#350)
                 send(channel, f"[{req_id}] is resolved, and this task is waiting on {waiting} more "
-                              f"request{'s' if waiting > 1 else ''} here. It continues on its own "
-                              "once the last one is answered.")
+                              f"request{'s' if waiting > 1 else ''} here: "
+                              f"{', '.join(f'[{k}]' for k in pending)}. It continues on its own "
+                              "once the last one is answered. If one of them is stale, ask me "
+                              "to withdraw it.")
             return
         send(channel, reply)
         _post_pending(channel, surface)

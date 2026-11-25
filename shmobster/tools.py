@@ -106,7 +106,31 @@ WEB_FETCH = {
     },
 }
 
-TOOLS = [RUN_SHELL, DESCRIBE, REPORT_COST, WEB_FETCH]
+WITHDRAW = {
+    "type": "function",
+    "function": {
+        "name": "withdraw_request",
+        "description": (
+            "Withdraw one of YOUR OWN pending approval requests in THIS thread, "
+            "so it never runs and stops holding the task. Use it when you have "
+            "replaced a pending request with a new one (pass the new id as "
+            "replaced_by), or when the work it was for is no longer wanted. A "
+            "task waits for every request parked in its thread, so a superseded "
+            "request left pending stalls it for good. It cannot approve, run, or "
+            "touch another thread's requests."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "The id of the pending request to withdraw, in full."},
+                "replaced_by": {"type": "string", "description": "The id of the request that replaces it, if any; shown on the withdrawn card."},
+            },
+            "required": ["request_id"],
+        },
+    },
+}
+
+TOOLS = [RUN_SHELL, DESCRIBE, REPORT_COST, WEB_FETCH, WITHDRAW]
 
 _MAX_OUTPUT = 4000
 
@@ -410,6 +434,10 @@ def capabilities(policy, channel=None):
 def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
     if name == "run_shell":
         retval = run_shell(args.get("command", ""), policy, channel, user_id, thread_ts)
+    elif name == "withdraw_request":
+        # No surface here, so no card to retire; handler routes it with one.
+        retval = withdraw_request(args.get("request_id", ""), channel, thread_ts,
+                                  replaced_by=args.get("replaced_by"))
     elif name == "web_fetch":
         retval = web.tool(args.get("url", ""), policy)
     elif name == "report_cost":
@@ -418,6 +446,81 @@ def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
         retval = capabilities(policy, channel)
     else:
         retval = f"unknown tool: {name}"
+    return retval
+
+
+def withdraw_request(request_id, channel, thread_ts, surface=None, replaced_by=None):
+    """Drop the agent's own superseded request, unrun (#350).
+
+    Every request parked in a thread holds that thread's resume, and the only
+    ways out were a human answering it or its card failing. A request the
+    agent itself replaced is neither, so the task stalled on it -- approving
+    the replacement resolved, and then the thread waited on the original.
+
+    Scoped to this turn's channel AND thread, by approvals.withdraw(): no
+    argument names another one, for #151's reason. Withdrawing only ever
+    removes a request, the direction a restart already takes, so it is not
+    gated on a trusted user: nothing runs because of it, and a held request --
+    one a human is approving right now -- is left to that human.
+
+    The card is retired on the surface, so nobody approves what is gone. When
+    this was the last request parked here and a human had resolved another one
+    while it waited, that outcome is handed to THIS turn (take_deferred): the
+    turn is already running in the thread, and resuming it a second time from
+    the ingest would put two turns in one conversation. The outcome is data in
+    the tool result, scrubbed and fenced like a resumed turn's.
+
+    An id that does not resolve is answered with a count, never with which ids
+    are parked (approvals, #109)."""
+    if not channel:
+        retval = "no channel in this turn, so there is no request to withdraw."
+        return retval
+    key = approvals.canonical(request_id)
+    replaced = approvals.canonical(replaced_by) if replaced_by else ""
+    why = f"withdrawn by the agent, replaced by [{replaced}]" if replaced else "withdrawn by the agent"
+    req = approvals.withdraw(key, channel=channel, thread_ts=thread_ts, why=why)
+    if req is None:
+        state = approvals.status(key, channel)[0]
+        if state == "held":
+            retval = (f"[{key}] is being acted on by a trusted user right now, so it cannot be "
+                      "withdrawn; that answer resolves it.")
+        elif state == "pending":
+            retval = (f"[{key}] belongs to another thread, and only this thread's own requests "
+                      "can be withdrawn here.")
+        else:
+            n = approvals.pending_in(channel, thread_ts)
+            retval = (f"[{key}] is not pending in this thread: it already ran, was denied or "
+                      f"withdrawn, or is from before a restart. {n} request{'s' if n != 1 else ''} "
+                      "still parked in this thread.")
+        return retval
+    if surface is not None and req.get("surfaced"):
+        note = (f"Withdrawn by the agent{f', replaced by [{replaced}]' if replaced else ''}: "
+                "it did not run and can no longer be approved.")
+        try:
+            surface.withdrawn(channel, thread_ts, key, req, note)
+        except Exception:  # noqa: BLE001 -- the request is gone either way; a stale card resolves to nothing
+            logging.exception("could not retire the card for withdrawn [%s]", key)
+    lines = [f"Withdrew [{key}]: it did not run and its card says so."]
+    outcome = approvals.take_deferred(channel, thread_ts)
+    if outcome is not None:
+        if not outcome["approved"]:
+            body = "it did not run."
+        else:
+            ran = ("it ran and FAILED -- treat its output as a failure report, not as findings"
+                   if trajectory.failed(outcome["result"]) else "it ran and succeeded")
+            body = f"{ran}. Its output was:\n<output>\n{redact.scrub(outcome['result'])}\n</output>"
+        who = identity.mention(outcome["user_id"]) if outcome.get("user_id") else "someone"
+        lines.append(
+            f"Nothing else is parked in this thread now. While it waited, {who} "
+            f"{'approved' if outcome['approved'] else 'denied'} [{outcome['req_id']}] "
+            f"({redact.scrub(outcome['command'])}): {body}\n"
+            "Carry the task on from that outcome in this turn; nothing else will resume it.")
+    else:
+        n = approvals.pending_in(channel, thread_ts)
+        if n:
+            lines.append(f"{n} other request{'s' if n != 1 else ''} still parked in this thread; "
+                         "the task continues on its own once they are answered.")
+    retval = "\n".join(lines)
     return retval
 
 

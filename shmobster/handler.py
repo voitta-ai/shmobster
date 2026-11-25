@@ -373,6 +373,11 @@ def handle(text, thread_context=None, channel=None, thread_ts=None, user_id=None
                     name, args, surface.client if surface is not None else None,
                     {"channel": channel, "policy": policy, "thread_ts": thread_ts},
                 )
+            elif name == "withdraw_request":
+                # Routed here, not through tools.dispatch, because retiring the
+                # card needs the surface (#350).
+                result = tools.withdraw_request(args.get("request_id", ""), channel, thread_ts,
+                                                surface=surface, replaced_by=args.get("replaced_by"))
             else:
                 result = tools.dispatch(name, args, policy, channel, thread_ts, user_id)
             # Redact at collection (#72): every downstream copy -- this context,

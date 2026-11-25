@@ -339,12 +339,16 @@ def pending_ids(channel, thread_ts):
     A request with no thread is counted by pending_in() but not named here
     (#350 review): it would be named in every thread of the channel, and
     approving is channel-scoped, so a thread that never saw its card would be
-    handed an id it could approve."""
+    handed an id it could approve. Nor is one whose card is not up -- not yet
+    posted, or failed and waiting out its backoff (unsurface() clears the
+    flag): its id would be approvable by typing it, without the card that
+    shows the command and why it parked."""
     with _LOCK:
         retval = [k for k, req in _PENDING.items()
                   if req.get("channel") == channel
                   and req.get("thread_ts") is not None
-                  and req.get("thread_ts") == thread_ts]
+                  and req.get("thread_ts") == thread_ts
+                  and req.get("surfaced")]
     return retval
 
 

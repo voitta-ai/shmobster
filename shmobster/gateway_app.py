@@ -746,9 +746,9 @@ def _resume(channel, req_id, req, approved, result, user, surface):
         if reply is None:
             pending = approvals.pending_ids(channel, _THREAD)
             waiting = approvals.pending_in(channel, _THREAD)
-            if waiting:   # named, so a stale one is visible (#350); a threadless one only counted
+            if waiting:   # named, so a stale one is visible (#350); one with no card here only counted
                 named = [f"[{k}]" for k in pending] + (
-                    [f"{waiting - len(pending)} with no thread"] if waiting > len(pending) else [])
+                    [f"{waiting - len(pending)} whose card is not shown here"] if waiting > len(pending) else [])
                 send(channel, f"[{req_id}] is resolved, and this task is waiting on {waiting} more "
                               f"request{'s' if waiting > 1 else ''} here: "
                               f"{', '.join(named)}. It continues on its own "

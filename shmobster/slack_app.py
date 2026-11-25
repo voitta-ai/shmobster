@@ -493,9 +493,10 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
                 # under a lock. The ids are named (#350): a count could not show
                 # that the one left is a request the agent already replaced.
                 _plural = "s" if waiting > 1 else ""
-                # A request with no thread is counted, never named (#350 review).
+                # A request with no thread, or whose card is not up, is counted,
+                # never named (#350 review).
                 _named = ", ".join([f"[{k}]" for k in pending]
-                                   + ([f"{waiting - len(pending)} with no thread"]
+                                   + ([f"{waiting - len(pending)} whose card is not shown here"]
                                       if waiting > len(pending) else []))
                 try:
                     client.chat_postMessage(

@@ -115,12 +115,15 @@ _GH_HOSTS = "~/.config/gh/hosts.yml"
 # - `mach-lookup`: the other half of local IPC on Darwin. A program with no
 #   socket can still ask a daemon to act for it: the keychain (securityd),
 #   the pasteboard, AppleEvents and LaunchServices -- `open` or `osascript`
-#   start a process outside this sandbox, network and all. Two services are
-#   carved back, both measured as needed and neither able to act elsewhere:
-#   directory lookups (getpwuid), without which Python's `pwd`, node's
-#   `os.userInfo()` and git's identity fail -- it answers who a uid is; and
-#   dirhelper, which hands out the per-user temp dir, without which every
-#   Python start prints a confstr() warning into the output.
+#   start a process outside this sandbox, network and all. One service is
+#   carved back: dirhelper, which hands out the per-user temp dir, without
+#   which every Python and git start prints a confstr() warning into the
+#   output. Directory lookups (opendirectoryd's libinfo) are NOT carved back,
+#   though Python's `pwd.getpwuid` and node's `os.userInfo()` fail without
+#   them: seatbelt filters the lookup of a service, not the requests sent to
+#   it afterwards, and on a host bound to a network directory (LDAP, Active
+#   Directory) a user or group lookup with a name the program chose is a
+#   query to that server. `~` still resolves from HOME, and git works.
 # - `job-creation`: launchd jobs. `launchctl` reaches launchd through the
 #   bootstrap port, not a mach-lookup (`launchctl print` still answers under
 #   this profile), and a submitted job would run outside this sandbox. NOT
@@ -156,8 +159,7 @@ _GH_HOSTS = "~/.config/gh/hosts.yml"
 _OFFLINE = (
     "(deny network*)",
     "(deny mach-lookup)",
-    '(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo")'
-    ' (global-name "com.apple.bsd.dirhelper"))',
+    '(allow mach-lookup (global-name "com.apple.bsd.dirhelper"))',
     "(deny system-socket)",
     "(deny job-creation)",
     "(deny signal)",

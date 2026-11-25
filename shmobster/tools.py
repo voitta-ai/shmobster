@@ -116,8 +116,9 @@ WITHDRAW = {
             "replaced a pending request with a new one (pass the new id as "
             "replaced_by), or when the work it was for is no longer wanted. A "
             "task waits for every request parked in its thread, so a superseded "
-            "request left pending stalls it for good. It cannot approve, run, or "
-            "touch another thread's requests."
+            "request left pending stalls it for good. Only for a request of the "
+            "person you are talking to, unless they are a trusted user. It cannot "
+            "approve, run, or touch another thread's requests."
         ),
         "parameters": {
             "type": "object",
@@ -437,7 +438,7 @@ def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
     elif name == "withdraw_request":
         # No surface here, so no card to retire; handler routes it with one.
         retval = withdraw_request(args.get("request_id", ""), channel, thread_ts,
-                                  replaced_by=args.get("replaced_by"))
+                                  replaced_by=args.get("replaced_by"), user_id=user_id)
     elif name == "web_fetch":
         retval = web.tool(args.get("url", ""), policy)
     elif name == "report_cost":
@@ -449,7 +450,7 @@ def dispatch(name, args, policy, channel=None, thread_ts=None, user_id=None):
     return retval
 
 
-def withdraw_request(request_id, channel, thread_ts, surface=None, replaced_by=None):
+def withdraw_request(request_id, channel, thread_ts, surface=None, replaced_by=None, user_id=None):
     """Drop the agent's own superseded request, unrun (#350).
 
     Every request parked in a thread holds that thread's resume, and the only
@@ -458,10 +459,11 @@ def withdraw_request(request_id, channel, thread_ts, surface=None, replaced_by=N
     the replacement resolved, and then the thread waited on the original.
 
     Scoped to this turn's channel AND thread, by approvals.withdraw(): no
-    argument names another one, for #151's reason. Withdrawing only ever
-    removes a request, the direction a restart already takes, so it is not
-    gated on a trusted user: nothing runs because of it, and a held request --
-    one a human is approving right now -- is left to that human.
+    argument names another one, for #151's reason. Nothing runs because of
+    it, and a held request -- one a human is approving right now -- is left to
+    that human. It still drops a request unanswered, which is what deny does,
+    so only the person whose task it is or a trusted user may (#350 review):
+    the turn's user must be the request's requester, or trusted.
 
     The card is retired on the surface, so nobody approves what is gone. When
     this was the last request parked here and a human had resolved another one
@@ -478,10 +480,19 @@ def withdraw_request(request_id, channel, thread_ts, surface=None, replaced_by=N
     key = approvals.canonical(request_id)
     replaced = approvals.canonical(replaced_by) if replaced_by else ""
     why = f"withdrawn by the agent, replaced by [{replaced}]" if replaced else "withdrawn by the agent"
-    req = approvals.withdraw(key, channel=channel, thread_ts=thread_ts, why=why)
+    trusted = bool(user_id) and user_id in config.TRUSTED_USERS
+    if not trusted and not user_id:
+        retval = "no user in this turn, so there is nobody a withdrawal could be for."
+        return retval
+    req = approvals.withdraw(key, channel=channel, thread_ts=thread_ts, why=why,
+                             requester=None if trusted else user_id)
     if req is None:
-        state = approvals.status(key, channel)[0]
-        if state == "held":
+        state, held = approvals.status(key, channel)
+        if (state == "pending" and held.get("thread_ts") == thread_ts
+                and held.get("requester") != user_id):
+            retval = (f"[{key}] is someone else's request, so only they or a trusted user "
+                      f"can have it withdrawn ({_trusted_tags()}). Nothing was changed.")
+        elif state == "held":
             retval = (f"[{key}] is being acted on by a trusted user right now, so it cannot be "
                       "withdrawn; that answer resolves it.")
         elif state == "pending":

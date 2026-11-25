@@ -429,7 +429,7 @@ def retry_delay(key):
     return retval
 
 
-def withdraw(key, channel=None, thread_ts=None, why="its card could not be posted"):
+def withdraw(key, channel=None, thread_ts=None, why="its card could not be posted", requester=None):
     """Slack rejected the card itself: drop the request unrun (#356).
 
     unsurface() retries on the next mention, and a card Slack rejects is
@@ -451,13 +451,18 @@ def withdraw(key, channel=None, thread_ts=None, why="its card could not be poste
     one does. That caller passes `channel` and `thread_ts`, and only a request
     parked in that very thread is withdrawn -- not another thread's, and not
     one with no thread, which counts against every thread in the channel and
-    so belongs to none of them in particular."""
+    so belongs to none of them in particular. `requester`, when given, must be
+    whose task the request is: an untrusted participant could otherwise drop
+    someone else's request, which is a deny without the trusted-user gate
+    deny_command has (#350 review). The caller passes None for a trusted user.
+    Checked here, under the lock, with the rest of the match."""
     with _LOCK:
         k = canonical(key)
         req = _PENDING.get(k)
         if req is not None and channel is not None and (
                 req.get("channel") != channel or req.get("thread_ts") is None
-                or req.get("thread_ts") != thread_ts):
+                or req.get("thread_ts") != thread_ts
+                or (requester is not None and req.get("requester") != requester)):
             req = None
         if req is None:
             retval = None

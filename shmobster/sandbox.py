@@ -334,6 +334,26 @@ def profile(pol):
         ))
         + ")"
     )
+    # The state file's interprocess lock (#440): neither readable nor writable.
+    # flock needs only an open descriptor, and a read-only one will do, so a
+    # write deny alone would still let a command hold the lock -- and every
+    # state write fails closed while it does. Verified on Darwin 25: with this
+    # literal denied, opening it with "r" or "a" and flocking, `ln` (hard) to
+    # it, opening it through a symlink, and `mv` of it all fail with
+    # "Operation not permitted". Both spellings: the path as state.py opens it
+    # (its directory resolved) and its realpath, which differ only when the
+    # lock is itself a symlink. After every allow above, so none re-opens it.
+    from . import state  # deferred: a leaf, kept off import order
+    _lock = os.path.abspath(state.lock_path())
+    _locks = dict.fromkeys((
+        os.path.join(os.path.realpath(os.path.dirname(_lock)), os.path.basename(_lock)),
+        os.path.realpath(_lock),
+    ))
+    lines.append(
+        "(deny file-read* file-write* "
+        + " ".join(f"(literal {_quote(p)})" for p in _locks)
+        + ")"
+    )
     if excludes:
         lines.append(
             "(deny file-read* file-write* "

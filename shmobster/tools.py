@@ -393,10 +393,39 @@ def capabilities(policy, channel=None):
             "node), and anything naming a repo this channel does not have."
         )
     else:
+        # Named from grant.py's own sets, not summarised as "read-only
+        # commands" (#292): a model told that planned `gh api` and a
+        # `python3 -c` fetch as reads, and both parked. Only what the grant
+        # layer can vouch for runs uncarded; the classifier never grants.
         lines.append(
-            "- runs with no approval card: read-only commands; writes inside the tree "
-            f"({_listed(sorted(grant.FS_VERBS), 'none')}); a commit on a worktree branch "
-            "you authored. Everything else parks for a trusted user to approve by id."
+            "- runs with no approval card: only what the grant layer can vouch for, "
+            "which is narrower than \"any read-only command\". Reads: "
+            f"{_listed(sorted(grant.READ_VERBS), 'none')}; "
+            f"{_listed(sorted(grant.FLAG_CHECKED_READS), 'none')} unless a flag writes "
+            "or runs something; git "
+            f"{_listed(sorted(grant.GIT_READ), 'none')}, branch/remote/worktree "
+            "listings and config lookups; gh "
+            f"{'|'.join(sorted(grant.GH_READ_NOUNS))} "
+            f"{'|'.join(sorted(grant.GH_READ_ACTIONS))} and gh auth status; aws "
+            f"{'|'.join(p + '*' for p in grant.AWS_READ_PREFIXES)} and ls, except "
+            "operations that return a secret or write a file; npm "
+            f"{'|'.join(sorted(grant.NPM_READS))}; brew list --versions; "
+            + ("vercel commands within this channel's vercel grant; " if policy.get("vercel") else "")
+            + "curl to a host in the "
+            "network list above, printing to stdout. Writes inside the tree "
+            f"({_listed(sorted(grant.FS_VERBS), 'none')}); git add, mv and stash; a new "
+            "branch (checkout -b, switch -c); a commit on a worktree branch you "
+            "authored -- and if this channel has a check command, only when that "
+            "check was the last shell command to run in this thread and passed. "
+            "What still parks even when it only reads: gh api; any "
+            "interpreter (sh, bash, python3, node), whatever host it reaches -- the "
+            "only exceptions are a bare version flag on "
+            f"{'|'.join(sorted(grant._VERSION_ONLY))}, and node --check on one "
+            "file; wget, git fetch/pull/push/clone, "
+            "and any fetch other than web_fetch or that curl, including to the hosts "
+            "listed above; a read whose output is redirected to a file; and every "
+            "command not named here. A command runs uncarded only if every part of "
+            "it does; anything that parks waits for a trusted user to approve it by id."
         )
     lines.append(
         "- always enforced: commands run under a sandbox confined to this tree, "

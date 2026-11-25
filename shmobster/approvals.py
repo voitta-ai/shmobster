@@ -329,15 +329,22 @@ def pending_in(channel, thread_ts):
 
 
 def pending_ids(channel, thread_ts):
-    """The ids pending_in() counts, oldest first (#350). For the note a human
-    reads when a resolved request is still waiting on others: a count alone
-    could not show that the one left is a request the agent already
-    abandoned. Not for the model's tool loop -- an id it was never shown is
-    an id it could act on without a human having quoted it (#109)."""
+    """The ids of the requests parked in exactly this thread, oldest first
+    (#350). For the note a human reads when a resolved request is still
+    waiting on others: a count alone could not show that the one left is a
+    request the agent already abandoned. Not for the model's tool loop -- an
+    id it was never shown is an id it could act on without a human having
+    quoted it (#109).
+
+    A request with no thread is counted by pending_in() but not named here
+    (#350 review): it would be named in every thread of the channel, and
+    approving is channel-scoped, so a thread that never saw its card would be
+    handed an id it could approve."""
     with _LOCK:
         retval = [k for k, req in _PENDING.items()
                   if req.get("channel") == channel
-                  and req.get("thread_ts") in (thread_ts, None)]
+                  and req.get("thread_ts") is not None
+                  and req.get("thread_ts") == thread_ts]
     return retval
 
 

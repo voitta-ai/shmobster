@@ -328,6 +328,30 @@ def pending_in(channel, thread_ts):
     return retval
 
 
+def pending_ids(channel, thread_ts):
+    """The ids of the requests parked in exactly this thread, oldest first
+    (#350). For the note a human reads when a resolved request is still
+    waiting on others: a count alone could not show that the one left is a
+    request the agent already abandoned. Not for the model's tool loop -- an
+    id it was never shown is an id it could act on without a human having
+    quoted it (#109).
+
+    A request with no thread is counted by pending_in() but not named here
+    (#350 review): it would be named in every thread of the channel, and
+    approving is channel-scoped, so a thread that never saw its card would be
+    handed an id it could approve. Nor is one whose card is not up -- not yet
+    posted, or failed and waiting out its backoff (unsurface() clears the
+    flag): its id would be approvable by typing it, without the card that
+    shows the command and why it parked."""
+    with _LOCK:
+        retval = [k for k, req in _PENDING.items()
+                  if req.get("channel") == channel
+                  and req.get("thread_ts") is not None
+                  and req.get("thread_ts") == thread_ts
+                  and req.get("surfaced")]
+    return retval
+
+
 def claim_unsurfaced(channel, thread_ts=None):
     """Requests in this channel that no ingest has rendered yet, marked as
     surfaced so a second call (or a second reply in the same thread) doesn't
@@ -416,7 +440,7 @@ def retry_delay(key):
     return retval
 
 
-def withdraw(key):
+def withdraw(key, channel=None, thread_ts=None, why="its card could not be posted", requester=None):
     """Slack rejected the card itself: drop the request unrun (#356).
 
     unsurface() retries on the next mention, and a card Slack rejects is
@@ -431,15 +455,31 @@ def withdraw(key):
     is left to that surface. Logged before the delete, like acquire(), so a
     fail-closed scrub leaves the request parked rather than gone unrecorded.
     Returns the request, or None when there was nothing to withdraw. Nothing
-    here runs the command."""
+    here runs the command.
+
+    The agent withdraws its own request too, when it has superseded it (#350):
+    a request it abandoned holds the thread's resume exactly as an invisible
+    one does. That caller passes `channel` and `thread_ts`, and only a request
+    parked in that very thread is withdrawn -- not another thread's, and not
+    one with no thread, which counts against every thread in the channel and
+    so belongs to none of them in particular. `requester`, when given, must be
+    whose task the request is: an untrusted participant could otherwise drop
+    someone else's request, which is a deny without the trusted-user gate
+    deny_command has (#350 review). The caller passes None for a trusted user.
+    Checked here, under the lock, with the rest of the match."""
     with _LOCK:
         k = canonical(key)
         req = _PENDING.get(k)
+        if req is not None and channel is not None and (
+                req.get("channel") != channel or req.get("thread_ts") is None
+                or req.get("thread_ts") != thread_ts
+                or (requester is not None and req.get("requester") != requester)):
+            req = None
         if req is None:
             retval = None
         else:
-            logging.info("approvals: withdrew [%s] in %s, its card could not be posted: %s",
-                         k, req.get("channel"), repr(redact.scrub(req["command"])))
+            logging.info("approvals: withdrew [%s] in %s (%s): %s",
+                         k, req.get("channel"), repr(redact.scrub(why)), repr(redact.scrub(req["command"])))
             del _PENDING[k]
             retval = req
     return retval

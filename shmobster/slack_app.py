@@ -286,7 +286,7 @@ def _post_pending(client, channel, thread_ts):
             if slack_blocks.needs_full_reply(req["command"]) and not req.get("full_posted"):
                 req["full_link"] = _post_full_command(client, channel, thread_ts, req_id, req["command"])
                 req["full_posted"] = True
-            client.chat_postMessage(
+            resp = client.chat_postMessage(
                 channel=channel,
                 thread_ts=thread_ts,
                 # A parked command is echoed verbatim, and a credential rides
@@ -294,6 +294,11 @@ def _post_pending(client, channel, thread_ts):
                 text=redact.scrub(slack_blocks.approval_text(req_id, req)),
                 blocks=slack_blocks.approval(req_id, req),
             )
+            # Kept so a withdrawal can retire this card in place (#350).
+            try:
+                req["card_ts"] = resp.get("ts") if resp is not None else None
+            except Exception:  # noqa: BLE001 -- only the in-place rewrite is lost
+                req["card_ts"] = None
         except Exception as exc:
             logging.exception("could not post approval buttons for %s", req_id)
             _card_failed(client, channel, thread_ts, req_id, exc)
@@ -479,20 +484,28 @@ def _resume_thread(client, channel, thread_ts, req_id, req, approved, result, us
             # or already resuming" -- to a file, which is the one reader that
             # does not need to know, while the thread showed a command running
             # and then nothing, which reads as a task that died.
+            pending = approvals.pending_ids(channel, thread_ts)
             waiting = approvals.pending_in(channel, thread_ts)
             if waiting:
                 # Read after the fact, so it can be off by one if a click lands
-                # in between. It is a sentence telling a human roughly how many
-                # cards to clear, not a control decision -- begin_resume makes
-                # that one, under a lock.
+                # in between. It is a sentence telling a human which cards to
+                # clear, not a control decision -- begin_resume makes that one,
+                # under a lock. The ids are named (#350): a count could not show
+                # that the one left is a request the agent already replaced.
                 _plural = "s" if waiting > 1 else ""
+                # A request with no thread, or whose card is not up, is counted,
+                # never named (#350 review).
+                _named = ", ".join([f"[{k}]" for k in pending]
+                                   + ([f"{waiting - len(pending)} whose card is not shown here"]
+                                      if waiting > len(pending) else []))
                 try:
                     client.chat_postMessage(
                         channel=channel, thread_ts=thread_ts,
                         text=(f":hourglass: [{req_id}] is resolved, and this task is "
                               f"waiting on {waiting} more request{_plural} in this "
-                              f"thread. It continues on its own once the last one is "
-                              f"approved or denied -- no need to re-mention me."),
+                              f"thread: {_named}. It continues on its own once the last "
+                              f"one is approved or denied -- no need to re-mention me. "
+                              f"If one of them is stale, ask me to withdraw it."),
                     )
                 except Exception:
                     logging.exception("could not report the remaining parked count")

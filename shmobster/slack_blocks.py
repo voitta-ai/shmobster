@@ -255,6 +255,19 @@ def expired(req_id, message, stale_boot):
     return retval
 
 
+def withdrawn(req_id, req, note):
+    """The card a request leaves behind once the agent withdrew it (#350): the
+    approval card without its buttons, so the command stays readable (#94),
+    and the reason underneath."""
+    kept = [b for b in approval(req_id, req) if b.get("type") != "actions"]
+    kept.append({
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": redact.scrub(f":no_entry_sign: [{req_id}] {escape(note)}")}],
+    })
+    retval = kept
+    return retval
+
+
 def proposal(key, prop, tags):
     """The "worth a skill?" card (#129): the agent's flag, tagging the trusted
     users who may act on it, with Open PR / Decline. Same shape as the

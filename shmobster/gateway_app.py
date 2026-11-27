@@ -27,15 +27,21 @@ import hashlib
 import json
 import logging
 import mimetypes
+import os
 import re
+import stat
+import struct
+import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
-from . import admin_tools, approvals, attachments, config, gateway_text, handler, identity, policy, proposals, redact, state
+from . import admin_tools, approvals, attachments, config, gateway_text, handler, identity, policy, proposals, redact, sandbox, spine, state
 from .surface import Surface
 
 _THREAD = "main"            # Signal has no threads: a conversation is one thread
@@ -215,7 +221,7 @@ def unsigned(text):
     return retval
 
 
-def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
+def send(channel, markdown, reply_to=None, key=None, raw=None, force=False, files=None):
     """Post a Markdown reply as final text, split to Signal's limit. Returns
     "ok", "retry" (may pass), "rejected" (the gateway refused it for good) or
     "withheld" (the group is not closed; see below).
@@ -223,7 +229,9 @@ def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
     agent's: the gateway routes the answer to a quote back to whoever sent the
     quoted message. With `key`, each piece is idempotent, so posting the same
     thing again does not repeat the pieces that already went out. With `raw`,
-    a (text, styles) pair is sent exactly as given: no Markdown is read.
+    a (text, styles) pair is sent exactly as given: no Markdown is read. With
+    `files` (uploaded file parts, #450), they go out with the first piece, or
+    alone when there is no text.
 
     Nothing reaches a Signal group that is not closed (CLAUDE.md), whatever the
     path -- a reply, command output after an approval, a card, an alert -- so
@@ -235,6 +243,8 @@ def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
     retval = "ok"
     if raw:
         pieces = gateway_text.raw_parts(*raw)
+    elif files and not (markdown or "").strip():
+        pieces = [list(files)]
     else:
         plain = unsigned(for_signal(markdown)).replace(_MARK, "")   # after the marker is gone
         text, ids = _to_mentions(channel, plain)
@@ -243,6 +253,8 @@ def send(channel, markdown, reply_to=None, key=None, raw=None, force=False):
         if marks != len(ids):             # rendering moved or dropped one: no mention beats a wrong one
             pieces, ids = gateway_text.parts(plain), []
         pieces = _attach_mentions(pieces, ids)
+        if files:
+            pieces[0] = pieces[0] + list(files)
     for i, parts in enumerate(pieces):
         body = {"to": _target(channel), "parts": parts}
         if reply_to and i == 0:
@@ -327,6 +339,19 @@ class GatewaySurface(Surface):
             "nothing else: tables and headings arrive as plain lines, so keep answers "
             "short and plainly laid out. There are no Slack tools here."
         )
+        if _image_root(channel)[0]:
+            retval += (" You can send an image you made (PNG, JPEG, GIF or WebP, up to "
+                       f"{attachments._MAX_BYTES // (1024 * 1024)} MB, saved inside your working "
+                       "directory) into this conversation with send_image.")
+        return retval
+
+    def tools(self, channel):
+        retval = [SEND_IMAGE] if _image_root(channel)[0] else []
+        return retval
+
+    def call_tool(self, name, args, channel):
+        retval = (send_image(channel, str(args.get("path") or ""), str(args.get("caption") or ""))
+                  if name == "send_image" else f"unknown tool: {name}")
         return retval
 
     def self_line(self):
@@ -352,6 +377,245 @@ class GatewaySurface(Surface):
 
 
 _MARK = "\ufffc"
+
+
+# ---------------------------------------------------------------- images out (#450)
+# A file sent out leaves the host, so this is a disclosure path. Images only:
+# text and PDF are refused because redaction cannot scrub a file on its way out
+# (README, bare-value redaction). An image header is not enough -- one in front
+# of a token is still the token -- so the file is decoded and re-encoded as a
+# fresh PNG (macOS's sips), and only the chunks that hold pixels are kept:
+# no metadata, no text chunks, nothing after the image. The file must sit
+# in this conversation's own tree -- its own cwd and that cwd's worktrees, the
+# part of what the sandbox lets it write that no other conversation shares --
+# after every symlink is resolved, and outside shmobster's own files and the
+# policy's `exclude`. Capped like inbound attachments. The post goes through
+# send(), so a group that is not closed gets no file either.
+
+SEND_IMAGE = {
+    "type": "function",
+    "function": {
+        "name": "send_image",
+        "description": (
+            "Send an image file you made into this conversation, with an optional "
+            "caption. PNG, JPEG, GIF or WebP only, recognised by content, up to the "
+            "same size as an attached image, and the file must be inside your "
+            "working directory. It goes out re-encoded as a PNG, without metadata. "
+            "Returns whether it was sent; on 'could not send', "
+            "say so rather than claiming the image went out."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "The image file, absolute or relative to your working directory."},
+                "caption": {"type": "string", "description": "Optional text sent with the image."},
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+_SIPS = "/usr/bin/sips"
+_PNG_KEEP = (b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND")
+_PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+_PNG_MAX_PIXEL_BYTES = 128 * 1024 * 1024   # decoded size: a 5 MB file must not inflate to gigabytes here
+
+
+def _looks_like_image(blob):
+    """Whether the bytes start like a PNG, JPEG, GIF or WebP. Only a first
+    filter: _reencode is what decides."""
+    retval = blob.startswith(_IMAGE_MAGIC) or (blob[:4] == b"RIFF" and blob[8:12] == b"WEBP")
+    return retval
+
+
+def _reencode(blob):
+    """(png, None): the image decoded and written afresh as a PNG holding only
+    its pixels, or (None, why)."""
+    if not os.path.exists(_SIPS):
+        return None, "this host cannot re-encode images (no sips)"
+    with tempfile.TemporaryDirectory(prefix="shmobster-img-") as tmp:
+        src, dst = os.path.join(tmp, "in"), os.path.join(tmp, "out.png")
+        with open(src, "wb") as fh:
+            fh.write(blob)
+        try:
+            proc = subprocess.run([_SIPS, "-s", "format", "png", src, "--out", dst],
+                                  capture_output=True, timeout=30, env={"PATH": "/usr/bin:/bin"})
+        except subprocess.TimeoutExpired:
+            return None, "decoding the image timed out"
+        if proc.returncode != 0 or not os.path.isfile(dst):
+            return None, "it is not a decodable image"
+        with open(dst, "rb") as fh:
+            png = fh.read(attachments._MAX_BYTES + 1)
+    if len(png) > attachments._MAX_BYTES:
+        return None, f"larger than the {attachments._MAX_BYTES} byte cap once re-encoded as PNG"
+    retval = _png_pixels_only(png)
+    return retval
+
+
+def _png_pixels_only(png):
+    """(png, None) with every chunk but the pixel-bearing ones dropped -- sips
+    carries text metadata across -- after checking each CRC and that the image
+    data inflates to exactly what the header says. (None, why) otherwise."""
+    bad = (None, "the re-encoded image did not check out")
+    if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+        return bad
+    out, at, idat, head = [png[:8]], 8, [], None
+    while at + 12 <= len(png):
+        n = struct.unpack(">I", png[at:at + 4])[0]
+        kind, data = png[at + 4:at + 8], png[at + 8:at + 8 + n]
+        if len(data) != n or png[at + 8 + n:at + 12 + n] != struct.pack(">I", zlib.crc32(kind + data)):
+            return bad
+        if kind in _PNG_KEEP:
+            out.append(png[at:at + 12 + n])
+        if kind == b"IHDR":
+            head = data
+        elif kind == b"IDAT":
+            idat.append(data)
+        at += 12 + n
+        if kind == b"IEND":
+            break
+    else:
+        return bad
+    if head is None or len(head) != 13 or not idat:
+        return bad
+    width, height, depth, color, _, _, interlace = struct.unpack(">IIBBBBB", head)
+    if interlace or color not in _PNG_CHANNELS:
+        return bad
+    row = (width * _PNG_CHANNELS[color] * depth + 7) // 8 + 1
+    if height * row > _PNG_MAX_PIXEL_BYTES:
+        return None, "the image is too large once decoded"
+    try:
+        inflater = zlib.decompressobj()
+        pixels = inflater.decompress(b"".join(idat), height * row + 1)
+    except zlib.error:
+        return bad
+    if len(pixels) != height * row or not inflater.eof or inflater.unused_data:
+        return bad
+    retval = (b"".join(out), None)
+    return retval
+
+
+def _image_root(channel):
+    """(this conversation's own cwd as a realpath, None), or (None, why) when
+    it has none to send from. The same rule as saving an attachment: a cwd
+    shared with other conversations, or inside shmobster's own files, is not
+    this conversation's to send from."""
+    try:
+        root, why = attachments.save_root(channel)
+    except Exception:  # noqa: BLE001 -- fail closed
+        logging.exception("gateway: could not resolve the image root for %s", channel)
+        root, why = None, "its working directory could not be resolved"
+    retval = (os.path.realpath(root), None) if root else (None, why)
+    return retval
+
+
+def _open_under(tree, rel):
+    """A read fd for `rel` inside `tree`, opened one component at a time from
+    the tree's own fd, none of them followed if it is a link. `rel` came from a
+    realpath, so it held no link when checked; a directory or file swapped for
+    one since then fails here (ELOOP or ENOTDIR) instead of leading out."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    fd = os.open(tree, flags | os.O_DIRECTORY)
+    try:
+        *dirs, leaf = rel.split(os.sep)
+        for name in dirs:
+            nxt = os.open(name, flags | os.O_DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        retval = os.open(leaf, flags | getattr(os, "O_NONBLOCK", 0), dir_fd=fd)
+    finally:
+        os.close(fd)
+    return retval
+
+
+def _image_file(channel, path):
+    """((bytes, mime, filename), None) for an image this conversation may
+    send, or (None, why) when it may not."""
+    root, why = _image_root(channel)
+    if root is None:
+        return None, f"this conversation cannot send files: {why}"
+    raw = os.path.expanduser(str(path or "").strip())
+    if not raw:
+        return None, "no path given"
+    real = os.path.realpath(raw if os.path.isabs(raw) else os.path.join(root, raw))
+    tree = next((t for t in (root, root + ".worktrees") if sandbox._under(real, t) and real != t), None)
+    if tree is None:
+        return None, "the file is outside this conversation's working directory (after resolving links)"
+    pol = policy.resolve(channel)
+    banned = [sandbox._real(p, root) for p in (pol.get("exclude") or [])] + sandbox.self_roots()
+    if any(sandbox._under(real, b) for b in banned) or real in {
+            os.path.realpath(p) for p in tuple(config.SELF_FILES) + tuple(spine.files())}:
+        return None, "that file is off-limits in this conversation"
+    try:
+        fd = _open_under(tree, os.path.relpath(real, tree))
+    except OSError as exc:
+        return None, f"cannot open it ({exc.strerror or type(exc).__name__})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, "not a regular file"
+        if st.st_size > attachments._MAX_BYTES:
+            return None, f"larger than the {attachments._MAX_BYTES} byte cap"
+        with os.fdopen(fd, "rb") as fh:
+            fd = None
+            blob = fh.read(attachments._MAX_BYTES + 1)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    if len(blob) > attachments._MAX_BYTES:
+        return None, f"larger than the {attachments._MAX_BYTES} byte cap"
+    if not _looks_like_image(blob):
+        return None, "not a PNG, JPEG, GIF or WebP image by its content; only images can be sent"
+    png, why = _reencode(blob)
+    if png is None:
+        return None, why
+    # A fixed name: the source's own name is unscrubbed text and would go out too.
+    retval = ((png, "image/png", "image.png"), None)
+    return retval
+
+
+def _upload(blob, mime, filename):
+    """Store a file on the gateway; its file part. No redirect is followed, so
+    the bearer goes to the configured gateway only."""
+    req = urllib.request.Request(
+        config.GATEWAY_URL.rstrip("/") + "/v1/attachments", data=blob, method="POST",
+        headers={"Authorization": f"Bearer {config.GATEWAY_TOKEN}", "Content-Type": mime,
+                 "X-Filename": filename})
+    with _FILE_OPENER.open(req, timeout=60) as resp:
+        part = json.loads(resp.read() or b"{}")
+    if not (isinstance(part, dict) and isinstance(part.get("attachment_id"), str) and part["attachment_id"]):
+        raise ValueError("the gateway's answer had no attachment id")
+    retval = {"type": "file", "attachment_id": part["attachment_id"]}
+    return retval
+
+
+def send_image(channel, path, caption=""):
+    """The send_image tool: a status line for the model, never raising."""
+    image, why = _image_file(channel, path)
+    if image is None:
+        return f"could not send: {why}"
+    blob, mime, filename = image
+    if _group(channel) is not None and not _may_post(channel):
+        return "could not send: this group is not closed, so nothing is posted to it"
+    try:
+        part = _upload(blob, mime, filename)
+    except urllib.error.HTTPError as exc:
+        logging.warning("gateway: upload to %s refused: %s %s", channel, exc.code, _error_code(exc))
+        return f"could not send: the gateway refused the upload ({exc.code})"
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("gateway: upload to %s failed: %s", channel, type(exc).__name__)
+        return f"could not send: the upload failed ({type(exc).__name__})"
+    outcome = send(channel, redact.scrub(caption or ""), files=[part])
+    if outcome != "ok":
+        why = {"withheld": "this group is not closed, so nothing is posted to it",
+               "rejected": "the gateway refused the message",
+               "retry": ("the gateway did not confirm the message, so it may or may not have "
+                         "arrived; ask before sending it again")}
+        return f"could not send: {why.get(outcome, outcome)}"
+    retval = f"sent {filename} ({len(blob)} bytes, {mime}) into this conversation"
+    return retval
 
 
 # ---------------------------------------------------------------- groups

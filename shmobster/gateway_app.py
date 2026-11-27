@@ -571,8 +571,8 @@ def _image_file(channel, path):
     png, why = _reencode(blob)
     if png is None:
         return None, why
-    name = os.path.splitext(os.path.basename(real))[0] + ".png"
-    retval = ((png, "image/png", name), None)
+    # A fixed name: the source's own name is unscrubbed text and would go out too.
+    retval = ((png, "image/png", "image.png"), None)
     return retval
 
 
